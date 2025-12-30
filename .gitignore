@@ -1,0 +1,19 @@
+# Single local config file
+tf.yml
+
+# Generated artifacts
+artifacts/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.dist/
+dist/
+build/
+
+# OS
+.DS_Store

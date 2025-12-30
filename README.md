@@ -86,3 +86,75 @@ Near-term intended contents include:
 - model/LLM deployment conventions (Ollama-managed)
 - agent/workflow conventions (including optional n8n patterns)
 - a skills registry format + examples
+
+## Localhost Mini App (restricted, no DB)
+
+This repo currently contains a minimal vertical slice:
+
+- `GET /health` (public)
+- `GET /mini-app/` (static Mini App)
+- `POST /api/mini-app/me` (Telegram initData auth + admin allowlist)
+- `POST /api/mini-app/status` (live reachability checks from inventory)
+
+### Quickstart (localhost)
+
+1. Create `tf.yml` (kept out of git; it’s ignored by default):
+
+```yaml
+server:
+  bind: 127.0.0.1
+  port: 8000
+  reload: true
+
+telegram:
+  bot_token: "..."
+
+access:
+  admin_telegram_ids:
+    - 123
+
+mini_app_url: http://127.0.0.1:8000/mini-app/
+
+settings:
+  ssh:
+    connect_timeout_seconds: 1.0
+    batch_mode: true
+  monitor:
+    ssh_port: 22
+    ollama_port: 11434
+  hosts_sync:
+    managed_block_start: "# BEGIN thunder-forge"
+    managed_block_end: "# END thunder-forge"
+
+nodes:
+  - name: msm1
+    ssh_user: you
+    wifi_ip: 192.168.1.101
+    service_manager: brew
+    # tb_ip: 172.16.10.2
+```
+
+2. Run:
+
+  - `make sync`
+  - `make serve`
+
+The server binds to `127.0.0.1:8000` by default.
+
+### Notes
+
+- This is intentionally **restricted**: if your Telegram user ID is not listed in `tf.yml` (`access.admin_telegram_ids`), the Mini App API returns `403`.
+- No DB is used; all state is computed on-demand from `tf.yml`.
+
+## Thunderbolt + hosts setup (script)
+
+This repo includes a KISS setup script that uses `tf.yml` to:
+
+- configure Thunderbolt Bridge IPv4 on each node (via SSH + `networksetup` on macOS)
+- generate a managed `/etc/hosts` block and push it to all nodes
+
+Commands:
+
+- `make setup-env` (configures Thunderbolt bridge IPs; requires `tbnet` section per node)
+- `make hosts` (writes `artifacts/hosts.block`)
+- `make push-hosts` (writes `artifacts/hosts.block` and updates `/etc/hosts` on all nodes)
