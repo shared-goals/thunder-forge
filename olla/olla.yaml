@@ -1,0 +1,152 @@
+# Olla Configuration (default)
+server:
+  host: "0.0.0.0"
+  port: 40114 # default port for Olla - 4-OLLA
+  read_timeout: 20s
+  write_timeout: 0s # for LLMs streaming, leave this as 0s
+  shutdown_timeout: 10s # Graceful shutdown timeout, increase this for heavy sites that have long-running requests or lots of endpoints (30s is a good)
+  request_logging: true # logs Http Requests, may be useful for debugging, noise for other use cases
+  request_limits:
+    max_body_size: 52428800  # 50MB
+    max_header_size: 524288  # 512KB
+  rate_limits:
+    global_requests_per_minute: 1000
+    per_ip_requests_per_minute: 100
+    health_requests_per_minute: 1000
+    burst_size: 50
+    per_endpoint:
+      default_requests_per_minute: 200
+    cleanup_interval: 5m
+    trust_proxy_headers: false
+    trusted_proxy_cidrs: [
+      "127.0.0.0/8",
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16"
+    ]
+
+proxy:
+  engine: "olla" # Available: sherpa, olla
+  # Profile controls proxy engine (http) transport buffer behaviour
+  # - "auto": Dynamically selects based on request size, type and other factors (default)
+  # - "streaming": No buffering, tokens stream immediately, low latency & low memory usage
+  # - "standard": Normal HTTP delivery without forced flushing, suitable for REST APIs
+  profile: "auto" # Available: auto, streaming, standard
+  load_balancer: "least-connections" # Available: round-robin, least-connections, priority
+  stream_buffer_size: 8192 # Buffer size per request - larger = fewer syscalls, more memory
+  connection_timeout: 60s
+  response_timeout: 900s
+  read_timeout: 600s
+    
+  # Connection failure retry settings (applies to both Sherpa and Olla engines)
+  # When enabled, the proxy will automatically retry failed requests on other healthy endpoints
+  retry:
+    enabled: true # Enable automatic retry on connection failures
+    on_connection_failure: true # Retry when connection to backend fails (connection refused, reset, timeout)
+    max_attempts: 0 # Maximum retry attempts (0 = try all available endpoints once)
+    # Connection errors that trigger retry:
+    # - Connection refused (backend is down)
+    # - Connection reset (backend crashed)
+    # - Connection timeout (backend is overloaded)
+    # - Network unreachable (network issues)
+    # Failed endpoints are immediately marked as unhealthy and removed from the retry pool
+
+discovery:
+  type: "static"
+  refresh_interval: 30s
+  
+  # Health check and recovery settings
+  health_check:
+    initial_delay: 1s # Delay before first health check
+    # When an endpoint fails during request processing:
+    # - It's immediately marked as unhealthy
+    # - Consecutive failures increment, causing exponential backoff
+    # - Next check time = now + (consecutive_failures * 2) seconds (max 60s)
+    # - Health checker will automatically recover endpoints when they're back online
+  
+  static:
+    endpoints:
+      - url: "http://192.168.1.101:11434"
+        name: "msm1"
+        type: "ollama"
+        priority: 80               # Highest priority
+        model_url: "/api/tags"
+        health_check_url: "/"
+        check_interval: 2s
+        check_timeout: 1s
+      - url: "http://192.168.1.102:11434"
+        name: "msm2"
+        type: "ollama"
+        priority: 70
+        model_url: "/api/tags"
+        health_check_url: "/"
+        check_interval: 2s
+        check_timeout: 1s
+      - url: "http://192.168.1.103:11434"
+        name: "msm3"
+        type: "ollama"
+        priority: 70
+        model_url: "/api/tags"
+        health_check_url: "/"
+        check_interval: 2s
+        check_timeout: 1s
+      - url: "http://192.168.1.104:11434"
+        name: "msm4"
+        type: "ollama"
+        priority: 50
+        model_url: "/api/tags"
+        health_check_url: "/"
+        check_interval: 2s
+        check_timeout: 1s
+  model_discovery:
+    enabled: true
+    interval: 5m
+    timeout: 30s
+    concurrent_workers: 5
+    retry_attempts: 3
+    retry_backoff: 1s
+
+model_registry:
+  type: "memory"
+  enable_unifier: true
+
+  unification:
+    enabled: true
+    stale_threshold: 24h  # How long to keep models in memory after last seen
+    cleanup_interval: 10m  # How often to check for stale models
+  
+  # Model routing strategy (v0.0.16+)
+  # Controls how requests are routed when models aren't available on all endpoints
+  routing_strategy:
+    type: "strict"  # Options: strict, optimistic, discovery
+    options:
+      # Fallback behavior when model not found (optimistic mode)
+      fallback_behavior: "compatible_only"  # Options: compatible_only, all, none
+      
+      # Discovery mode settings
+      discovery_timeout: 2s  # Timeout for discovery refresh
+      discovery_refresh_on_miss: false  # Refresh discovery when model not found
+
+translators:
+  #####
+  # !Experimental! v0.0.20+
+  # Anthropic translation is very early stages of development, so please let us know
+  # if you come across issues or have feedback.
+  #####
+  anthropic:
+    enabled: false
+    max_message_size: 10485760  # 10MB - Anthropic API limit
+    # !! WARNING: Do not enable inspector in production without reviewing data privacy !!
+    #             Anthropic messages may contain sensitive user data.
+    #  This release is quite taxing and unoptimised, so use with caution & only for debug.
+    inspector:
+      enabled: false                          # Enable request/response logging
+      output_dir: "logs/inspector/anthropic"  # Where to write logs
+      session_header: "X-Session-ID"          # Header to use for session grouping
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, file
+
+engineering:
+  show_nerdstats: false
