@@ -140,10 +140,10 @@ verify_node() {
         errors=$((errors + 1))
     fi
 
-    if command -v vllm-mlx >/dev/null 2>&1; then
-        ok "vllm-mlx installed"
+    if uv tool list 2>/dev/null | grep -q mlx-lm; then
+        ok "mlx-lm installed (uv tool)"
     else
-        fail "vllm-mlx not found"
+        fail "mlx-lm not found — run: uv tool install mlx-lm"
         errors=$((errors + 1))
     fi
 
@@ -325,13 +325,13 @@ setup_node() {
         ok "Installed"
     fi
 
-    step "Installing vllm-mlx..."
-    if command -v vllm-mlx >/dev/null 2>&1; then
+    step "Installing mlx-lm..."
+    if uv tool list 2>/dev/null | grep -q mlx-lm; then
         ok "Already installed"
         echo "  Upgrading..."
-        uv tool upgrade --all 2>/dev/null || true
+        uv tool upgrade mlx-lm 2>/dev/null || true
     else
-        uv tool install vllm-mlx
+        uv tool install mlx-lm
         ok "Installed"
     fi
 
