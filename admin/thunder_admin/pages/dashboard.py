@@ -61,16 +61,13 @@ def render(user: dict):
 
     # Quick links
     st.subheader("Quick Links")
-    links_col1, links_col2, links_col3, links_col4 = st.columns(4)
+    links_col1, links_col2, links_col3 = st.columns(3)
     grafana = os.environ.get("GRAFANA_URL", "")
     webui = os.environ.get("OPENWEBUI_URL", "")
     litellm = os.environ.get("LITELLM_URL", "")
-    vlogs = os.environ.get("VICTORIALOGS_URL", "")
     if grafana:
         links_col1.link_button("Grafana", grafana)
     if webui:
         links_col2.link_button("Open WebUI", webui)
     if litellm:
         links_col3.link_button("LiteLLM", litellm)
-    if vlogs:
-        links_col4.link_button("Logs", vlogs)

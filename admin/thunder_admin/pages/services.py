@@ -9,8 +9,8 @@ import time
 import streamlit as st
 
 from thunder_admin import db
-from thunder_admin.checks import check_vector_status, fetch_logs, fetch_vector_logs
-from thunder_admin.deploy import ssh_exec, start_service_op
+from thunder_admin.checks import fetch_logs
+from thunder_admin.deploy import start_service_op
 from thunder_admin.tz import format_dt
 from thunder_forge.cluster.config import Node, parse_cluster_config
 
@@ -118,76 +118,6 @@ def _render_op_buttons(user: dict, config: dict) -> None:
                             st.code(logs["stderr"] or "(empty)", language="log")
                         with tab_out:
                             st.code(logs["stdout"] or "(empty)", language="log")
-
-            # Vector agent controls
-            st.markdown(f"**Vector** on {node_name}")
-
-            node_obj = cluster.nodes.get(node_name) if cluster else None
-            resolved_vector_node = None
-            if node_obj:
-                resolved_user = node_obj.user or os.environ.get("GATEWAY_SSH_USER", "")
-                resolved_vector_node = Node(
-                    ip=node_obj.ip, ram_gb=node_obj.ram_gb,
-                    user=resolved_user, role=node_obj.role,
-                )
-
-            vstatus_key = f"vector_status_{node_name}"
-            if st.button("Check Vector Status", key=f"btn_vstatus_{node_name}"):
-                if resolved_vector_node:
-                    status, msg = check_vector_status(resolved_vector_node)
-                    st.session_state[vstatus_key] = (status, msg)
-                else:
-                    st.session_state[vstatus_key] = ("error", f"Node {node_name} not found in config")
-            if vstatus_key in st.session_state:
-                vstatus, vmsg = st.session_state[vstatus_key]
-                if vstatus == "ok":
-                    st.success(vmsg)
-                else:
-                    st.error(vmsg)
-
-            tf_dir = os.environ.get("THUNDER_FORGE_DIR", "")
-            vcol1, vcol2, vcol3 = st.columns(3)
-            for vcol, label, key, func in [
-                (vcol1, "Start Vector", f"vstart_{node_name}", "start_vector"),
-                (vcol2, "Stop Vector", f"vstop_{node_name}", "stop_vector"),
-                (vcol3, "Restart Vector", f"vrestart_{node_name}", "restart_vector"),
-            ]:
-                with vcol:
-                    if st.button(label, key=key, use_container_width=True):
-                        cmd = (
-                            f"cd {tf_dir} && set -a && [ -f .env ] && . ./.env && set +a && "
-                            f"~/.local/bin/uv run python -c \""
-                            f"from thunder_forge.cluster.config import load_config; "
-                            f"from thunder_forge.cluster.deploy import {func}; "
-                            f"c, _ = load_config(); err = {func}('{node_name}', c); "
-                            f"print(err or 'ok')\""
-                        )
-                        rc, out = ssh_exec(cmd)
-                        if "ok" in out:
-                            st.success(f"{label} succeeded")
-                        else:
-                            st.error(f"{label} failed: {out}")
-
-            vlogs_key = f"data_vlogs_{node_name}"
-            with st.expander(f"Vector Logs — {node_name}"):
-                vlines = st.select_slider(
-                    "Lines", options=[100, 500, 1000, 5000], value=500,
-                    key=f"vlines_{node_name}",
-                )
-                if st.button("Fetch Logs", key=f"btn_vlogs_{node_name}"):
-                    if resolved_vector_node:
-                        st.session_state[vlogs_key] = fetch_vector_logs(resolved_vector_node, tail_lines=vlines)
-                    else:
-                        st.session_state[vlogs_key] = {
-                            "stderr": f"Node {node_name} not found in config", "stdout": "",
-                        }
-                if vlogs_key in st.session_state:
-                    vlogs = st.session_state[vlogs_key]
-                    vtab_err, vtab_out = st.tabs(["stderr", "stdout"])
-                    with vtab_err:
-                        st.code(vlogs["stderr"] or "(empty)", language="log")
-                    with vtab_out:
-                        st.code(vlogs["stdout"] or "(empty)", language="log")
 
             st.divider()
 

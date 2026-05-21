@@ -109,7 +109,6 @@ services:
       GRAFANA_URL: ${GRAFANA_URL:-}
       OPENWEBUI_URL: ${OPENWEBUI_URL:-http://localhost:8080}
       LITELLM_URL: ${LITELLM_URL:-http://localhost:4000/ui}
-      VICTORIALOGS_URL: ${VICTORIALOGS_URL:-http://localhost:9428/select/vmui}
     volumes:
       - ${GATEWAY_SSH_KEY:-~/.ssh/id_ed25519}:/ssh/id_ed25519:ro
     depends_on:
@@ -120,24 +119,6 @@ services:
       timeout: 5s
       retries: 3
 
-  victorialogs:
-    image: docker.io/victoriametrics/victoria-logs:latest
-    container_name: victorialogs
-    restart: unless-stopped
-    ports:
-      - "9428:9428"
-    volumes:
-      - victorialogs-data:/vlogs
-    command:
-      - "-storageDataPath=/vlogs"
-      - "-retentionPeriod=${VICTORIALOGS_RETENTION:-30d}"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9428/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-    networks: [infra]
-
 networks:
   infra:
     driver: bridge
@@ -145,4 +126,3 @@ networks:
 volumes:
   postgres-data:
   openwebui-data:
-  victorialogs-data:

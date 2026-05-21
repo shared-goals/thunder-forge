@@ -3,11 +3,14 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+import yaml
 
 from thunder_forge.cluster.config import Assignment, Model, ModelSource, Node, ServerArgs, load_cluster_config
-from thunder_forge.cluster.deploy import generate_plist
+from thunder_forge.cluster.deploy import deploy_node, generate_plist
 
 
 @pytest.fixture()
@@ -52,6 +55,44 @@ def test_generate_plist_uses_resolved_fields() -> None:
     assert "/Users/admin/.local/bin/mlx_lm.server" in xml_str
     assert "/opt/homebrew/bin" in xml_str
     assert "/Users/admin/logs/" in xml_str
+
+
+def test_deploy_node_disables_vector_instead_of_installing(config_path: Path) -> None:
+    """Node deploys remove old Vector agents and do not install Vector."""
+    config = load_cluster_config(config_path)
+    node = config.nodes["msm1"]
+    node.home_dir = "/Users/admin"
+    node.homebrew_prefix = "/opt/homebrew"
+
+    def fake_ssh_run(user: str, ip: str, command: str, **kwargs):
+        if "id -u" in command:
+            return SimpleNamespace(returncode=0, stdout="501\n", stderr="")
+        if command.startswith("launchctl list com.mlx-lm-"):
+            return SimpleNamespace(returncode=0, stdout='"PID" = 123;\n', stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    ok = SimpleNamespace(returncode=0, stdout="", stderr="")
+    with (
+        patch("thunder_forge.cluster.deploy.install_node_tools"),
+        patch("thunder_forge.cluster.deploy.ssh_run", side_effect=fake_ssh_run) as ssh_mock,
+        patch("thunder_forge.cluster.deploy.scp_content", return_value=ok),
+    ):
+        errors = deploy_node("msm1", config)
+
+    assert errors == []
+    commands = [call.args[2] for call in ssh_mock.call_args_list]
+    assert not any("brew install" in command and "vector" in command for command in commands)
+    assert any("launchctl bootout gui/501/com.vector" in command for command in commands)
+    assert any("rm -f ~/Library/LaunchAgents/com.vector.plist" in command for command in commands)
+
+
+def test_compose_does_not_define_victorialogs() -> None:
+    compose_path = Path(__file__).parent.parent / "docker" / "docker-compose.yml"
+    compose = yaml.safe_load(compose_path.read_text())
+    assert "victorialogs" not in compose["services"]
+    assert "victorialogs-data" not in compose.get("volumes", {})
+    admin_env = compose["services"]["admin-ui"]["environment"]
+    assert "VICTORIALOGS_URL" not in admin_env
 
 
 def test_generate_plist_non_default_homebrew() -> None:

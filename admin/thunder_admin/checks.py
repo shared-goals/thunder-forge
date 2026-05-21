@@ -153,56 +153,6 @@ def fetch_logs(node: Node, port: int, tail_lines: int = 100) -> dict[str, str]:
     return result
 
 
-def check_vector_status(node: Node) -> tuple[Literal["ok", "error"], str]:
-    """Check if Vector is running on a node via launchctl."""
-    try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        pkey = _resolve_ssh_key()
-        client.connect(
-            hostname=node.ip,
-            username=node.user,
-            pkey=pkey,
-            timeout=_SSH_TIMEOUT,
-            look_for_keys=False,
-            allow_agent=False,
-        )
-        _, stdout, _ = client.exec_command("launchctl list com.vector", timeout=_SSH_TIMEOUT)
-        output = stdout.read().decode()
-        exit_code = stdout.channel.recv_exit_status()
-        client.close()
-        if exit_code != 0 or '"PID"' not in output:
-            return ("error", "not running")
-        return ("ok", "running")
-    except Exception as e:
-        return ("error", str(e)[:120])
-
-
-def fetch_vector_logs(node: Node, tail_lines: int = 100) -> dict[str, str]:
-    """Fetch Vector's own stderr and stdout logs via SSH."""
-    result = {"stderr": "", "stdout": ""}
-    try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        pkey = _resolve_ssh_key()
-        client.connect(
-            hostname=node.ip,
-            username=node.user,
-            pkey=pkey,
-            timeout=_SSH_TIMEOUT,
-            look_for_keys=False,
-            allow_agent=False,
-        )
-        for key, suffix in [("stderr", "err"), ("stdout", "log")]:
-            path = f"~/logs/vector.{suffix}"
-            _, stdout, _ = client.exec_command(f"tail -n {tail_lines} {path} 2>&1", timeout=_SSH_TIMEOUT)
-            result[key] = stdout.read().decode()
-        client.close()
-    except Exception as e:
-        result["stderr"] = f"Failed to fetch logs: {e}"
-    return result
-
-
 def check_port(node: Node, slot: Assignment) -> CheckResult:
     """HTTP GET /v1/models with 3s timeout."""
     url = f"http://{node.ip}:{slot.port}/v1/models"

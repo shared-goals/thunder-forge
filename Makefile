@@ -4,9 +4,9 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "  sync            Update local uv environment"
-	@echo "  up              Build and start all services"
-	@echo "  down            Stop all services"
-	@echo "  restart         Stop and restart all services"
+	@echo "  up              Build and start all services, removing orphaned containers"
+	@echo "  down            Stop all services and remove orphaned containers"
+	@echo "  restart         Stop and restart all services, removing orphaned containers"
 	@echo "  ps              Show service status"
 	@echo "  logs            Show logs (optional: s=<service>)"
 	@echo "  setup-gateway   Bootstrap this machine as gateway node"
@@ -19,13 +19,13 @@ sync:
 	uv sync --upgrade
 
 up: sync
-	$(COMPOSE) up -d --build
+	$(COMPOSE) up -d --build --remove-orphans
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE) down --remove-orphans
 
 restart: sync
-	$(COMPOSE) down && $(COMPOSE) up -d --build
+	$(COMPOSE) down --remove-orphans && $(COMPOSE) up -d --build --remove-orphans
 
 ps:
 	$(COMPOSE) ps
