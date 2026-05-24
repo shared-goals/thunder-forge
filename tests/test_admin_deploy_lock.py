@@ -25,3 +25,24 @@ def test_format_lock_file():
     content = format_lock_file(12345)
     assert "PID:12345" in content
     assert "HEARTBEAT:" in content
+
+
+def test_build_gateway_command_resolves_uv_without_hardcoded_local_path():
+    from thunder_admin.deploy import build_gateway_command
+
+    command = build_gateway_command("health", "--skip-preflight", tf_dir="/home/serpo/thunder-forge")
+
+    assert "command -v uv" in command
+    assert "/opt/homebrew/bin/uv" in command
+    assert "uv_run run thunder-forge health --skip-preflight" in command
+    assert "cd /home/serpo/thunder-forge" in command
+    assert "~/.local/bin/uv" not in command
+
+
+def test_build_gateway_command_quotes_arguments():
+    from thunder_admin.deploy import build_gateway_command
+
+    command = build_gateway_command("restart-services", "--node", "node one", tf_dir="/tmp/thunder forge")
+
+    assert "cd '/tmp/thunder forge'" in command
+    assert "uv_run run thunder-forge restart-services --node 'node one'" in command

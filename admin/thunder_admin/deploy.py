@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import threading
 import time
 from datetime import UTC, datetime
@@ -10,6 +11,35 @@ from datetime import UTC, datetime
 import paramiko
 
 from thunder_admin import db
+
+_UV_RUN_FUNCTION = (
+    "uv_run() { "
+    'if command -v uv >/dev/null 2>&1; then uv "$@"; return; fi; '
+    'for candidate in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" '
+    '"/opt/homebrew/bin/uv" "/usr/local/bin/uv"; do '
+    'if [ -x "$candidate" ]; then "$candidate" "$@"; return; fi; '
+    "done; "
+    'if command -v python3 >/dev/null 2>&1 && python3 -m uv --version >/dev/null 2>&1; then '
+    'python3 -m uv "$@"; return; '
+    "fi; "
+    'if command -v python >/dev/null 2>&1 && python -m uv --version >/dev/null 2>&1; then '
+    'python -m uv "$@"; return; '
+    "fi; "
+    'echo "uv not found: install uv or add it to PATH on the gateway" >&2; '
+    "return 127; "
+    "}"
+)
+
+
+def build_gateway_command(*args: str, tf_dir: str | None = None) -> str:
+    """Build a gateway command that runs thunder-forge through the available uv."""
+    repo_dir = tf_dir or os.environ["THUNDER_FORGE_DIR"]
+    quoted_args = " ".join(shlex.quote(arg) for arg in ("run", "thunder-forge", *args))
+    return (
+        f"cd {shlex.quote(repo_dir)} && "
+        f"set -a && [ -f .env ] && . ./.env && set +a && "
+        f"{_UV_RUN_FUNCTION} && uv_run {quoted_args}"
+    )
 
 
 def _get_ssh_client() -> paramiko.SSHClient:
@@ -133,12 +163,12 @@ def run_deploy_ssh(deploy_id: int, config_yaml: str) -> None:
             f.write(config_yaml)
         sftp.close()
 
-        command = (
-            f"cd {tf_dir} && "
-            f"set -a && [ -f .env ] && . ./.env && set +a && "
-            f"~/.local/bin/uv run thunder-forge generate-config && "
-            f"~/.local/bin/uv run thunder-forge ensure-models && "
-            f"~/.local/bin/uv run thunder-forge deploy"
+        command = " && ".join(
+            [
+                build_gateway_command("generate-config", tf_dir=tf_dir),
+                build_gateway_command("ensure-models", tf_dir=tf_dir),
+                build_gateway_command("deploy", tf_dir=tf_dir),
+            ]
         )
 
         channel = client.get_transport().open_session()
@@ -180,15 +210,12 @@ def run_service_op_ssh(op_id: int, op_type: str, target_node: str | None, skip_g
     try:
         client = _get_ssh_client()
 
-        command = (
-            f"cd {tf_dir} && "
-            f"set -a && [ -f .env ] && . ./.env && set +a && "
-            f"~/.local/bin/uv run thunder-forge {op_type} --skip-preflight"
-        )
+        args = [op_type, "--skip-preflight"]
         if target_node:
-            command += f" --node {target_node}"
+            args.extend(["--node", target_node])
         if skip_gateway:
-            command += " --skip-gateway"
+            args.append("--skip-gateway")
+        command = build_gateway_command(*args, tf_dir=tf_dir)
 
         channel = client.get_transport().open_session()
         channel.exec_command(command)

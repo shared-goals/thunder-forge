@@ -8,7 +8,7 @@ import os
 import streamlit as st
 
 from thunder_admin import db
-from thunder_admin.deploy import check_gateway_connectivity, ssh_exec
+from thunder_admin.deploy import build_gateway_command, check_gateway_connectivity, ssh_exec
 from thunder_admin.tz import format_dt
 
 
@@ -50,7 +50,7 @@ def render(user: dict):
         if st.button("Check Health"):
             tf_dir = os.environ.get("THUNDER_FORGE_DIR", "")
             exit_code, output = ssh_exec(
-                f"cd {tf_dir} && ~/.local/bin/uv run thunder-forge health --skip-preflight",
+                build_gateway_command("health", "--skip-preflight", tf_dir=tf_dir),
                 timeout=60,
             )
             if exit_code == 0:
