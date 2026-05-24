@@ -3,33 +3,36 @@
 from __future__ import annotations
 
 import os
-import threading
 from contextlib import contextmanager
 from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
 
-_local = threading.local()
-
 
 def get_connection() -> psycopg.Connection:
-    """Get or create a per-thread database connection."""
-    conn = getattr(_local, "conn", None)
-    if conn is None or conn.closed:
-        database_url = os.environ["DATABASE_URL"]
-        conn = psycopg.connect(database_url, row_factory=dict_row)
-        _local.conn = conn
-    return conn
+    """Create a database connection.
+
+    Callers that use this directly own closing it. Most code should use
+    get_cursor(), which closes the connection after each operation.
+    """
+    database_url = os.environ["DATABASE_URL"]
+    return psycopg.connect(database_url, row_factory=dict_row)
 
 
 @contextmanager
 def get_cursor():
-    """Context manager that yields a cursor and commits on success."""
+    """Yield a cursor, then commit or rollback and close the connection."""
     conn = get_connection()
-    with conn.cursor() as cur:
-        yield cur
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            yield cur
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_current_config() -> dict | None:
