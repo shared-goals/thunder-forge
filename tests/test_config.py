@@ -30,8 +30,8 @@ def assignments_yaml(tmp_path: Path) -> Path:
             max_context: 131072
 
         nodes:
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
 
         assignments:
           msm1:
@@ -49,7 +49,8 @@ def test_load_cluster_config(assignments_yaml: Path) -> None:
     assert config.models["coder"].source.type == "huggingface"
     assert config.models["coder"].disk_gb == 44.8
     assert "msm1" in config.nodes
-    assert config.nodes["msm1"].ip == "192.168.1.101"
+    assert config.nodes["msm1"].host == "msm1-wifi.lan"
+    assert config.nodes["msm1"].ip == "msm1-wifi.lan"
     assert config.nodes["msm1"].role == "node"
     assert "rock" in config.nodes
     assert config.nodes["rock"].role == "gateway"
@@ -73,8 +74,8 @@ def test_load_cluster_config_user_defaults(tmp_path: Path, monkeypatch: pytest.M
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          rock: { ip: "192.168.1.61", ram_gb: 32, role: gateway }
-          msm1: { ip: "192.168.1.101", ram_gb: 128, role: node }
+          rock: { host: "rock.lan", ram_gb: 32, role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
         assignments:
           msm1:
             - model: coder
@@ -95,8 +96,8 @@ def test_load_cluster_config_role_migration(tmp_path: Path) -> None:
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: infra }
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: inference }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: infra }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: inference }
         assignments:
           msm1:
             - model: coder
@@ -128,7 +129,7 @@ def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.M
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, role: node }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
         assignments:
           msm1:
             - model: coder
@@ -158,8 +159,8 @@ def overloaded_yaml(tmp_path: Path) -> Path:
             max_context: 32768
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -194,8 +195,8 @@ def multi_model_yaml(tmp_path: Path) -> Path:
             max_context: 131072
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -226,8 +227,8 @@ def test_validate_memory_uses_ram_gb_override(tmp_path: Path) -> None:
             serving: cli
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -250,7 +251,7 @@ def test_generate_litellm_config_basic(assignments_yaml: Path) -> None:
     entry = parsed["model_list"][0]
     assert entry["model_name"] == "coder"
     assert entry["litellm_params"]["model"] == "openai/mlx-community/Qwen3-Coder-Next-4bit"
-    assert entry["litellm_params"]["api_base"] == "http://192.168.1.101:8000/v1"
+    assert entry["litellm_params"]["api_base"] == "http://msm1-wifi.lan:8000/v1"
     assert entry["litellm_params"]["api_key"] == "none"
     assert entry["litellm_params"]["max_input_tokens"] == 131072
     assert entry["litellm_params"]["max_output_tokens"] == 16384
@@ -283,8 +284,8 @@ def test_generate_litellm_config_embedding_slot(tmp_path: Path) -> None:
             serving: embedding
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -303,7 +304,7 @@ def test_generate_litellm_config_embedding_slot(tmp_path: Path) -> None:
     assert "embedding" in names
     emb_entry = next(e for e in parsed["model_list"] if e["model_name"] == "embedding")
     assert emb_entry["litellm_params"]["model"] == "openai/test/embedding-model"
-    assert emb_entry["litellm_params"]["api_base"] == "http://192.168.1.101:8000/v1"
+    assert emb_entry["litellm_params"]["api_base"] == "http://msm1-wifi.lan:8000/v1"
 
 
 def test_generate_litellm_config_skips_cli_serving(tmp_path: Path) -> None:
@@ -317,8 +318,8 @@ def test_generate_litellm_config_skips_cli_serving(tmp_path: Path) -> None:
             serving: cli
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -365,8 +366,8 @@ def test_generate_litellm_config_litellm_params_override(tmp_path: Path) -> None
               rpm: 100
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -400,8 +401,8 @@ def test_generate_litellm_config_litellm_params_partial(tmp_path: Path) -> None:
               max_output_tokens: 65536
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -533,8 +534,8 @@ def test_generate_litellm_config_model_info(tmp_path: Path) -> None:
               supports_function_calling: true
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -568,8 +569,8 @@ def test_generate_litellm_config_no_model_info(tmp_path: Path) -> None:
             max_context: 131072
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:
@@ -599,8 +600,8 @@ def test_generate_litellm_config_new_litellm_params(tmp_path: Path) -> None:
               seed: 42
 
         nodes:
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
 
         assignments:
           msm1:

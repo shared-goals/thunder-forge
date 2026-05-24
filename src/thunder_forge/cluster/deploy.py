@@ -121,14 +121,14 @@ def _build_chat_args(model: Model, slot: Assignment, home: str) -> list[str]:
     return args
 
 
-def _build_embedding_args(model: Model, slot: Assignment, home: str) -> list[str]:
-    """Build ProgramArguments for mlx-openai-server (embedding models)."""
+def _build_mlx_openai_server_args(model: Model, slot: Assignment, home: str, model_type: str) -> list[str]:
+    """Build ProgramArguments for mlx-openai-server."""
     server_path = f"{home}/.local/bin/mlx-openai-server"
     args = [
         server_path,
         "launch",
         "--model-type",
-        "embeddings",
+        model_type,
         "--model-path",
         model.source.repo,
         "--port",
@@ -142,6 +142,16 @@ def _build_embedding_args(model: Model, slot: Assignment, home: str) -> list[str
     return args
 
 
+def _build_embedding_args(model: Model, slot: Assignment, home: str) -> list[str]:
+    """Build ProgramArguments for mlx-openai-server embedding models."""
+    return _build_mlx_openai_server_args(model, slot, home, "embeddings")
+
+
+def _build_mlx_openai_lm_args(model: Model, slot: Assignment, home: str) -> list[str]:
+    """Build ProgramArguments for mlx-openai-server LM models."""
+    return _build_mlx_openai_server_args(model, slot, home, "lm")
+
+
 def generate_plist(
     model: Model,
     slot: Assignment,
@@ -153,6 +163,8 @@ def generate_plist(
 
     if model.serving == ServingMode.EMBEDDING:
         program_args = _build_embedding_args(model, slot, home)
+    elif model.serving == ServingMode.MLX_OPENAI_SERVER:
+        program_args = _build_mlx_openai_lm_args(model, slot, home)
     else:
         program_args = _build_chat_args(model, slot, home)
 
@@ -355,30 +367,42 @@ def deploy_node(
         plist_name = f"com.mlx-lm-{slot.port}.plist"
         remote_plist = f"~/Library/LaunchAgents/{plist_name}"
 
+        label = f"com.mlx-lm-{slot.port}"
+        domain = f"gui/{uid}"
+        plist_path = f"~/Library/LaunchAgents/{plist_name}"
+
+        # Always replace the process behind the port. A stale mlx_lm.server can answer /v1/models
+        # after the plist has changed to mlx-openai-server, producing a false healthy deploy.
+        # Remove the old plist before bootout so launchd cannot re-spawn the previous command
+        # between kill and bootstrap; then upload the new plist as the source of truth.
+        stop_cmd = f"launchctl bootout {domain}/{label} 2>/dev/null; rm -f {plist_path}"
+        ssh_run(node.user, node.ip, stop_cmd, timeout=30, shell=node.shell)
+        _kill_port(node, slot.port)
+        # launchd can need a short grace period after bootout/kill; without it, bootstrap
+        # intermittently fails with code 5 even though the plist is valid and the port is free.
+        ssh_run(node.user, node.ip, "sleep 2", timeout=5, shell=node.shell)
         result = scp_content(node.user, node.ip, plist_xml, remote_plist, shell=node.shell)
         if result.returncode != 0:
             errors.append(f"{node_name}: failed to upload {plist_name} — {(result.stderr or '').strip()}")
             continue
 
-        label = f"com.mlx-lm-{slot.port}"
-        domain = f"gui/{uid}"
-        plist_path = f"~/Library/LaunchAgents/{plist_name}"
+        bootstrap_cmd = f"launchctl bootstrap {domain} {plist_path}"
+        result = ssh_run(node.user, node.ip, bootstrap_cmd, timeout=90, shell=node.shell)
+        if result.returncode != 0:
+            first_err = (result.stderr or "").strip() + " " + (result.stdout or "").strip()
+            if "Bootstrap failed: 5" in first_err:
+                retry_cmd = f"launchctl bootout {domain}/{label} 2>/dev/null; sleep 3; {bootstrap_cmd}"
+                result = ssh_run(node.user, node.ip, retry_cmd, timeout=120, shell=node.shell)
 
-        # Try kickstart first (works if service is already registered — just restarts it)
-        result = ssh_run(node.user, node.ip, f"launchctl kickstart -kp {domain}/{label}", timeout=90, shell=node.shell)
         launch_failed = False
         if result.returncode != 0:
-            # Service not registered yet — bootout (cleanup) + sleep + bootstrap (register fresh)
-            cmd = f"launchctl bootout {domain}/{label} 2>/dev/null; sleep 2; launchctl bootstrap {domain} {plist_path}"
-            result = ssh_run(node.user, node.ip, cmd, timeout=90, shell=node.shell)
-            if result.returncode != 0:
-                err = (result.stderr or "").strip() + " " + (result.stdout or "").strip()
-                errors.append(
-                    f"{node_name}: failed to start service on port {slot.port}\n"
-                    f"  error: {err.strip()}\n"
-                    f"  → Try: thunder-forge deploy --node {node_name}"
-                )
-                launch_failed = True
+            err = (result.stderr or "").strip() + " " + (result.stdout or "").strip()
+            errors.append(
+                f"{node_name}: failed to start service on port {slot.port}\n"
+                f"  error: {err.strip()}\n"
+                f"  → Inspect: launchctl print {domain}/{label}; plutil -lint {plist_path}"
+            )
+            launch_failed = True
 
         if not launch_failed:
             # Verify launchd actually registered the service (catches silent failures and immediate crashes)
@@ -444,20 +468,31 @@ def restart_litellm(config: ClusterConfig) -> bool:
     return result.returncode == 0
 
 
-def health_poll(ip: str, port: int, *, timeout_secs: int = 300, interval: int = 5) -> bool:
+def health_poll(
+    ip: str,
+    port: int,
+    *,
+    model: Model | None = None,
+    timeout_secs: int = 300,
+    interval: int = 5,
+) -> bool:
     import time
     import urllib.error
     import urllib.request
 
-    url = f"http://{ip}:{port}/v1/models"
+    urls = [f"http://{ip}:{port}/v1/models"]
+    if model and model.serving in {ServingMode.EMBEDDING, ServingMode.MLX_OPENAI_SERVER}:
+        urls.append(f"http://{ip}:{port}/openapi.json")
     handler = urllib.request.ProxyHandler({})
     opener = urllib.request.build_opener(handler)
     deadline = time.monotonic() + timeout_secs
 
     while time.monotonic() < deadline:
         try:
-            with opener.open(url, timeout=5):
-                return True
+            for url in urls:
+                with opener.open(url, timeout=5):
+                    pass
+            return True
         except (urllib.error.URLError, OSError, TimeoutError):
             time.sleep(interval)
 
@@ -587,7 +622,10 @@ def run_restart(config: ClusterConfig, *, target_node: str | None = None, skip_g
             poll_tasks.append((node_name, node.ip, slot))
     if poll_tasks:
         with ThreadPoolExecutor(max_workers=len(poll_tasks)) as pool:
-            futures = {pool.submit(health_poll, ip, slot.port): (node_name, slot) for node_name, ip, slot in poll_tasks}
+            futures = {
+                pool.submit(health_poll, ip, slot.port, model=config.models[slot.model]): (node_name, slot)
+                for node_name, ip, slot in poll_tasks
+            }
             for future in as_completed(futures):
                 node_name, slot = futures[future]
                 healthy = future.result()
@@ -710,7 +748,8 @@ def run_deploy(config: ClusterConfig, *, target_node: str | None = None, dry_run
                     poll_tasks.append((node_name, node.ip, slot))
             with ThreadPoolExecutor(max_workers=len(poll_tasks)) as pool:
                 futures = {
-                    pool.submit(health_poll, ip, slot.port): (node_name, slot) for node_name, ip, slot in poll_tasks
+                    pool.submit(health_poll, ip, slot.port, model=config.models[slot.model]): (node_name, slot)
+                    for node_name, ip, slot in poll_tasks
                 }
                 for future in as_completed(futures):
                     node_name, slot = futures[future]

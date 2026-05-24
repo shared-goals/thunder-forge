@@ -2,8 +2,8 @@
 docker/.env
 
 # Cluster config (contains local IPs, per-cluster)
-configs/node-assignments.yaml
-configs/litellm-config.yaml
+configs/*.yaml
+configs/*.yaml.bak*
 
 # Python
 .venv/

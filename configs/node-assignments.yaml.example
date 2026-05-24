@@ -39,15 +39,35 @@ models:
     serving: embedding
     notes: "Lazy-loaded embedding model, ~0.5 GB RAM."
 
+  # Optional: serve chat models through mlx-openai-server instead of mlx_lm.server.
+  # Useful for models that need a parser, e.g. gpt-oss Harmony channels.
+  # Keep parser flags in extra_args so the serving mode stays generic.
+  # gpt-oss-20b:
+  #   source:
+  #     type: huggingface
+  #     repo: "mlx-community/gpt-oss-20b-MXFP4-Q8"
+  #     revision: "main"
+  #   disk_gb: 12.1
+  #   kv_per_32k_gb: 8.0
+  #   max_context: 131072
+  #   serving: mlx-openai-server
+  #   extra_args:
+  #     - --reasoning-parser
+  #     - harmony
+  #     - --tool-call-parser
+  #     - harmony
+  #   notes: "gpt-oss/Harmony example; smoke-test output before routing production traffic."
+
 # ── Nodes ──────────────────────────────────────────
+# Per-node host may be a DNS name or IP address. Prefer .lan FQDNs.
 # Per-node user is optional. Falls back to TF_SSH_USER env var,
 # then $USER (current OS user). Role is "node" (compute) or "gateway" (infra/hub).
 nodes:
-  rock: { ip: "192.168.1.61", ram_gb: 32, role: gateway }
-  msm1: { ip: "192.168.1.101", ram_gb: 128, role: node }
-  msm2: { ip: "192.168.1.102", ram_gb: 128, role: node }
+  rock: { host: "rock.lan", ram_gb: 32, role: gateway }
+  msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
+  msm2: { host: "msm2-wifi.lan", ram_gb: 128, role: node }
   # Add more nodes as needed:
-  # mynode: { ip: "192.168.1.50", ram_gb: 64, role: node, user: myuser }
+  # mynode: { host: "mynode.lan", ram_gb: 64, role: node, user: myuser }
 
 # ── Node assignments ────────────────────────────────
 # Each node gets a list of {model, port} pairs.

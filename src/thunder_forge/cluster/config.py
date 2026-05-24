@@ -110,17 +110,52 @@ class Model:
     model_info: ModelInfo | None = None
 
 
-@dataclass
+@dataclass(init=False)
 class Node:
-    ip: str
+    host: str
     ram_gb: int
-    user: str = ""
-    role: NodeRole | str = NodeRole.NODE
+    user: str
+    role: NodeRole | str
     # Resolved during pre-flight — None until populated
-    platform: str | None = None
-    shell: str | None = None
-    home_dir: str | None = None
-    homebrew_prefix: str | None = None
+    platform: str | None
+    shell: str | None
+    home_dir: str | None
+    homebrew_prefix: str | None
+
+    def __init__(
+        self,
+        host: str | None = None,
+        ram_gb: int = 0,
+        user: str = "",
+        role: NodeRole | str = NodeRole.NODE,
+        *,
+        ip: str | None = None,
+        platform: str | None = None,
+        shell: str | None = None,
+        home_dir: str | None = None,
+        homebrew_prefix: str | None = None,
+    ) -> None:
+        resolved_host = host or ip
+        if not resolved_host:
+            msg = "Node requires host (or deprecated ip)"
+            raise ValueError(msg)
+        self.host = resolved_host
+        self.ram_gb = ram_gb
+        self.user = user
+        self.role = role
+        self.platform = platform
+        self.shell = shell
+        self.home_dir = home_dir
+        self.homebrew_prefix = homebrew_prefix
+
+    @property
+    def ip(self) -> str:
+        """Deprecated alias for host, kept for internal/backwards compatibility."""
+        return self.host
+
+    @ip.setter
+    def ip(self, value: str) -> None:
+        self.host = value
 
 
 @dataclass
@@ -283,7 +318,11 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
                 stacklevel=2,
             )
         user = v.get("user", "")
-        nodes[k] = Node(ip=v["ip"], ram_gb=v["ram_gb"], user=user, role=role)
+        host = v.get("host") or v.get("ip")
+        if not host:
+            msg = f"Node {k} requires host (or deprecated ip)"
+            raise ValueError(msg)
+        nodes[k] = Node(host=host, ram_gb=v["ram_gb"], user=user, role=role)
 
     assignments: dict[str, list[Assignment]] = {}
     for node_name, slots in raw.get("assignments", {}).items():

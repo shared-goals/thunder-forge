@@ -17,8 +17,8 @@ def test_parse_cluster_config_basic():
             }
         },
         "nodes": {
-            "rock": {"ip": "192.168.1.61", "ram_gb": 32, "user": "infra_user", "role": "gateway"},
-            "msm1": {"ip": "192.168.1.101", "ram_gb": 128, "user": "admin", "role": "node"},
+            "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "role": "gateway"},
+            "msm1": {"host": "msm1-wifi.lan", "ram_gb": 128, "user": "admin", "role": "node"},
         },
         "assignments": {"msm1": [{"model": "coder", "port": 8000}]},
     }
@@ -35,7 +35,7 @@ def test_parse_cluster_config_user_stored_as_is():
     """User field is stored as-is — no env var resolution."""
     raw = {
         "models": {},
-        "nodes": {"n1": {"ip": "1.2.3.4", "ram_gb": 64, "role": "node"}},
+        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "role": "node"}},
         "assignments": {},
     }
     config = parse_cluster_config(raw)
@@ -47,8 +47,8 @@ def test_parse_cluster_config_role_migration():
     raw = {
         "models": {},
         "nodes": {
-            "n1": {"ip": "1.2.3.4", "ram_gb": 64, "role": "inference"},
-            "gw": {"ip": "1.2.3.5", "ram_gb": 32, "role": "infra"},
+            "n1": {"host": "n1.lan", "ram_gb": 64, "role": "inference"},
+            "gw": {"host": "gw.lan", "ram_gb": 32, "role": "infra"},
         },
         "assignments": {},
     }

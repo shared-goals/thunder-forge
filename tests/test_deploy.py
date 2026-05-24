@@ -1,5 +1,6 @@
 """Tests for deploy logic: plist generation, orchestration."""
 
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from textwrap import dedent
@@ -26,8 +27,8 @@ def config_path(tmp_path: Path) -> Path:
             max_context: 131072
 
         nodes:
-          rock: { ip: "192.168.1.61", ram_gb: 32, user: "infra_user", role: gateway }
-          msm1: { ip: "192.168.1.101", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
 
         assignments:
           msm1:
@@ -42,7 +43,7 @@ def config_path(tmp_path: Path) -> Path:
 def test_generate_plist_uses_resolved_fields() -> None:
     """Plist uses node.home_dir and node.homebrew_prefix, not hardcoded paths."""
     node = Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",
@@ -86,6 +87,42 @@ def test_deploy_node_disables_vector_instead_of_installing(config_path: Path) ->
     assert any("rm -f ~/Library/LaunchAgents/com.vector.plist" in command for command in commands)
 
 
+
+def test_deploy_node_replaces_existing_port_before_bootstrap(config_path: Path) -> None:
+    """Deploy must kill stale port holders before bootstrap to avoid false healthy services."""
+    config = load_cluster_config(config_path)
+    node = config.nodes["msm1"]
+    node.home_dir = "/Users/admin"
+    node.homebrew_prefix = "/opt/homebrew"
+
+    def fake_ssh_run(user: str, ip: str, command: str, **kwargs):
+        if "id -u" in command:
+            return SimpleNamespace(returncode=0, stdout="501\n", stderr="")
+        if command.startswith("launchctl list com.mlx-lm-"):
+            return SimpleNamespace(returncode=0, stdout='"PID" = 123;\n', stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    ok = SimpleNamespace(returncode=0, stdout="", stderr="")
+    with (
+        patch("thunder_forge.cluster.deploy.install_node_tools"),
+        patch("thunder_forge.cluster.deploy.disable_vector_agent"),
+        patch("thunder_forge.cluster.deploy.ssh_run", side_effect=fake_ssh_run) as ssh_mock,
+        patch("thunder_forge.cluster.deploy.scp_content", return_value=ok),
+    ):
+        errors = deploy_node("msm1", config)
+
+    assert errors == []
+    commands = [call.args[2] for call in ssh_mock.call_args_list]
+    bootout_index = next(
+        i for i, command in enumerate(commands) if "launchctl bootout gui/501/com.mlx-lm-8000" in command
+    )
+    kill_index = next(i for i, command in enumerate(commands) if "lsof -ti :8000" in command)
+    bootstrap_index = next(i for i, command in enumerate(commands) if "launchctl bootstrap gui/501" in command)
+    assert bootout_index < kill_index < bootstrap_index
+    assert "rm -f ~/Library/LaunchAgents/com.mlx-lm-8000.plist" in commands[bootout_index]
+    assert not any("launchctl kickstart" in command for command in commands)
+
+
 def test_compose_does_not_define_victorialogs() -> None:
     compose_path = Path(__file__).parent.parent / "docker" / "docker-compose.yml"
     compose = yaml.safe_load(compose_path.read_text())
@@ -98,7 +135,7 @@ def test_compose_does_not_define_victorialogs() -> None:
 def test_generate_plist_non_default_homebrew() -> None:
     """Plist uses custom homebrew prefix (e.g. Intel Mac)."""
     node = Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",
@@ -115,7 +152,7 @@ def test_generate_plist_non_default_homebrew() -> None:
 def test_generate_plist_no_homebrew() -> None:
     """Plist works without homebrew (Linux node)."""
     node = Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",
@@ -131,7 +168,7 @@ def test_generate_plist_no_homebrew() -> None:
 
 def test_generate_plist_requires_resolved_fields() -> None:
     """Plist raises error if resolved fields are missing."""
-    node = Node(ip="192.168.1.101", ram_gb=128, user="admin", role="node")
+    node = Node(host="msm1-wifi.lan", ram_gb=128, user="admin", role="node")
     model = Model(source=ModelSource(type="huggingface", repo="test/model"), disk_gb=10)
     slot = Assignment(model="test", port=8000)
     with pytest.raises(ValueError, match="pre-flight"):
@@ -205,7 +242,7 @@ def test_generate_plist_enable_thinking_none(config_path: Path) -> None:
 
 def _resolved_node() -> Node:
     return Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",
@@ -314,7 +351,7 @@ def test_generate_plist_server_args_before_extra_args() -> None:
 def test_generate_plist_log_paths() -> None:
     """Logs go to ~/logs/mlx-lm-{port}.log, not /tmp/."""
     node = Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",
@@ -332,7 +369,7 @@ def test_generate_plist_log_paths() -> None:
 def test_generate_plist_embedding_uses_mlx_openai_server() -> None:
     """Embedding models use mlx-openai-server instead of mlx_lm.server."""
     node = Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",
@@ -362,7 +399,7 @@ def test_generate_plist_embedding_uses_mlx_openai_server() -> None:
 def test_generate_plist_embedding_with_extra_args() -> None:
     """Embedding models support extra_args."""
     node = Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",
@@ -383,10 +420,77 @@ def test_generate_plist_embedding_with_extra_args() -> None:
     assert "DEBUG" in args
 
 
+
+def test_generate_plist_mlx_openai_server_lm_uses_mlx_openai_server() -> None:
+    """mlx-openai-server LM models use mlx-openai-server with --model-type lm."""
+    node = Node(
+        host="msm1-wifi.lan",
+        ram_gb=128,
+        user="admin",
+        role="node",
+        home_dir="/Users/admin",
+        homebrew_prefix="/opt/homebrew",
+    )
+    model = Model(
+        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+        disk_gb=12.1,
+        serving="mlx-openai-server",
+        extra_args=["--reasoning-parser", "harmony", "--tool-call-parser", "harmony"],
+    )
+    slot = Assignment(model="gpt-oss-20b", port=8006)
+    xml_str = generate_plist(model, slot, node)
+    root = ET.fromstring(xml_str)
+    args = [s.text for s in root.findall(".//array/string")]
+    assert args[0] == "/Users/admin/.local/bin/mlx-openai-server"
+    assert args[1] == "launch"
+    assert args[args.index("--model-type") + 1] == "lm"
+    assert args[args.index("--model-path") + 1] == "mlx-community/gpt-oss-20b-MXFP4-Q8"
+    assert args[args.index("--port") + 1] == "8006"
+    assert args[args.index("--host") + 1] == "0.0.0.0"
+    assert "--no-log-file" in args
+    assert "--reasoning-parser" in args
+    assert args[args.index("--reasoning-parser") + 1] == "harmony"
+    assert "--tool-call-parser" in args
+    assert args[args.index("--tool-call-parser") + 1] == "harmony"
+    assert "mlx_lm.server" not in xml_str
+
+
+def test_health_poll_requires_openapi_for_mlx_openai_server() -> None:
+    """mlx-openai-server health must not accept stale mlx_lm.server /v1/models only."""
+    model = Model(
+        source=ModelSource(type="huggingface", repo="test/model"),
+        serving="mlx-openai-server",
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeOpener:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, url: str, timeout: int = 5):
+            self.urls.append(url)
+            if url.endswith("/openapi.json"):
+                raise ConnectionError("404")
+            return FakeResponse()
+
+    opener = FakeOpener()
+    from thunder_forge.cluster.deploy import health_poll
+
+    with patch.object(urllib.request, "build_opener", return_value=opener):
+        assert health_poll("msm4-wifi.lan", 8006, model=model, timeout_secs=1, interval=0) is False
+    assert any(url.endswith("/openapi.json") for url in opener.urls)
+
+
 def test_generate_plist_non_embedding_uses_mlx_lm() -> None:
     """Non-embedding models still use mlx_lm.server."""
     node = Node(
-        ip="192.168.1.101",
+        host="msm1-wifi.lan",
         ram_gb=128,
         user="admin",
         role="node",

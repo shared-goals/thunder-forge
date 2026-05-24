@@ -23,6 +23,7 @@ packages = ["src/thunder_forge"]
 dev = [
     "bcrypt>=4.2",
     "httpx>=0.27",
+    "paramiko>=5.0.0",
     "psycopg[binary]>=3.2",
     "pytest>=8.0",
     "ruff>=0.11",
