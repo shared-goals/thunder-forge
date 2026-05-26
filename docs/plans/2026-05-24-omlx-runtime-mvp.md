@@ -20,8 +20,8 @@
 - Use `.lan` names only for normal LAN-resolved hosts.
 - Treat `msm3-wifi.lan` as stable management/bootstrap path.
 - Treat future Thunderbolt/fabric paths as point-to-point, not necessarily `.lan`; do not assume any fabric hostname exists until `/etc/hosts`, mDNS, or another macOS mapping is configured.
-- Do not download new model weights until existing local artifacts have been inspected.
-- Start from the existing `shag@msm3` cache as source evidence, but prepare the runtime model under oMLX's default directory: `/Users/shag/.omlx/models`; the normal serve command should omit `--model-dir`. Observed candidates include `mlx-community/Qwen3.6-35B-A3B-4bit`, `mlx-community/Qwen3-30B-A3B-4bit`, and other Qwen3 artifacts.
+- Do not model Hugging Face cache layout as TF v2/oMLX product state. Download MVP model weights directly into the oMLX default model directory on `studio`, then sync that model directory to the node.
+- Use oMLX's default model-directory format: models are direct subdirectories of `/Users/shag/.omlx/models`, and `omlx serve` uses the subdirectory name as the model id. For a Hugging Face repo id like `mlx-community/Qwen3.6-35B-A3B-4bit`, the default local directory is `/Users/shag/.omlx/models/Qwen3.6-35B-A3B-4bit`. The normal serve command should omit `--model-dir`.
 - Prefer dev port `8018` on `msm3` until stale `admin`-owned MLX processes are fully removed.
 - Do not touch Hindsight production traffic during this MVP.
 - Keep public docs framed around operator expectations and system behavior, not personal user stories.
@@ -219,9 +219,9 @@ uv run pytest tests/test_cli_runtime.py -q
 
 Expected: PASS.
 
-## Task 6: Add model-cache inspection command for `msm3`
+## Task 6: Add oMLX model-directory readiness command for `msm3`
 
-**Objective:** Discover which existing `shag@msm3` Hugging Face cache entries can be used directly by oMLX or need a resolved snapshot/model directory.
+**Objective:** Report whether the selected model exists in the oMLX default model directory on `studio` and on `msm3`, without representing Hugging Face cache layout as product state.
 
 **Files:**
 - Create or modify: `src/thunder_forge/cluster/models.py`
@@ -231,25 +231,22 @@ Expected: PASS.
 **Command shape:**
 
 ```bash
-uv run thunder-forge model inspect-cache --node msm3 --model mlx-community/Qwen3.6-35B-A3B-4bit
+uv run thunder-forge artifact status --node msm3 --model mlx-community/Qwen3.6-35B-A3B-4bit
 ```
 
 **Step 1: Write failing tests**
 
-Mock SSH output for candidate directories. Assert the command reports:
+Mock local/SSH existence checks. Assert the command reports:
 
-- candidate path;
-- owner;
-- readability by `shag`;
-- whether it contains expected Hugging Face cache structure (`blobs`, `refs`, `snapshots`);
-- resolved snapshot path from `refs/main` or an explicit revision;
-- whether the resolved snapshot contains expected MLX model files;
-- whether `.incomplete` files exist under the cache entry;
-- recommended next action: use resolved snapshot dir, move/copy, download later, or reject incomplete cache.
+- studio oMLX model directory path;
+- node oMLX model directory path;
+- whether the model directory is present on `studio`;
+- whether the model directory is present on `msm3`;
+- recommended next action: `download_to_studio_omlx`, `sync_to_node_omlx`, or ready.
 
 **Step 2: Implement inspect-only logic**
 
-Do not move/chown files in this task. This is read-only discovery plus snapshot resolution.
+Do not move/chown files in this task. This is read-only oMLX-directory readiness planning.
 
 **Step 3: Run tests**
 
@@ -259,44 +256,59 @@ uv run pytest tests/test_models.py -q
 
 Expected: PASS.
 
-## Task 7: Add oMLX run command using existing model dir
+## Task 7: Add direct-to-studio oMLX model download dry-run/apply
 
-**Objective:** Start or dry-run the command to start oMLX on `msm3` with the selected model directory.
+**Objective:** Download the selected Hugging Face model directly into studio's oMLX default model directory without using Hugging Face cache layout as product state.
 
 **Files:**
-- Create/modify: `src/thunder_forge/cluster/omlx.py`
+- Modify: `src/thunder_forge/cluster/artifacts.py`
 - Modify: `src/thunder_forge/cli.py`
-- Create/modify tests under `tests/`
+- Modify/create: `tests/test_artifacts.py`, `tests/test_cli_artifact.py`
 
 **Command shape:**
 
 ```bash
-uv run thunder-forge runtime start --node msm3 --port 8018 --dry-run
+uv run thunder-forge artifact download --model mlx-community/Qwen3-1.7B-4bit --dry-run
+uv run thunder-forge artifact download --model mlx-community/Qwen3-1.7B-4bit --apply
 ```
 
-**Step 1: Write failing tests**
+**Behavior:**
 
-Assert generated remote command is equivalent to:
+- Destination is studio oMLX model directory (`~/.omlx/models/<model-dir>`).
+- For Hugging Face repo ids, `<model-dir>` is the repo name segment (`Qwen3-1.7B-4bit`).
+- Implementation may use `uvx --from huggingface_hub hf download ... --local-dir ...`, but `.cache/huggingface` is not product state.
+- Default to dry-run; `--apply` performs the download.
+
+**Expected:** CLI prints exact download plan and tests prove the destination is `.omlx/models`, not HF cache.
+
+## Task 8: Add studio-to-node oMLX model-directory sync dry-run/apply
+
+**Objective:** Move a studio oMLX model directory to an oMLX node without any node-to-studio backfill path and without using Hugging Face cache layout as product state.
+
+**Files:**
+- Modify: `src/thunder_forge/cluster/artifacts.py`
+- Modify: `src/thunder_forge/cli.py`
+- Modify/create: `tests/test_artifacts.py`, `tests/test_cli_artifact.py`
+
+**Command shape:**
 
 ```bash
-/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018
+uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node msm3 --dry-run
+uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node msm3 --use-fabric --dry-run
 ```
 
-Do not include SSD KV cache flags yet.
+**Behavior:**
 
-**Step 2: Implement minimal start path**
+- Source is always studio oMLX model directory (`~/.omlx/models/<model-dir>/`).
+- Destination is the selected node oMLX model directory (`<node_home>/.omlx/models/<model-dir>/`).
+- Default transport host is management host (`msm3-wifi.lan`).
+- `--use-fabric` uses configured `fabric_host` when present.
+- If the studio oMLX model directory is missing, fail with `download_to_studio_omlx` guidance rather than importing from the node.
+- Default to dry-run; `--apply` performs rsync.
 
-For the first implementation, default to dry-run unless explicitly told to start a process.
+**Expected:** CLI prints exact rsync plan and tests prove studio-primary oMLX-directory direction.
 
-**Step 3: Run tests**
-
-```bash
-uv run pytest tests/test_omlx.py tests/test_cli_runtime.py -q
-```
-
-Expected: PASS.
-
-## Task 8: Add direct memory/agent-like smoke test
+## Task 10: Add direct memory/agent-like smoke test
 
 **Objective:** Verify that the selected cached model behaves acceptably for agent/runtime tasks through direct oMLX.
 
@@ -323,7 +335,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 
 **Expected:** CLI reports pass/fail with reasons, not just a green HTTP status.
 
-## Task 9: Add compatibility matrix recording
+## Task 11: Add compatibility matrix recording
 
 **Objective:** Store runtime/model evidence before any runtime promotion.
 
@@ -357,7 +369,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 - Notes:
 ```
 
-## Task 10: Add optional LiteLLM dev route only after direct smoke passes
+## Task 12: Add optional LiteLLM dev route only after direct smoke passes
 
 **Objective:** Expose the selected model through LiteLLM under a test name after direct oMLX is healthy.
 
@@ -373,7 +385,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 
 **Guardrail:** Do not modify production LiteLLM config or Hindsight config.
 
-## Task 11: Add utilization and audit summary design
+## Task 13: Add utilization and audit summary design
 
 **Objective:** Define the smallest CLI/API contract that can feed Daily Compass and operator review before adding databases or dashboards.
 

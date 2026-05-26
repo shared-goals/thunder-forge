@@ -25,7 +25,7 @@ shag@studio:/Users/shag/Work/thunder-forge
 
 Production `rock` must not be used for dev work. `studio` is the dev frontend and future cache hub. `msm3` is the first TF v2 development inference node. `msm4` is dedicated to direct oMLX/Hindsight work and should not be disturbed by TF v2 experiments. Later, the control plane may move back to Armbian `rock`; `studio` may remain the model cache hub due to its Thunderbolt connection to `msm1`-`msm4`.
 
-The very first use case is narrower than full model preparation: run oMLX against a model prepared under `~/.omlx/models` on `msm3`. The existing `shag@msm3` Hugging Face cache contains several `mlx-community/Qwen3*` artifacts and can be used as source material to avoid wasteful re-downloads. `gpt-oss-20b` is currently the Hindsight model on `msm4`, not the first TF v2 dev target.
+The very first use case is narrower than full model orchestration: run oMLX against a model that lives under the oMLX default model directory (`~/.omlx/models`) on `msm3`. Product state must not include Hugging Face cache layout. `gpt-oss-20b` is currently the Hindsight model on `msm4`, not the first TF v2 dev target.
 
 The long-term product target is a controlled compute resource for Shared Goals platform, `whattodo`, and `text-forge` tasks. Thunder Forge should expose enough operational facts for agent-driven daily operations: request load, caller/API-key identity, workload identity, model version, node utilization, failures, latency, and model freshness. That does not require a web UI in the MVP; a strict CLI/API path is the smaller and more controllable interface.
 
@@ -49,7 +49,7 @@ msm4          = dedicated direct oMLX/Hindsight node, excluded from dev experime
 oMLX          = node-local inference runtime daemon
 ```
 
-For the MVP, the model is not hardcoded. It is chosen from the existing `shag@msm3` Hugging Face cache for a direct oMLX smoke test. The current initial candidates are:
+For the MVP, the model is not hardcoded. It is chosen by model id, downloaded directly into the oMLX default model directory on `studio`, then synced as an oMLX model directory to `msm3` for a direct smoke test. Current initial candidate ids are:
 
 ```text
 mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ
@@ -61,7 +61,7 @@ mlx-community/Qwen3-Coder-Next-4bit
 mlx-community/Qwen3.5-122B-A10B-4bit
 ```
 
-The first implementation milestone is direct oMLX execution from oMLX's default model directory on `msm3` (`~/.omlx/models`) without overriding `--model-dir`. The existing `shag@msm3` Hugging Face cache is source evidence and may be used to avoid re-downloads, but it is not the target runtime location. Downloading to `studio` and syncing over Thunderbolt comes after the single-node default-directory path is understood.
+The first implementation milestone is direct oMLX execution from oMLX's default model directory on `msm3` (`~/.omlx/models`) without overriding `--model-dir`. Studio is the primary MVP model source, but the source path is also the oMLX default model directory. If studio is missing a requested artifact, the next action is to download it directly into studio's `~/.omlx/models`, then sync that model directory from studio to the node. The initial implementation should expose this as explicit dry-run/apply CLI steps before broader automation.
 
 Thunder Forge v2 will prefer strict, auditable operator channels in this order:
 
@@ -78,7 +78,7 @@ Thunder Forge v2 will prefer strict, auditable operator channels in this order:
 - Avoids forcing oMLX into the old one-model/one-port abstraction.
 - Preserves working production `rock` while dev proceeds on `studio`.
 - Keeps Hindsight stable by reserving `msm4` for direct oMLX/Hindsight.
-- Reduces MVP risk by reusing already available MLX artifacts where possible while normalizing runtime layout to oMLX defaults before building broader download/sync automation.
+- Reduces MVP risk by using the same oMLX default model-directory layout on `studio` and nodes before building broader download/sync automation.
 - Separates stable LAN management networking from future high-speed point-to-point Thunderbolt/fabric networking.
 - Makes later task-oriented model selection natural:
 
@@ -94,8 +94,8 @@ Thunder Forge v2 will prefer strict, auditable operator channels in this order:
 - Existing deployment code cannot be reused mechanically; it must be abstracted around runtime type.
 - Health checks need to distinguish node runtime health from individual model readiness.
 - LiteLLM route generation must allow many logical model names to point at one node-level base URL.
-- Model cache/sync semantics become more important than port allocation.
-- The first milestone still depends on the exact Hugging Face snapshot layout and on how best to prepare or link an artifact into `~/.omlx/models`.
+- Model directory sync semantics become more important than port allocation.
+- The first milestone depends on downloading models directly into the oMLX default model directory instead of relying on tool-specific cache layout.
 - Thunderbolt fabric setup and host mapping become separate prerequisites for the later cache-hub flow.
 - Early experiments should use an isolated dev port, preferably `8018`, until runtime ownership and launchd/service management are represented explicitly in Thunder Forge config.
 
@@ -124,9 +124,10 @@ models:
       repo: mlx-community/Qwen3.6-35B-A3B-4bit
     runtime_artifact:
       repo: mlx-community/Qwen3.6-35B-A3B-4bit
-      prepared_path: /Users/shag/.omlx/models/Qwen3.6-35B-A3B-4bit
-      source_cache_path: /Users/shag/.cache/huggingface/hub/models--mlx-community--Qwen3.6-35B-A3B-4bit
-      status: prepare-first
+      model_dir_name: Qwen3.6-35B-A3B-4bit
+      studio_path: /Users/shag/.omlx/models/Qwen3.6-35B-A3B-4bit
+      node_path: /Users/shag/.omlx/models/Qwen3.6-35B-A3B-4bit
+      status: sync-first
     intended_workloads:
       - tf-v2-dev-smoke
     runtime_compat:
@@ -146,8 +147,8 @@ The exact field names are not final. The important architectural distinctions ar
 - Do not disturb `msm4`; it is the dedicated direct oMLX/Hindsight node.
 - Do not switch Hindsight production traffic from this TF v2 MVP.
 - Do not assume `/v1/models` alone proves model readiness.
-- Do not download another copy of any MVP model until the existing `shag@msm3` cache has been inspected.
-- Do not make the Hugging Face cache root the runtime model directory. Resolve the snapshot/model directory and prepare/link it under `~/.omlx/models` unless oMLX documentation changes its default.
+- Do not model Hugging Face cache layout as TF v2/oMLX product state.
+- Download new MVP models directly into the oMLX default model directory on `studio`, using oMLX's default direct subdirectory format.
 - Do not treat `msm3-wifi.lan` as the final data plane. It is stable but slow.
 - Do not assume a `.lan` fabric hostname exists. Thunderbolt/fabric interface setup and host mapping are separate explicit tasks.
 - Do not enable optional SSD KV cache until baseline generation is stable.
@@ -173,9 +174,9 @@ Rejected for MVP. LLMKube is useful as an architectural reference, especially th
 
 Rejected for MVP. `studio` is the dev environment and future cache hub. Production `rock` remains stable and untouched during design and early implementation.
 
-### Start by downloading from Hugging Face to `studio`
+### Start by importing/backfilling from a node cache to `studio`
 
-Deferred. It is the right later cache-hub flow, but the first useful proof is simpler: prepare one local artifact under `~/.omlx/models` on `msm3`, run oMLX against that default directory, then generalize to studio cache and Thunderbolt sync.
+Rejected for the MVP. `studio` is the primary source for artifact movement and the source path is `~/.omlx/models`. Node-local Hugging Face caches are not product state and should not get automated import/backfill logic. If a requested artifact is missing on studio, Thunder Forge should download it directly into studio's oMLX default model directory, then sync that directory to the node.
 
 ### Adopt a full FastAPI/PostgreSQL/React rebuild immediately
 

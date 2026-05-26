@@ -5,7 +5,15 @@ from typing import cast
 
 import typer
 
-from thunder_forge.cluster.artifacts import build_artifact_readiness_plan, probe_artifact_presence
+from thunder_forge.cluster.artifacts import (
+    ArtifactReadinessAction,
+    build_artifact_download_plan,
+    build_artifact_readiness_plan,
+    build_artifact_sync_plan,
+    probe_artifact_presence,
+    run_artifact_download,
+    run_artifact_sync,
+)
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.omlx import check_omlx_health
 
@@ -75,9 +83,8 @@ def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
 def artifact_status(
     model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
     node: str = typer.Option(..., "--node", help="Node name to check artifact readiness for (e.g. msm3)."),
-    studio_hf_home: str = typer.Option("~/.cache/huggingface", "--studio-hf-home", help="Studio HF home path."),
 ) -> None:
-    """Inspect model artifact readiness without downloading or syncing."""
+    """Inspect oMLX model-directory readiness without downloading or syncing."""
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
@@ -85,29 +92,118 @@ def artifact_status(
         repo_id=model,
         node_host=runtime_node.host,
         node_home_dir=node_home_dir,
-        studio_hf_home=studio_hf_home,
     )
     plan = build_artifact_readiness_plan(
         repo_id=model,
         node=node,
         node_home_dir=node_home_dir,
         presence=presence,
-        studio_hf_home=studio_hf_home,
     )
 
     typer.echo(f"model: {model}")
     _print_runtime_node_header(node, runtime_node)
-    typer.echo(f"studio_hf_cache_path: {plan.studio_hf_cache_path}")
-    typer.echo(f"node_hf_cache_path: {plan.node_hf_cache_path}")
-    typer.echo(f"node_omlx_model_dir: {plan.node_omlx_model_dir}")
-    typer.echo(f"studio_hf_cache: {'present' if presence.studio_hf_cache else 'missing'}")
-    typer.echo(f"node_hf_cache: {'present' if presence.node_hf_cache else 'missing'}")
+    typer.echo(f"studio_omlx_model_dir_path: {plan.studio_omlx_model_dir}")
+    typer.echo(f"node_omlx_model_dir_path: {plan.node_omlx_model_dir}")
+    typer.echo(f"studio_omlx_model_dir: {'present' if presence.studio_omlx_model_dir else 'missing'}")
     typer.echo(f"node_omlx_model_dir: {'present' if presence.node_omlx_model_dir else 'missing'}")
     typer.echo(f"ready: {'yes' if plan.ready else 'no'}")
     if plan.actions:
         typer.echo("next_actions:")
         for action in plan.actions:
-            typer.echo(f"  - {action}")
+            typer.echo(f"  - {action.value}")
+
+
+@artifact_app.command("download")
+def artifact_download(
+    model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print download command without executing by default.",
+    ),
+    timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for model download when applying."),
+) -> None:
+    """Download a model directly into studio's oMLX model directory."""
+    plan = build_artifact_download_plan(repo_id=model)
+
+    typer.echo(f"model: {model}")
+    typer.echo(f"model_dir_name: {plan.model_dir_name}")
+    typer.echo(f"destination: {plan.destination}")
+    typer.echo("action: download_to_studio_omlx")
+    typer.echo(f"command: {plan.command}")
+
+    if dry_run:
+        typer.echo("mode: dry-run")
+        return
+
+    result = run_artifact_download(plan, timeout=timeout)
+    if result.returncode != 0:
+        typer.echo(f"Error: download failed with exit code {result.returncode}", err=True)
+        raise typer.Exit(result.returncode)
+    typer.echo("status: downloaded")
+
+
+@artifact_app.command("sync")
+def artifact_sync(
+    model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
+    node: str = typer.Option(..., "--node", help="Node name to sync artifact to (e.g. msm3)."),
+    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print sync command without executing by default."),
+    use_fabric: bool = typer.Option(False, "--use-fabric", help="Use the configured fabric_host for transfer."),
+    timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for rsync when applying."),
+) -> None:
+    """Sync an oMLX model directory from studio to a node."""
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
+    if use_fabric and runtime_node.fabric_host is None:
+        typer.echo(f"Error: node '{node}' has no fabric_host configured", err=True)
+        raise typer.Exit(1)
+    transport_host = runtime_node.fabric_host if use_fabric else runtime_node.host
+    presence = probe_artifact_presence(
+        repo_id=model,
+        node_host=runtime_node.host,
+        node_home_dir=node_home_dir,
+    )
+    readiness_plan = build_artifact_readiness_plan(
+        repo_id=model,
+        node=node,
+        node_home_dir=node_home_dir,
+        presence=presence,
+    )
+    sync_plan = build_artifact_sync_plan(
+        repo_id=model,
+        node_user=runtime_node.user,
+        node_host=cast(str, transport_host),
+        node_home_dir=node_home_dir,
+    )
+
+    typer.echo(f"model: {model}")
+    _print_runtime_node_header(node, runtime_node)
+    typer.echo("source: studio")
+    typer.echo(f"transport_host: {transport_host}")
+    typer.echo(f"source_path: {sync_plan.source_path}")
+    typer.echo(f"destination: {sync_plan.destination}")
+    typer.echo("action: sync_to_node_omlx")
+    typer.echo(f"command: {sync_plan.command}")
+
+    if ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX in readiness_plan.actions:
+        typer.echo(
+            "Error: studio oMLX model directory is missing; download the model to studio oMLX models first",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if ArtifactReadinessAction.SYNC_TO_NODE_OMLX not in readiness_plan.actions:
+        typer.echo("status: sync not needed")
+        return
+    if dry_run:
+        typer.echo("mode: dry-run")
+        return
+
+    result = run_artifact_sync(sync_plan, timeout=timeout)
+    if result.returncode != 0:
+        typer.echo(f"Error: sync failed with exit code {result.returncode}", err=True)
+        raise typer.Exit(result.returncode)
+    typer.echo("status: synced")
 
 
 @runtime_app.command("start")

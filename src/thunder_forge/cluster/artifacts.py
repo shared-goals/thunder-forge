@@ -1,23 +1,25 @@
-"""Artifact readiness planning for model cache and oMLX runtime dirs."""
+"""Artifact readiness planning for oMLX model directories."""
 
 from __future__ import annotations
 
+import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+DEFAULT_OMLX_MODELS_DIR = "~/.omlx/models"
+
 
 class ArtifactReadinessAction(StrEnum):
-    DOWNLOAD_TO_STUDIO = "download_to_studio"
-    SYNC_TO_NODE = "sync_to_node"
-    PREPARE_OMLX_MODEL_DIR = "prepare_omlx_model_dir"
+    DOWNLOAD_TO_STUDIO_OMLX = "download_to_studio_omlx"
+    SYNC_TO_NODE_OMLX = "sync_to_node_omlx"
 
 
 @dataclass(frozen=True)
 class ArtifactPresence:
-    studio_hf_cache: bool
-    node_hf_cache: bool
+    studio_omlx_model_dir: bool
     node_omlx_model_dir: bool
 
 
@@ -25,16 +27,41 @@ class ArtifactPresence:
 class ArtifactReadinessPlan:
     repo_id: str
     node: str
-    studio_hf_cache_path: str
-    node_hf_cache_path: str
+    studio_omlx_model_dir: str
     node_omlx_model_dir: str
     ready: bool
     actions: list[ArtifactReadinessAction] = field(default_factory=list)
 
 
-def hf_cache_dir_name(repo_id: str) -> str:
-    """Return the Hugging Face Hub cache directory name for a model repo id."""
-    return f"models--{repo_id.replace('/', '--')}"
+@dataclass(frozen=True)
+class ArtifactSyncPlan:
+    repo_id: str
+    source_path: str
+    destination: str
+    command: str
+    mkdir_args: list[str]
+    rsync_args: list[str]
+
+
+@dataclass(frozen=True)
+class ArtifactDownloadPlan:
+    repo_id: str
+    model_dir_name: str
+    destination: str
+    command: str
+    args: list[str]
+
+
+def omlx_model_dir_name(repo_id: str) -> str:
+    """Return the oMLX default model directory name for a model repo id.
+
+    oMLX discovers models as direct subdirectories of ``~/.omlx/models`` and
+    uses the subdirectory name as the model id. For Hugging Face repo ids, the
+    natural/default directory name is the repo name segment, not a tool-specific
+    cache layout.
+    """
+    _validate_repo_id(repo_id)
+    return repo_id.rsplit("/", maxsplit=1)[1]
 
 
 def build_artifact_readiness_plan(
@@ -43,30 +70,132 @@ def build_artifact_readiness_plan(
     node: str,
     node_home_dir: str,
     presence: ArtifactPresence,
-    studio_hf_home: str = "~/.cache/huggingface",
+    studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
 ) -> ArtifactReadinessPlan:
-    """Build a read-only plan for making a model artifact ready for oMLX on a node."""
-    cache_dir = hf_cache_dir_name(repo_id)
-    studio_hf_cache_path = f"{studio_hf_home}/hub/{cache_dir}"
-    node_hf_cache_path = f"{node_home_dir}/.cache/huggingface/hub/{cache_dir}"
-    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{repo_id}"
+    """Build a read-only plan for making a model ready for oMLX on a node.
+
+    TF v2/oMLX product state uses only the oMLX default model directory shape:
+    ``~/.omlx/models/<model-dir>``. Hugging Face cache layout is intentionally
+    not part of the product flow.
+    """
+    model_dir_name = omlx_model_dir_name(repo_id)
+    studio_omlx_model_dir = f"{studio_omlx_models_dir}/{model_dir_name}"
+    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{model_dir_name}"
 
     actions: list[ArtifactReadinessAction] = []
-    if not presence.studio_hf_cache:
-        actions.append(ArtifactReadinessAction.DOWNLOAD_TO_STUDIO)
-    elif not presence.node_hf_cache:
-        actions.append(ArtifactReadinessAction.SYNC_TO_NODE)
+    if not presence.studio_omlx_model_dir:
+        actions.append(ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX)
     elif not presence.node_omlx_model_dir:
-        actions.append(ArtifactReadinessAction.PREPARE_OMLX_MODEL_DIR)
+        actions.append(ArtifactReadinessAction.SYNC_TO_NODE_OMLX)
 
     return ArtifactReadinessPlan(
         repo_id=repo_id,
         node=node,
-        studio_hf_cache_path=studio_hf_cache_path,
-        node_hf_cache_path=node_hf_cache_path,
+        studio_omlx_model_dir=studio_omlx_model_dir,
         node_omlx_model_dir=node_omlx_model_dir,
         ready=not actions,
         actions=actions,
+    )
+
+
+def build_artifact_sync_plan(
+    *,
+    repo_id: str,
+    node_user: str,
+    node_host: str,
+    node_home_dir: str,
+    studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
+) -> ArtifactSyncPlan:
+    """Build a studio-to-node oMLX model-directory rsync plan."""
+    _validate_user_host_path(node_user=node_user, node_host=node_host, node_home_dir=node_home_dir)
+    model_dir_name = omlx_model_dir_name(repo_id)
+    source_path = f"{studio_omlx_models_dir}/{model_dir_name}/"
+    remote_omlx_models_dir = f"{node_home_dir}/.omlx/models"
+    destination = f"{node_user}@{node_host}:{remote_omlx_models_dir}/{model_dir_name}/"
+    mkdir_args = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        f"{node_user}@{node_host}",
+        "mkdir",
+        "-p",
+        remote_omlx_models_dir,
+    ]
+    rsync_args = [
+        "rsync",
+        "-az",
+        "--progress",
+        "-e",
+        "ssh -o BatchMode=yes -o ConnectTimeout=8",
+        source_path,
+        destination,
+    ]
+    command = " ".join(shlex.quote(arg) for arg in rsync_args)
+    return ArtifactSyncPlan(
+        repo_id=repo_id,
+        source_path=source_path,
+        destination=destination,
+        command=command,
+        mkdir_args=mkdir_args,
+        rsync_args=rsync_args,
+    )
+
+
+def build_artifact_download_plan(
+    *,
+    repo_id: str,
+    studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
+) -> ArtifactDownloadPlan:
+    """Build a plan to download a model directly into studio's oMLX model directory."""
+    model_dir_name = omlx_model_dir_name(repo_id)
+    destination = f"{studio_omlx_models_dir}/{model_dir_name}"
+    args = [
+        "uvx",
+        "--from",
+        "huggingface_hub",
+        "hf",
+        "download",
+        repo_id,
+        "--local-dir",
+        destination,
+    ]
+    command = " ".join(shlex.quote(arg) for arg in args)
+    return ArtifactDownloadPlan(
+        repo_id=repo_id,
+        model_dir_name=model_dir_name,
+        destination=destination,
+        command=command,
+        args=args,
+    )
+
+
+def run_artifact_download(plan: ArtifactDownloadPlan, *, timeout: int = 7200) -> subprocess.CompletedProcess[str]:
+    """Execute a previously built direct-to-oMLX download plan."""
+    return subprocess.run(
+        plan.args,
+        check=False,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def run_artifact_sync(plan: ArtifactSyncPlan, *, timeout: int = 7200) -> subprocess.CompletedProcess[str]:
+    """Execute a previously built rsync plan."""
+    mkdir_result = subprocess.run(
+        plan.mkdir_args,
+        check=False,
+        text=True,
+        timeout=60,
+    )
+    if mkdir_result.returncode != 0:
+        return mkdir_result
+    return subprocess.run(
+        plan.rsync_args,
+        check=False,
+        text=True,
+        timeout=timeout,
     )
 
 
@@ -80,21 +209,39 @@ def _remote_path_exists(host: str, path: str) -> bool:
     return result.returncode == 0
 
 
+def _validate_repo_id(repo_id: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo_id):
+        msg = f"Invalid repo_id for Hugging Face model: {repo_id!r}"
+        raise ValueError(msg)
+
+
+def _validate_user_host_path(*, node_user: str, node_host: str, node_home_dir: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", node_user):
+        msg = f"Invalid node_user: {node_user!r}"
+        raise ValueError(msg)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", node_host):
+        msg = f"Invalid node_host: {node_host!r}"
+        raise ValueError(msg)
+    if not node_home_dir.startswith("/Users/"):
+        msg = f"Invalid node_home_dir: {node_home_dir!r}"
+        raise ValueError(msg)
+    if not re.fullmatch(r"/[A-Za-z0-9._/-]+", node_home_dir):
+        msg = f"Invalid node_home_dir: {node_home_dir!r}"
+        raise ValueError(msg)
+
+
 def probe_artifact_presence(
     *,
     repo_id: str,
     node_host: str,
     node_home_dir: str,
-    studio_hf_home: str = "~/.cache/huggingface",
 ) -> ArtifactPresence:
-    """Check artifact presence on studio and a node using existing SSH access."""
-    cache_dir = hf_cache_dir_name(repo_id)
-    studio_hf_cache_path = Path(studio_hf_home).expanduser() / "hub" / cache_dir
-    node_hf_cache_path = f"{node_home_dir}/.cache/huggingface/hub/{cache_dir}"
-    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{repo_id}"
+    """Check oMLX model-directory presence on studio and a node."""
+    model_dir_name = omlx_model_dir_name(repo_id)
+    studio_omlx_model_dir = Path(DEFAULT_OMLX_MODELS_DIR).expanduser() / model_dir_name
+    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{model_dir_name}"
 
     return ArtifactPresence(
-        studio_hf_cache=studio_hf_cache_path.exists(),
-        node_hf_cache=_remote_path_exists(node_host, node_hf_cache_path),
+        studio_omlx_model_dir=studio_omlx_model_dir.exists(),
         node_omlx_model_dir=_remote_path_exists(node_host, node_omlx_model_dir),
     )
