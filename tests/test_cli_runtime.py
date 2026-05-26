@@ -6,7 +6,7 @@ from textwrap import dedent
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
-from thunder_forge.cluster.omlx import OmlxHealthResult
+from thunder_forge.cluster.omlx import OmlxHealthResult, OmlxSmokeResult
 
 runner = CliRunner()
 
@@ -97,3 +97,69 @@ def test_runtime_status_reports_omlx_health(tmp_path: Path, monkeypatch) -> None
     assert "models: ok" in result.stdout
     assert "status: ok" in result.stdout
     assert "- mlx-community/test-model" in result.stdout
+
+
+def test_runtime_smoke_reports_direct_chat_result(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                fabric_host: msm3-fabric
+                ram_gb: 128
+                user: shag
+                role: node
+                runtime:
+                  type: omlx
+                  port: 8018
+            assignments: {}
+        """)
+    )
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "smoke_omlx_chat",
+        lambda base_url, *, model, prompt, timeout: OmlxSmokeResult(
+            base_url=base_url,
+            model=model,
+            health_ok=True,
+            models_ok=True,
+            model_visible=True,
+            chat_ok=True,
+            models=[model],
+            answer="pong",
+            latency_ms=123,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "runtime",
+            "smoke",
+            "--node",
+            "msm3",
+            "--model",
+            "Qwen3-1.7B-4bit",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "node: msm3" in result.stdout
+    assert "base_url: http://msm3-wifi.lan:8018" in result.stdout
+    assert "model: Qwen3-1.7B-4bit" in result.stdout
+    assert "health: ok" in result.stdout
+    assert "models: ok" in result.stdout
+    assert "model_visible: yes" in result.stdout
+    assert "chat: ok" in result.stdout
+    assert "latency_ms: 123" in result.stdout
+    assert "answer: pong" in result.stdout

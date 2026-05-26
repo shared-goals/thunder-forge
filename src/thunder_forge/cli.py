@@ -16,7 +16,7 @@ from thunder_forge.cluster.artifacts import (
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.fabric import discover_link_local_fabric_host, resolve_fabric_host
-from thunder_forge.cluster.omlx import check_omlx_health
+from thunder_forge.cluster.omlx import check_omlx_health, smoke_omlx_chat
 
 app = typer.Typer(
     name="thunder-forge",
@@ -291,6 +291,40 @@ def runtime_status(
         typer.echo(f"Error: {error}", err=True)
 
     if not result.health_ok or not result.models_ok:
+        raise typer.Exit(1)
+
+
+@runtime_app.command("smoke")
+def runtime_smoke(
+    node: str = typer.Option(..., "--node", help="Node name to smoke-test runtime for (e.g. msm3)."),
+    model: str = typer.Option(..., "--model", help="oMLX model id to test, usually the model directory name."),
+    prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
+    timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
+) -> None:
+    """Run a direct oMLX chat smoke test, without LiteLLM."""
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
+    result = smoke_omlx_chat(base_url, model=model, prompt=prompt, timeout=timeout)
+
+    _print_runtime_node_header(node, runtime_node)
+    typer.echo(f"base_url: {result.base_url}")
+    typer.echo(f"model: {result.model}")
+    typer.echo(f"health: {'ok' if result.health_ok else 'fail'}")
+    typer.echo(f"models: {'ok' if result.models_ok else 'fail'}")
+    typer.echo(f"model_visible: {'yes' if result.model_visible else 'no'}")
+    typer.echo(f"chat: {'ok' if result.chat_ok else 'fail'}")
+    typer.echo(f"latency_ms: {result.latency_ms}")
+    if result.answer:
+        typer.echo(f"answer: {result.answer}")
+    if result.models:
+        typer.echo("served_models:")
+        for model_id in result.models:
+            typer.echo(f"  - {model_id}")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+
+    if not result.ok:
         raise typer.Exit(1)
 
 
