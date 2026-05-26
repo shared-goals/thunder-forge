@@ -121,6 +121,36 @@ def test_node_resolved_fields_default_to_none(assignments_yaml: Path) -> None:
         assert node.homebrew_prefix is None
 
 
+def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) -> None:
+    """A v2 node can declare management host, fabric host, and node-level oMLX runtime."""
+    content = dedent("""\
+        models: {}
+        nodes:
+          msm3:
+            host: msm3-wifi.lan
+            fabric_host: msm3-fabric
+            ram_gb: 128
+            user: shag
+            role: node
+            runtime:
+              type: omlx
+              port: 8018
+        assignments: {}
+    """)
+    p = tmp_path / "node-assignments.yaml"
+    p.write_text(content)
+
+    config = load_cluster_config(p)
+    node = config.nodes["msm3"]
+
+    assert node.host == "msm3-wifi.lan"
+    assert node.fabric_host == "msm3-fabric"
+    assert node.runtime is not None
+    assert node.runtime.type == "omlx"
+    assert node.runtime.port == 8018
+    assert node.runtime.model_dir is None
+
+
 def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """GATEWAY_SSH_USER env var overrides default when no YAML user is set."""
     content = dedent("""\

@@ -2,7 +2,7 @@
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
-**Goal:** Build a dev-only Thunder Forge MVP that runs one already cached MLX artifact through oMLX on `msm3`, then optionally exposes it through LiteLLM on `studio`.
+**Goal:** Build a dev-only Thunder Forge MVP that runs one MLX artifact through oMLX on `msm3` from oMLX's default model directory, then optionally exposes it through LiteLLM on `studio`.
 
 **Architecture:** Thunder Forge remains the control plane. oMLX is modeled as a node-level daemon on `msm3`, not as one service per model. `studio` is the dev frontend/future cache hub. `msm4` remains dedicated to direct oMLX/Hindsight and `rock` production is not touched. The first operator interface is CLI with stable JSON and dry-run/apply semantics; API, MCP, web UI, PostgreSQL, and queues are deferred until the simpler shape is insufficient.
 
@@ -20,8 +20,8 @@
 - Use `.lan` names only for normal LAN-resolved hosts.
 - Treat `msm3-wifi.lan` as stable management/bootstrap path.
 - Treat future Thunderbolt/fabric paths as point-to-point, not necessarily `.lan`; do not assume any fabric hostname exists until `/etc/hosts`, mDNS, or another macOS mapping is configured.
-- Do not download or sync new model weights until read-only cache inspection works.
-- Start from the existing `shag@msm3` cache. Observed candidates include `mlx-community/Qwen3.6-35B-A3B-4bit`, `mlx-community/Qwen3-30B-A3B-4bit`, and other Qwen3 artifacts.
+- Do not download new model weights until existing local artifacts have been inspected.
+- Start from the existing `shag@msm3` cache as source evidence, but prepare the runtime model under oMLX's default directory: `/Users/shag/.omlx/models`; the normal serve command should omit `--model-dir`. Observed candidates include `mlx-community/Qwen3.6-35B-A3B-4bit`, `mlx-community/Qwen3-30B-A3B-4bit`, and other Qwen3 artifacts.
 - Prefer dev port `8018` on `msm3` until stale `admin`-owned MLX processes are fully removed.
 - Do not touch Hindsight production traffic during this MVP.
 - Keep public docs framed around operator expectations and system behavior, not personal user stories.
@@ -37,7 +37,7 @@
 - Create/modify: `docs/notes/2026-05-25-msm3-dev-node-inspection.md`
 
 **Steps:**
-1. Ensure the PRD says the first TF v2 dev use case runs an already cached model on `msm3`.
+1. Ensure the PRD says the first TF v2 dev use case runs a model prepared under oMLX's default model directory on `msm3`.
 2. Ensure the PRD describes operator expectations rather than a personal named-user story.
 3. Ensure the PRD captures the final expectation: Thunder Forge as compute resource for Shared Goals platform, `whattodo`, and `text-forge`, with Daily Compass / operations summaries.
 4. Ensure the ADR says oMLX is node-level runtime and `msm4` is excluded from dev experiments while dedicated to Hindsight.
@@ -52,7 +52,7 @@
 
 ## Task 2: Inspect current config and deployment code
 
-**Objective:** Identify the smallest extension points for oMLX without rewriting current runtime logic.
+**Objective:** Identify which proven techniques to reuse from current runtime logic while allowing a fresh v2 schema and architecture.
 
 **Files:**
 - Read: `src/thunder_forge/cli.py`
@@ -73,7 +73,7 @@
 
 ## Task 3: Add a config schema draft for node runtime identity
 
-**Objective:** Represent stable management host, optional future fabric host, and node-level runtime without changing production config behavior.
+**Objective:** Represent stable management host, optional future fabric host, and node-level runtime using a fresh v2 schema; production `rock` config is not migrated or modified in this MVP.
 
 **Files:**
 - Modify: `src/thunder_forge/cluster/config.py`
@@ -92,7 +92,6 @@ nodes:
     runtime:
       type: omlx
       port: 8018
-      model_dir: /Users/shag/.cache/thunder-forge/models
 ```
 
 Assertions:
@@ -102,6 +101,7 @@ assert node.host == "msm3-wifi.lan"
 assert node.fabric_host == "msm3-fabric"
 assert node.runtime.type == "omlx"
 assert node.runtime.port == 8018
+assert node.runtime.model_dir is None  # omitted means oMLX default ~/.omlx/models
 ```
 
 **Step 2: Run test to verify failure**
@@ -112,9 +112,9 @@ uv run pytest tests/test_config.py -q
 
 Expected: FAIL because runtime/fabric fields do not exist yet.
 
-**Step 3: Implement minimal schema**
+**Step 3: Implement minimal v2 schema**
 
-Add optional fields only. Do not break existing configs.
+Prefer a clean runtime/node schema over preserving old field names. Do not modify production runtime config on `rock`; if old config parsing remains in the codebase during transition, keep it isolated from the v2 path rather than bending the v2 schema around it.
 
 **Step 4: Run tests**
 
@@ -271,7 +271,7 @@ Expected: PASS.
 **Command shape:**
 
 ```bash
-uv run thunder-forge runtime start --node msm3 --model-dir <path> --port 8018 --dry-run
+uv run thunder-forge runtime start --node msm3 --port 8018 --dry-run
 ```
 
 **Step 1: Write failing tests**
@@ -279,7 +279,7 @@ uv run thunder-forge runtime start --node msm3 --model-dir <path> --port 8018 --
 Assert generated remote command is equivalent to:
 
 ```bash
-/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 --model-dir <path>
+/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018
 ```
 
 Do not include SSD KV cache flags yet.

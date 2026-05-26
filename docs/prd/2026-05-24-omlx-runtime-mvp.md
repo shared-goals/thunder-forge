@@ -23,13 +23,13 @@ oMLX is treated as a node-level runtime daemon: one oMLX server per inference no
 
 ## MVP Goal
 
-Run one already cached MLX artifact on `msm3` through oMLX, prove the node-runtime abstraction from `studio`, then optionally expose it through a dev LiteLLM route:
+Run one MLX artifact on `msm3` through oMLX using oMLX's default model directory without overriding `--model-dir`, prove the node-runtime abstraction from `studio`, then optionally expose it through a dev LiteLLM route:
 
 ```text
 Hermes/operator -> Thunder Forge dev repo on studio -> oMLX daemon on msm3 -> optional LiteLLM dev route on studio
 ```
 
-The first proof does not need model download or multi-node scheduling. It should prove that Thunder Forge can inspect a `shag`-owned cache on `msm3`, resolve a usable snapshot/model directory, start or verify oMLX, smoke-test direct access, and only then generate a LiteLLM route if the direct path is healthy.
+The first proof does not need multi-node scheduling or a custom cache topology. It should prove that Thunder Forge can inspect or prepare a `shag`-owned model under the oMLX default model directory on `msm3`, resolve a usable model directory, start or verify oMLX, smoke-test direct access, and only then generate a LiteLLM route if the direct path is healthy.
 
 ## Operator expectations
 
@@ -37,7 +37,7 @@ The first proof does not need model download or multi-node scheduling. It should
 - Thunder Forge can select or validate an appropriate compatible model for the requested task.
 - Thunder Forge can prepare the selected model on the cache/frontend node, choose a suitable inference node, verify node readiness, and start or verify oMLX.
 - `shag` is the operational dev user for the new Thunder Forge version on `studio` and `msm3`.
-- For the TF v2 MVP, model choice should come from the existing `shag@msm3` cache. `msm4` continues serving Hindsight through direct oMLX and is not a dev test bench.
+- For the TF v2 MVP, existing `shag@msm3` cached artifacts are useful source material, but the runtime model directory should follow oMLX defaults rather than preserve Thunder Forge-specific cache paths. `msm4` continues serving Hindsight through direct oMLX and is not a dev test bench.
 - Friends or trusted external users may later access the cluster through scoped API keys; their usage must be visible in utilization and audit summaries.
 
 ## Initial Scope
@@ -48,8 +48,8 @@ The first proof does not need model download or multi-node scheduling. It should
 - `studio` as development frontend and future caching hub.
 - `msm3` as the only TF v2 development inference node.
 - oMLX as a node-level runtime daemon.
-- Read-only inspection of the existing `shag@msm3` Hugging Face cache.
-- Selecting one cached MLX artifact for direct oMLX smoke testing. Initial candidates observed under `~/.cache/huggingface/hub/`:
+- Inspection of the existing `shag@msm3` Hugging Face cache only to avoid wasteful re-downloads and identify candidate artifacts.
+- Preparing one MLX artifact for direct oMLX smoke testing under the oMLX default model directory (`~/.omlx/models`), then running `omlx serve` without an explicit `--model-dir`. Initial candidates observed under the existing Hugging Face cache (`~/.cache/huggingface/hub/`):
   - `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ`
   - `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`
   - `mlx-community/Qwen3-30B-A3B-4bit`
@@ -81,7 +81,7 @@ The first proof does not need model download or multi-node scheduling. It should
 - Disturbing `msm4` while it is dedicated to Hindsight/oMLX.
 - Multi-node scheduling.
 - Automatic model ranking or model search.
-- Downloading or syncing new model weights before read-only cache inspection works.
+- Multi-node model sync before the single-node default oMLX model-directory flow works.
 - Thunderbolt fabric setup as an implicit hidden prerequisite. It must be treated as its own explicit setup/discovery task.
 - Full Admin UI redesign.
 - PostgreSQL-backed control-plane rewrite.
@@ -96,8 +96,8 @@ The first proof does not need model download or multi-node scheduling. It should
 ```text
 An operator asks Hermes or Thunder Forge to make a cached model available for a dev task.
 Thunder Forge uses the dev control plane on studio to inspect msm3,
-verifies the `shag@msm3` Hugging Face cache layout,
-selects an appropriate cached MLX artifact,
+verifies the `shag@msm3` existing cache only as source evidence,
+prepares the selected MLX artifact under the oMLX default model directory,
 starts or verifies the oMLX daemon,
 smoke-tests direct oMLX access,
 and only then returns either a direct endpoint or a temporary LiteLLM model id for development testing.
@@ -131,8 +131,8 @@ msm3
   stable management path: msm3-wifi.lan
   desired future point-to-point fabric path: explicit local alias such as msm3-fabric, not configured yet
 
-  omlx serve --host 0.0.0.0 --port <dev-port> --model-dir <shag-owned-model-dir>
-    <cached MLX artifact chosen for the dev smoke test>
+  omlx serve --host 0.0.0.0 --port <dev-port>
+    # uses oMLX default model directory: /Users/shag/.omlx/models
 
 msm4
   dedicated Hindsight direct oMLX runtime; excluded from this MVP's dev experiments
@@ -146,9 +146,9 @@ The MVP is accepted when all of the following are true:
 
 1. The dev Thunder Forge repository exists under `shag@studio` and does not depend on production `rock` for development.
 2. Thunder Forge documents `studio` as dev frontend/cache hub, `msm3` as the TF v2 development inference node, and `msm4` as the dedicated Hindsight node.
-3. The system can inspect the existing `shag@msm3` Hugging Face cache and list candidate MLX artifacts.
-4. The selected model folder is readable by `shag@msm3` without relying on `admin@msm3` ownership.
-5. oMLX on `msm3` is started or verified as a node-level daemon using the selected model directory.
+3. The system can inspect the existing `shag@msm3` Hugging Face cache and list candidate MLX artifacts without treating the old cache location as the runtime target.
+4. The selected model folder is prepared under `/Users/shag/.omlx/models` and readable by `shag@msm3` without relying on `admin@msm3` ownership.
+5. oMLX on `msm3` is started or verified as a node-level daemon using its default model directory, without passing `--model-dir` in the normal path.
 6. Direct oMLX smoke tests pass over the currently available stable interface:
    - `GET /health`;
    - `GET /v1/models`;
@@ -173,7 +173,7 @@ After the MVP, Thunder Forge should support task-oriented model selection:
 task -> choose appropriate compatible model/version -> prepare/cache -> select node -> run via node runtime -> route through LiteLLM
 ```
 
-The fixed dev-node MVP is intentionally narrow. It is the first proof point for the later model-selection and cluster-management architecture. After the direct existing-cache path works, Thunder Forge can generalize to downloading updated or more appropriate models onto `studio` and syncing them to inference nodes over the point-to-point Thunderbolt fabric.
+The fixed dev-node MVP is intentionally narrow. It is the first proof point for the later model-selection and cluster-management architecture. After the single-node default oMLX model-directory path works, Thunder Forge can generalize to downloading updated or more appropriate models onto `studio` and syncing/preparing them on inference nodes over the point-to-point Thunderbolt fabric.
 
 ## External design notes considered
 

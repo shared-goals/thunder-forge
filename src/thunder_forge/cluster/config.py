@@ -19,6 +19,10 @@ class ServingMode(StrEnum):
     MLX_OPENAI_SERVER = "mlx-openai-server"
 
 
+class RuntimeType(StrEnum):
+    OMLX = "omlx"
+
+
 class NodeRole(StrEnum):
     NODE = "node"
     GATEWAY = "gateway"
@@ -110,12 +114,21 @@ class Model:
     model_info: ModelInfo | None = None
 
 
+@dataclass
+class NodeRuntime:
+    type: RuntimeType | str
+    port: int
+    model_dir: str | None = None
+
+
 @dataclass(init=False)
 class Node:
     host: str
     ram_gb: int
     user: str
     role: NodeRole | str
+    fabric_host: str | None
+    runtime: NodeRuntime | None
     # Resolved during pre-flight — None until populated
     platform: str | None
     shell: str | None
@@ -130,6 +143,8 @@ class Node:
         role: NodeRole | str = NodeRole.NODE,
         *,
         ip: str | None = None,
+        fabric_host: str | None = None,
+        runtime: NodeRuntime | None = None,
         platform: str | None = None,
         shell: str | None = None,
         home_dir: str | None = None,
@@ -143,6 +158,8 @@ class Node:
         self.ram_gb = ram_gb
         self.user = user
         self.role = role
+        self.fabric_host = fabric_host
+        self.runtime = runtime
         self.platform = platform
         self.shell = shell
         self.home_dir = home_dir
@@ -268,6 +285,16 @@ def _parse_server_args(raw: dict) -> ServerArgs:
     )
 
 
+def _parse_node_runtime(raw: dict | None) -> NodeRuntime | None:
+    if raw is None:
+        return None
+    return NodeRuntime(
+        type=RuntimeType(raw["type"]),
+        port=raw["port"],
+        model_dir=raw.get("model_dir"),
+    )
+
+
 def _parse_model(raw: dict) -> Model:
     server_args_raw = raw.get("server_args")
     litellm_params_raw = raw.get("litellm_params")
@@ -322,7 +349,14 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
         if not host:
             msg = f"Node {k} requires host (or deprecated ip)"
             raise ValueError(msg)
-        nodes[k] = Node(host=host, ram_gb=v["ram_gb"], user=user, role=role)
+        nodes[k] = Node(
+            host=host,
+            ram_gb=v["ram_gb"],
+            user=user,
+            role=role,
+            fabric_host=v.get("fabric_host"),
+            runtime=_parse_node_runtime(v.get("runtime")),
+        )
 
     assignments: dict[str, list[Assignment]] = {}
     for node_name, slots in raw.get("assignments", {}).items():

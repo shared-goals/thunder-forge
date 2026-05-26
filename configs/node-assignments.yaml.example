@@ -66,8 +66,16 @@ nodes:
   rock: { host: "rock.lan", ram_gb: 32, role: gateway }
   msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
   msm2: { host: "msm2-wifi.lan", ram_gb: 128, role: node }
-  # Add more nodes as needed:
-  # mynode: { host: "mynode.lan", ram_gb: 64, role: node, user: myuser }
+  msm3:
+    host: "msm3-wifi.lan"
+    fabric_host: "msm3-fabric"  # Optional future point-to-point/fabric alias; configure before use.
+    ram_gb: 128
+    role: node
+    user: shag
+    runtime:
+      type: omlx
+      port: 8018
+      # model_dir omitted: oMLX default ~/.omlx/models is used, so runtime start does not pass --model-dir.
 
 # ── Node assignments ────────────────────────────────
 # Each node gets a list of {model, port} pairs.

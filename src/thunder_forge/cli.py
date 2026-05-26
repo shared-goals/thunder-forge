@@ -7,6 +7,8 @@ app = typer.Typer(
     help="CLI for managing a local MLX inference cluster.",
     no_args_is_help=True,
 )
+runtime_app = typer.Typer(help="Manage node-level runtimes such as oMLX.", no_args_is_help=True)
+app.add_typer(runtime_app, name="runtime")
 
 
 def _load_config() -> tuple:
@@ -29,6 +31,45 @@ def _run_preflight(config: object, *, target_node: str | None = None) -> None:
     print_preflight_result(errors, config)
     if errors:
         raise typer.Exit(1)
+
+
+@runtime_app.command("start")
+def runtime_start(
+    node: str = typer.Option(..., "--node", help="Node name to start runtime on (e.g. msm3)."),
+    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print command without executing by default."),
+) -> None:
+    """Start or dry-run a node-level runtime such as oMLX."""
+    from thunder_forge.cluster.config import RuntimeType
+    from thunder_forge.cluster.omlx import build_omlx_serve_command
+
+    config, _ = _load_config()
+    if node not in config.nodes:
+        typer.echo(f"Error: node '{node}' not found", err=True)
+        raise typer.Exit(1)
+    runtime_node = config.nodes[node]
+    if runtime_node.runtime is None:
+        typer.echo(f"Error: node '{node}' has no runtime configured", err=True)
+        raise typer.Exit(1)
+    if runtime_node.runtime.type != RuntimeType.OMLX:
+        typer.echo(f"Error: unsupported runtime '{runtime_node.runtime.type}'", err=True)
+        raise typer.Exit(1)
+    if runtime_node.home_dir is None:
+        runtime_node.home_dir = f"/Users/{runtime_node.user}"
+
+    command = build_omlx_serve_command(runtime_node)
+    typer.echo(f"node: {node}")
+    typer.echo(f"runtime: {runtime_node.runtime.type}")
+    typer.echo(f"management_host: {runtime_node.host}")
+    if runtime_node.fabric_host:
+        typer.echo(f"fabric_host: {runtime_node.fabric_host}")
+    typer.echo(f"command: {command}")
+
+    if dry_run:
+        typer.echo("mode: dry-run")
+        return
+
+    typer.echo("Error: runtime apply/start is not implemented yet; use --dry-run", err=True)
+    raise typer.Exit(1)
 
 
 @app.command()
