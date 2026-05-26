@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 
 
 class ArtifactReadinessAction(StrEnum):
@@ -65,4 +67,34 @@ def build_artifact_readiness_plan(
         node_omlx_model_dir=node_omlx_model_dir,
         ready=not actions,
         actions=actions,
+    )
+
+
+def _remote_path_exists(host: str, path: str) -> bool:
+    result = subprocess.run(
+        ["ssh", host, "test", "-e", path],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def probe_artifact_presence(
+    *,
+    repo_id: str,
+    node_host: str,
+    node_home_dir: str,
+    studio_hf_home: str = "~/.cache/huggingface",
+) -> ArtifactPresence:
+    """Check artifact presence on studio and a node using existing SSH access."""
+    cache_dir = hf_cache_dir_name(repo_id)
+    studio_hf_cache_path = Path(studio_hf_home).expanduser() / "hub" / cache_dir
+    node_hf_cache_path = f"{node_home_dir}/.cache/huggingface/hub/{cache_dir}"
+    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{repo_id}"
+
+    return ArtifactPresence(
+        studio_hf_cache=studio_hf_cache_path.exists(),
+        node_hf_cache=_remote_path_exists(node_host, node_hf_cache_path),
+        node_omlx_model_dir=_remote_path_exists(node_host, node_omlx_model_dir),
     )

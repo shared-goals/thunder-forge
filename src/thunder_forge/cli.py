@@ -5,6 +5,7 @@ from typing import cast
 
 import typer
 
+from thunder_forge.cluster.artifacts import build_artifact_readiness_plan, probe_artifact_presence
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.omlx import check_omlx_health
 
@@ -14,7 +15,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 runtime_app = typer.Typer(help="Manage node-level runtimes such as oMLX.", no_args_is_help=True)
+artifact_app = typer.Typer(help="Inspect model artifact readiness for oMLX nodes.", no_args_is_help=True)
 app.add_typer(runtime_app, name="runtime")
+app.add_typer(artifact_app, name="artifact")
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
@@ -66,6 +69,45 @@ def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
     typer.echo(f"management_host: {runtime_node.host}")
     if runtime_node.fabric_host:
         typer.echo(f"fabric_host: {runtime_node.fabric_host}")
+
+
+@artifact_app.command("status")
+def artifact_status(
+    model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
+    node: str = typer.Option(..., "--node", help="Node name to check artifact readiness for (e.g. msm3)."),
+    studio_hf_home: str = typer.Option("~/.cache/huggingface", "--studio-hf-home", help="Studio HF home path."),
+) -> None:
+    """Inspect model artifact readiness without downloading or syncing."""
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
+    presence = probe_artifact_presence(
+        repo_id=model,
+        node_host=runtime_node.host,
+        node_home_dir=node_home_dir,
+        studio_hf_home=studio_hf_home,
+    )
+    plan = build_artifact_readiness_plan(
+        repo_id=model,
+        node=node,
+        node_home_dir=node_home_dir,
+        presence=presence,
+        studio_hf_home=studio_hf_home,
+    )
+
+    typer.echo(f"model: {model}")
+    _print_runtime_node_header(node, runtime_node)
+    typer.echo(f"studio_hf_cache_path: {plan.studio_hf_cache_path}")
+    typer.echo(f"node_hf_cache_path: {plan.node_hf_cache_path}")
+    typer.echo(f"node_omlx_model_dir: {plan.node_omlx_model_dir}")
+    typer.echo(f"studio_hf_cache: {'present' if presence.studio_hf_cache else 'missing'}")
+    typer.echo(f"node_hf_cache: {'present' if presence.node_hf_cache else 'missing'}")
+    typer.echo(f"node_omlx_model_dir: {'present' if presence.node_omlx_model_dir else 'missing'}")
+    typer.echo(f"ready: {'yes' if plan.ready else 'no'}")
+    if plan.actions:
+        typer.echo("next_actions:")
+        for action in plan.actions:
+            typer.echo(f"  - {action}")
 
 
 @runtime_app.command("start")

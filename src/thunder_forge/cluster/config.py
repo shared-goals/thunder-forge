@@ -356,6 +356,8 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             role=role,
             fabric_host=v.get("fabric_host"),
             runtime=_parse_node_runtime(v.get("runtime")),
+            home_dir=v.get("home_dir"),
+            homebrew_prefix=v.get("homebrew_prefix"),
         )
 
     assignments: dict[str, list[Assignment]] = {}

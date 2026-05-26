@@ -132,6 +132,7 @@ def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) 
             ram_gb: 128
             user: shag
             role: node
+            home_dir: /srv/shag
             runtime:
               type: omlx
               port: 8018
@@ -145,6 +146,7 @@ def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) 
 
     assert node.host == "msm3-wifi.lan"
     assert node.fabric_host == "msm3-fabric"
+    assert node.home_dir == "/srv/shag"
     assert node.runtime is not None
     assert node.runtime.type == "omlx"
     assert node.runtime.port == 8018
