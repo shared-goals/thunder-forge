@@ -85,7 +85,7 @@ When more nodes are added, add more entries with the same `model_name` and diffe
 
 ## Recommendation
 
-Use LiteLLM Proxy for the public cluster endpoint, but keep it generated and minimal:
+Use LiteLLM Proxy as the **baseline** public cluster endpoint candidate, but keep it generated and minimal:
 
 - no Admin UI;
 - no DB-backed model management for MVP;
@@ -93,7 +93,9 @@ Use LiteLLM Proxy for the public cluster endpoint, but keep it generated and min
 - generated config from TF desired state;
 - tests assert that generated routes use OpenAI-compatible `/v1` endpoints and public model aliases.
 
-For embedded Python-only use of LiteLLM Router, it is viable but not sufficient as the cluster frontend by itself because clients still need a stable OpenAI-compatible HTTP endpoint. We could wrap Router in our own FastAPI service, but that duplicates what LiteLLM Proxy already does. KISS says: run LiteLLM Proxy as a thin service, disable UI, and generate config.
+This is not the final frontend decision. Sergey explicitly asked for a lighter balancer/frontend alternative check: no web UI dependency, only routing/balancing, standards-compatible, and reasonably popular. The initial shortlist is recorded in `docs/notes/2026-05-26-frontend-balancer-alternatives.md`. The preferred next spike is `openziti/llm-gateway` because it is a Go single-binary OpenAI-compatible gateway with YAML config, local/OpenAI-compatible backends, health checks, and load balancing. LiteLLM remains the proven baseline until that spike is measured.
+
+For embedded Python-only use of LiteLLM Router, it is viable but not sufficient as the cluster frontend by itself because clients still need a stable OpenAI-compatible HTTP endpoint. We could wrap Router in our own FastAPI service, but that duplicates what LiteLLM Proxy already does. KISS says: either run LiteLLM Proxy as a thin generated service with UI disabled, or adopt an even thinner gateway after a measured spike.
 
 ## Sources checked
 

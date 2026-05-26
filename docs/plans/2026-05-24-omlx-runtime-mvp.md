@@ -2,11 +2,11 @@
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
-**Goal:** Build a dev-only Thunder Forge MVP that runs one MLX artifact through oMLX on `msm3` from oMLX's default model directory, then optionally exposes it through LiteLLM on `studio`.
+**Goal:** Build a dev-only Thunder Forge MVP that runs one MLX artifact through oMLX on `msm3` from oMLX's default model directory, then exposes it through a small OpenAI-compatible frontend on `studio`.
 
-**Architecture:** Thunder Forge remains the control plane. oMLX is modeled as a node-level daemon on `msm3`, not as one service per model. `studio` is the dev frontend/future cache hub. `msm4` remains dedicated to direct oMLX/Hindsight and `rock` production is not touched. The first operator interface is CLI with stable JSON and dry-run/apply semantics; API, MCP, web UI, PostgreSQL, and queues are deferred until the simpler shape is insufficient.
+**Architecture:** Thunder Forge remains the control plane. oMLX is modeled as a node-level daemon on `msm3`, not as one service per model. `studio` is the dev frontend/future cache hub. `msm4` remains dedicated to direct oMLX/Hindsight and `rock` production is not touched. The first operator interface is CLI with stable JSON and dry-run/apply semantics; API, MCP, web UI, PostgreSQL, and queues are deferred until the simpler shape is insufficient. After the frontend smoke tests, Olla plus a minimal Thunder Forge edge is the preferred MVP frontend direction; LiteLLM remains the production-proven fallback/baseline.
 
-**Tech Stack:** Python 3.12+, Typer, pytest, httpx, existing Thunder Forge SSH helpers, oMLX CLI/server, optional LiteLLM dev route generation.
+**Tech Stack:** Python 3.12+, Typer, pytest, httpx, existing Thunder Forge SSH helpers, oMLX CLI/server, generated Olla config, minimal TF edge, optional Caddy ingress snippet, optional LiteLLM baseline route generation.
 
 ---
 
@@ -369,9 +369,9 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 - Notes:
 ```
 
-## Task 12: Add optional LiteLLM dev route only after direct smoke passes
+## Task 12: Add optional generated LiteLLM baseline route after direct smoke passes
 
-**Objective:** Expose the selected model through LiteLLM under a test name after direct oMLX is healthy.
+**Objective:** Expose the selected model through the proven/current Thunder Forge frontend baseline under a test name after direct oMLX is healthy. This validates the generated-route approach but does not decide the final TF v2 frontend.
 
 **Files:**
 - Modify: config generation code after direct runtime path exists.
@@ -385,7 +385,105 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 
 **Guardrail:** Do not modify production LiteLLM config or Hindsight config.
 
-## Task 13: Add utilization and audit summary design
+## Task 13: Spike `openziti/llm-gateway` as lighter frontend/balancer alternative
+
+**Objective:** Test whether a single-binary, no-required-web OpenAI-compatible gateway can replace LiteLLM for TF v2's simple frontend/balancer role.
+
+**Files:**
+- Create: `docs/notes/2026-05-26-frontend-balancer-alternatives.md` if missing.
+- Create/modify: `docs/notes/2026-05-26-openziti-llm-gateway-spike.md`.
+- Do not modify production `rock`, Hindsight config, or `msm4`.
+
+**Completed evidence:**
+
+- macOS arm64 binary works on `studio`.
+- Minimal LAN config proxies `msm3` oMLX without zrok/OpenZiti features.
+- `/health`, authenticated `/v1/models`, authenticated non-streaming `/v1/chat/completions`, and `/metrics` were tested.
+- Virtual API keys work for authentication and per-key model allowlists.
+- Prometheus metrics expose per-key/per-model request count and duration, plus token counters for non-streaming responses.
+- Multi-endpoint weighted round-robin and health checks are documented and implemented upstream, but not fully exercised with multiple live nodes in this spike.
+- The minimal path does not provide LiteLLM-style public aliasing. TF v2 MVP accepts real oMLX model ids plus naming convention and `/v1/models` discovery.
+- Per-request endpoint/node attribution is not present in observed request metrics and is a post-MVP gap unless patched.
+
+**Decision after later Olla smoke:** `openziti/llm-gateway` is a useful simplest-known-green baseline, but Olla is the preferred router/balancer candidate because it proved alias rewrite, sticky sessions, failover exclusion, and endpoint attribution. LiteLLM stays as production-proven fallback/baseline.
+
+## Task 14: Generate Olla dev config and smoke command
+
+**Objective:** Turn the Olla spike into repeatable Thunder Forge CLI output without making Olla YAML the source of truth. The detailed follow-up plan is `docs/plans/2026-05-26-olla-edge-mvp.md`.
+
+**Files:**
+- Modify/create: frontend config generation module under `src/thunder_forge/cluster/`.
+- Modify: `src/thunder_forge/cli.py`.
+- Create/modify tests under `tests/`.
+- Update `configs/node-assignments.yaml.example` if schema fields are added.
+
+**Command shape draft:**
+
+```bash
+uv run thunder-forge gateway olla config --dry-run
+uv run thunder-forge gateway olla smoke --base-url http://127.0.0.1:40115 --model Qwen3-1.7B-4bit --alias qwen3-1.7b-omlx-msm3-test
+```
+
+**Behavior:**
+
+- Generate YAML from TF desired state:
+  - `listen`;
+  - OpenAI-compatible provider profile;
+  - oMLX endpoints from runtime nodes;
+  - endpoint names equal TF node ids or explicit TF endpoint ids;
+  - aliases from TF model desired state;
+  - sticky sessions enabled.
+- Do not put inbound client API keys into Olla config; auth/accounting belongs to the TF edge or Caddy perimeter.
+- Keep output dry-run first. Writing/applying config should be explicit and separate.
+- Smoke should verify:
+  1. `/internal/health`;
+  2. `/internal/status/endpoints` shows the live node healthy;
+  3. `/olla/openai-compatible/v1/models` includes requested model;
+  4. non-streaming `/olla/openai-compatible/v1/chat/completions` works;
+  5. alias rewrite works;
+  6. sticky session miss/hit is observable;
+  7. response headers include `X-Olla-Endpoint`.
+
+**Expected:** Repeatable local Olla config and smoke without touching production `rock`, Hindsight, or `msm4`. Root `/v1/*`, static client API keys, stable session defaulting, and accounting are handled by the follow-up TF edge plan.
+
+## Task 15: Add launchd install command for node-level oMLX runtime
+
+**Objective:** Make `msm3` oMLX durable as one node-level daemon managed by Thunder Forge, without reverting to one plist per model/port.
+
+**Files:**
+- Modify: `src/thunder_forge/cluster/omlx.py`
+- Modify: `src/thunder_forge/cli.py`
+- Create/modify tests under `tests/`
+
+**Command shape:**
+
+```bash
+uv run thunder-forge runtime install --node msm3 --dry-run
+uv run thunder-forge runtime install --node msm3 --apply
+```
+
+**Behavior:**
+
+- Generate `~/Library/LaunchAgents/com.thunder-forge.omlx-8018.plist` for the selected node runtime.
+- Program args should use the same command shape as direct runtime start:
+  ```text
+  /Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018
+  ```
+- Use one oMLX daemon per node, not one daemon per model.
+- Use safe update order on apply:
+  1. determine node uid;
+  2. `launchctl bootout gui/<uid>/com.thunder-forge.omlx-8018 2>/dev/null`;
+  3. remove old plist;
+  4. kill/wait current `omlx serve` process on the runtime port if necessary;
+  5. upload/write the new plist;
+  6. `launchctl bootstrap gui/<uid> <plist>`;
+  7. verify `launchctl list com.thunder-forge.omlx-8018`;
+  8. run direct `runtime status`.
+- Do not touch old `admin` plists and do not touch `msm4`.
+
+**Expected:** `runtime install --dry-run` prints the plist and commands; `--apply` installs a durable node-level oMLX daemon on `msm3` only.
+
+## Task 16: Add utilization and audit summary design
 
 **Objective:** Define the smallest CLI/API contract that can feed Daily Compass and operator review before adding databases or dashboards.
 

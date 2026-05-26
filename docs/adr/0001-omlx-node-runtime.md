@@ -42,8 +42,8 @@ The MVP architecture is:
 
 ```text
 Thunder Forge = control plane and orchestration
-LiteLLM       = optional frontend/router after direct runtime health is proven
-studio        = dev control plane + future cache hub + optional LiteLLM dev gateway
+Frontend      = optional router/balancer after direct runtime health is proven
+studio        = dev control plane + future cache hub + optional dev gateway
 msm3          = first TF v2 development oMLX inference node
 msm4          = dedicated direct oMLX/Hindsight node, excluded from dev experiments
 oMLX          = node-local inference runtime daemon
@@ -177,6 +177,12 @@ Rejected for MVP. `studio` is the dev environment and future cache hub. Producti
 ### Start by importing/backfilling from a node cache to `studio`
 
 Rejected for the MVP. `studio` is the primary source for artifact movement and the source path is `~/.omlx/models`. Node-local Hugging Face caches are not product state and should not get automated import/backfill logic. If a requested artifact is missing on studio, Thunder Forge should download it directly into studio's oMLX default model directory, then sync that directory to the node.
+
+### Decide the final frontend before measurement
+
+Accepted for MVP direction after measurement, with constraints. LiteLLM remains the proven production baseline from the current Thunder Forge stack, but it is not the preferred fresh TF v2 frontend if a smaller layer is enough. The frontend comparison is recorded in `docs/notes/2026-05-26-frontend-balancer-alternatives.md`; the `openziti/llm-gateway` spike validated a tiny OpenAI-compatible proxy with virtual API keys and Prometheus metrics, and the later Olla smoke validated a stronger router/balancer shape: alias rewriting, sticky sessions, failover exclusion, and per-response endpoint attribution.
+
+The selected MVP frontend direction is recorded in `docs/adr/0002-olla-router-with-tf-edge.md`: Olla owns routing/balancing, while a minimal Thunder Forge edge owns root `/v1/*`, static client API-key validation, client identity/accounting envelope, and stable session id behavior. Caddy remains the homelab external ingress and may route both external and internal traffic if uniform ingress becomes useful.
 
 ### Adopt a full FastAPI/PostgreSQL/React rebuild immediately
 

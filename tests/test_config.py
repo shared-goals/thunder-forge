@@ -9,6 +9,7 @@ import yaml as yaml_lib
 from thunder_forge.cluster.config import (
     check_config_sync,
     generate_litellm_config,
+    generate_olla_config,
     load_cluster_config,
     parse_cluster_config,
     validate_memory,
@@ -325,6 +326,60 @@ def test_generate_litellm_config_runtime_endpoint_route(tmp_path: Path) -> None:
         "model": "openai/Qwen3-1.7B-4bit",
         "api_base": "http://msm3-wifi.lan:8018/v1",
         "api_key": "dummy",
+    }
+
+
+def test_generate_olla_config_runtime_route_with_alias_and_failover_probe(tmp_path: Path) -> None:
+    content = dedent("""\
+        models: {}
+        nodes:
+          studio:
+            host: studio.lan
+            ram_gb: 64
+            user: shag
+            role: gateway
+          msm3:
+            host: msm3-wifi.lan
+            ram_gb: 128
+            user: shag
+            role: node
+            runtime:
+              type: omlx
+              port: 8018
+        runtime_routes:
+          - model_name: qwen3-1.7b-omlx-msm3-test
+            runtime: omlx
+            node: msm3
+            model: Qwen3-1.7B-4bit
+        assignments: {}
+    """)
+    p = tmp_path / "node-assignments.yaml"
+    p.write_text(content)
+    config = load_cluster_config(p)
+
+    result = generate_olla_config(config)
+    parsed = yaml_lib.safe_load(result)
+
+    assert result.startswith("# AUTO-GENERATED")
+    assert parsed["server"]["host"] == "127.0.0.1"
+    assert parsed["server"]["port"] == 40115
+    assert parsed["proxy"]["engine"] == "olla"
+    assert parsed["proxy"]["sticky_sessions"]["enabled"] is True
+    endpoints = parsed["discovery"]["static"]["endpoints"]
+    assert endpoints == [
+        {
+            "url": "http://msm3-wifi.lan:8018",
+            "name": "msm3-omlx-live",
+            "type": "openai-compatible",
+            "priority": 100,
+            "model_url": "/v1/models",
+            "health_check_url": "/health",
+            "check_interval": "3s",
+            "check_timeout": "2s",
+        }
+    ]
+    assert parsed["model_aliases"] == {
+        "qwen3-1.7b-omlx-msm3-test": ["Qwen3-1.7B-4bit"],
     }
 
 

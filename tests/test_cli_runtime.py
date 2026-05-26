@@ -3,9 +3,11 @@
 from pathlib import Path
 from textwrap import dedent
 
+import yaml as yaml_lib
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
+from thunder_forge.cluster.olla import OllaDevSmokeResult, OllaSmokeResult
 from thunder_forge.cluster.omlx import OmlxHealthResult, OmlxSmokeResult
 
 runner = CliRunner()
@@ -259,3 +261,156 @@ def test_runtime_smoke_reports_direct_chat_result(tmp_path: Path, monkeypatch) -
     assert "chat: ok" in result.stdout
     assert "latency_ms: 123" in result.stdout
     assert "answer: pong" in result.stdout
+
+
+def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    assignments = config_dir / "node-assignments.yaml"
+    assignments.write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              studio:
+                host: studio.lan
+                ram_gb: 64
+                user: shag
+                role: gateway
+              msm3:
+                host: msm3-wifi.lan
+                ram_gb: 128
+                user: shag
+                role: node
+                runtime:
+                  type: omlx
+                  port: 8018
+            runtime_routes:
+              - model_name: qwen3-1.7b-omlx-msm3-test
+                runtime: omlx
+                node: msm3
+                model: Qwen3-1.7B-4bit
+            assignments: {}
+        """)
+    )
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    result = runner.invoke(app, ["generate-olla-config"])
+
+    assert result.exit_code == 0
+    output_path = config_dir / "olla-config.yaml"
+    assert output_path.exists()
+    parsed = yaml_lib.safe_load(output_path.read_text())
+    assert parsed["server"]["port"] == 40115
+    assert parsed["model_aliases"] == {"qwen3-1.7b-omlx-msm3-test": ["Qwen3-1.7B-4bit"]}
+    assert f"Generated {output_path}" in result.stdout
+
+
+def test_olla_smoke_cli_prints_summary(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "smoke_olla_router",
+        lambda *, base_url, model, alias, prompt, timeout: OllaSmokeResult(
+            base_url=base_url,
+            model=model,
+            alias=alias,
+            health_ok=True,
+            endpoints_ok=True,
+            models_ok=True,
+            chat_ok=True,
+            alias_ok=True,
+            session_ok=True,
+            root_v1_absent=True,
+            latency_ms=245,
+            olla_endpoint="msm3-omlx-live",
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "olla",
+            "smoke",
+            "--base-url",
+            "http://127.0.0.1:40115",
+            "--model",
+            "Qwen3-1.7B-4bit",
+            "--alias",
+            "qwen3-1.7b-omlx-msm3-test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "base_url: http://127.0.0.1:40115" in result.stdout
+    assert "model: Qwen3-1.7B-4bit" in result.stdout
+    assert "alias: qwen3-1.7b-omlx-msm3-test" in result.stdout
+    assert "health: ok" in result.stdout
+    assert "endpoints: ok" in result.stdout
+    assert "models: ok" in result.stdout
+    assert "chat: ok" in result.stdout
+    assert "alias_routing: ok" in result.stdout
+    assert "session: ok" in result.stdout
+    assert "root_v1: absent" in result.stdout
+    assert "olla_endpoint: msm3-omlx-live" in result.stdout
+
+
+def test_olla_dev_smoke_cli_prints_summary(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    fake_smoke = OllaSmokeResult(
+        base_url="http://127.0.0.1:40115",
+        model="Qwen3-1.7B-4bit",
+        alias="qwen3-1.7b-omlx-msm3-test",
+        health_ok=True,
+        endpoints_ok=True,
+        models_ok=True,
+        chat_ok=True,
+        alias_ok=True,
+        session_ok=True,
+        root_v1_absent=True,
+        latency_ms=245,
+        olla_endpoint="msm3-omlx-live",
+    )
+    fake_dev_smoke = OllaDevSmokeResult(
+        config_generated=True,
+        config_path="/tmp/configs/olla-config.yaml",
+        olla_started=True,
+        olla_healthy=True,
+        smoke_result=fake_smoke,
+        olla_terminated=True,
+    )
+
+    monkeypatch.setattr(
+        cli_module,
+        "dev_smoke_olla",
+        lambda **kw: fake_dev_smoke,
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "olla",
+            "dev-smoke",
+            "--binary",
+            "/tmp/olla",
+            "--model",
+            "Qwen3-1.7B-4bit",
+            "--alias",
+            "qwen3-1.7b-omlx-msm3-test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "config_generated: yes" in result.stdout
+    assert "olla_started: yes" in result.stdout
+    assert "olla_healthy: yes" in result.stdout
+    assert "olla_terminated: yes" in result.stdout
+    assert "health: ok" in result.stdout
+    assert "chat: ok" in result.stdout

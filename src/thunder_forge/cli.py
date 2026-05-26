@@ -1,5 +1,6 @@
 """Thunder Forge CLI — cluster management commands."""
 
+import os
 from pathlib import Path
 from typing import cast
 
@@ -15,7 +16,9 @@ from thunder_forge.cluster.artifacts import (
     run_artifact_sync,
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
+from thunder_forge.cluster.edge import EdgeClient, EdgeProxyConfig, serve_edge_proxy, smoke_edge_contract
 from thunder_forge.cluster.fabric import discover_link_local_fabric_host, resolve_fabric_host
+from thunder_forge.cluster.olla import dev_smoke_olla, smoke_olla_router
 from thunder_forge.cluster.omlx import check_omlx_health, run_omlx_runtime_start, smoke_omlx_chat
 
 app = typer.Typer(
@@ -25,8 +28,12 @@ app = typer.Typer(
 )
 runtime_app = typer.Typer(help="Manage node-level runtimes such as oMLX.", no_args_is_help=True)
 artifact_app = typer.Typer(help="Inspect model artifact readiness for oMLX nodes.", no_args_is_help=True)
+edge_app = typer.Typer(help="Smoke-test and operate the minimal TF edge.", no_args_is_help=True)
+olla_app = typer.Typer(help="Smoke-test the generated Olla router layer.", no_args_is_help=True)
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(artifact_app, name="artifact")
+app.add_typer(edge_app, name="edge")
+app.add_typer(olla_app, name="olla")
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
@@ -78,6 +85,130 @@ def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
     typer.echo(f"management_host: {runtime_node.host}")
     if runtime_node.fabric_host:
         typer.echo(f"fabric_host: {runtime_node.fabric_host}")
+
+
+@edge_app.command("smoke")
+def edge_smoke(
+    base_url: str = typer.Option(..., "--base-url", help="TF edge base URL, for example http://127.0.0.1:40116."),
+    api_key_env: str = typer.Option(..., "--api-key-env", help="Environment variable containing the edge API key."),
+    model: str = typer.Option(..., "--model", help="Model or alias to use for the chat smoke."),
+    prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
+    timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
+) -> None:
+    """Run a black-box smoke test against a running TF edge."""
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        typer.echo(f"Error: {api_key_env} is not set", err=True)
+        raise typer.Exit(1)
+
+    result = smoke_edge_contract(base_url=base_url, api_key=api_key, model=model, prompt=prompt, timeout=timeout)
+    typer.echo(f"base_url: {result.base_url}")
+    typer.echo(f"model: {result.model}")
+    typer.echo(f"missing_auth_401: {'yes' if result.missing_auth_401 else 'no'}")
+    typer.echo(f"invalid_auth_401: {'yes' if result.invalid_auth_401 else 'no'}")
+    typer.echo(f"models: {'ok' if result.models_ok else 'fail'}")
+    typer.echo(f"chat: {'ok' if result.chat_ok else 'fail'}")
+    typer.echo(f"session: {'ok' if result.session_ok else 'fail'}")
+    typer.echo(f"latency_ms: {result.latency_ms}")
+    if result.olla_endpoint:
+        typer.echo(f"olla_endpoint: {result.olla_endpoint}")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@olla_app.command("smoke")
+def olla_smoke(
+    base_url: str = typer.Option(..., "--base-url", help="Olla base URL, for example http://127.0.0.1:40115."),
+    model: str = typer.Option(..., "--model", help="Backend runtime model id to verify."),
+    alias: str = typer.Option(..., "--alias", help="Public alias routed by Olla to the backend model."),
+    prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
+    timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
+) -> None:
+    """Run a black-box smoke test against a running Olla router."""
+    result = smoke_olla_router(base_url=base_url, model=model, alias=alias, prompt=prompt, timeout=timeout)
+    typer.echo(f"base_url: {result.base_url}")
+    typer.echo(f"model: {result.model}")
+    typer.echo(f"alias: {result.alias}")
+    typer.echo(f"health: {'ok' if result.health_ok else 'fail'}")
+    typer.echo(f"endpoints: {'ok' if result.endpoints_ok else 'fail'}")
+    typer.echo(f"models: {'ok' if result.models_ok else 'fail'}")
+    typer.echo(f"chat: {'ok' if result.chat_ok else 'fail'}")
+    typer.echo(f"alias_routing: {'ok' if result.alias_ok else 'fail'}")
+    typer.echo(f"session: {'ok' if result.session_ok else 'fail'}")
+    typer.echo(f"root_v1: {'absent' if result.root_v1_absent else 'present'}")
+    typer.echo(f"latency_ms: {result.latency_ms}")
+    if result.olla_endpoint:
+        typer.echo(f"olla_endpoint: {result.olla_endpoint}")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@olla_app.command("dev-smoke")
+def olla_dev_smoke(
+    binary: str = typer.Option(..., "--binary", help="Path to the Olla binary."),
+    model: str = typer.Option(..., "--model", help="Backend runtime model id to verify."),
+    alias: str = typer.Option(..., "--alias", help="Public alias routed by Olla to the backend model."),
+    prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
+    timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds for smoke checks."),
+) -> None:
+    """Generate Olla config, spawn Olla, smoke, teardown. Single-command dev workflow."""
+    result = dev_smoke_olla(binary=binary, model=model, alias=alias, prompt=prompt, smoke_timeout=timeout)
+    typer.echo(f"config_generated: {'yes' if result.config_generated else 'no'}")
+    if result.config_path:
+        typer.echo(f"config_path: {result.config_path}")
+    typer.echo(f"olla_started: {'yes' if result.olla_started else 'no'}")
+    typer.echo(f"olla_healthy: {'yes' if result.olla_healthy else 'no'}")
+    if result.smoke_result is not None:
+        sr = result.smoke_result
+        typer.echo(f"health: {'ok' if sr.health_ok else 'fail'}")
+        typer.echo(f"endpoints: {'ok' if sr.endpoints_ok else 'fail'}")
+        typer.echo(f"models: {'ok' if sr.models_ok else 'fail'}")
+        typer.echo(f"chat: {'ok' if sr.chat_ok else 'fail'}")
+        typer.echo(f"alias_routing: {'ok' if sr.alias_ok else 'fail'}")
+        typer.echo(f"session: {'ok' if sr.session_ok else 'fail'}")
+        typer.echo(f"root_v1: {'absent' if sr.root_v1_absent else 'present'}")
+        typer.echo(f"latency_ms: {sr.latency_ms}")
+        if sr.olla_endpoint:
+            typer.echo(f"olla_endpoint: {sr.olla_endpoint}")
+        for error in sr.errors:
+            typer.echo(f"Error: {error}", err=True)
+    typer.echo(f"olla_terminated: {'yes' if result.olla_terminated else 'no'}")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@edge_app.command("serve")
+def edge_serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Host/interface for the TF edge listener."),
+    port: int = typer.Option(40116, "--port", help="Port for the TF edge listener."),
+    olla_base_url: str = typer.Option(..., "--olla-base-url", help="Olla base URL, e.g. http://127.0.0.1:40115."),
+    api_key_env: str = typer.Option(..., "--api-key-env", help="Environment variable containing the edge API key."),
+    client_id: str = typer.Option("shag-dev", "--client-id", help="Client identity mapped to the API key."),
+) -> None:
+    """Run the minimal non-streaming TF edge proxy."""
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        typer.echo(f"Error: {api_key_env} is not set", err=True)
+        raise typer.Exit(1)
+
+    def log_sink(line: str) -> None:
+        typer.echo(line)
+
+    config = EdgeProxyConfig(
+        olla_base_url=olla_base_url,
+        clients_by_key={api_key: EdgeClient(client_id=client_id)},
+        access_log_sink=log_sink,
+    )
+    typer.echo(f"serving_edge: http://{host}:{port}")
+    typer.echo(f"olla_base_url: {olla_base_url}")
+    typer.echo(f"client_id: {client_id}")
+    serve_edge_proxy(host=host, port=port, config=config)
 
 
 @artifact_app.command("status")
@@ -390,6 +521,18 @@ def generate_config(
             raise typer.Exit(1)
 
     content = generate_litellm_config(config)
+    config_path.write_text(content)
+    typer.echo(f"✓ Generated {config_path}")
+
+
+@app.command("generate-olla-config")
+def generate_olla_config_cmd() -> None:
+    """Generate olla-config.yaml from node-assignments.yaml."""
+    from thunder_forge.cluster.config import generate_olla_config
+
+    config, repo_root = _load_config()
+    config_path = repo_root / "configs" / "olla-config.yaml"
+    content = generate_olla_config(config)
     config_path.write_text(content)
     typer.echo(f"✓ Generated {config_path}")
 

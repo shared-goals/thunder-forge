@@ -12,7 +12,7 @@ For the next architecture, `shag@studio` is the development operator and `studio
 
 The final product expectation is broader than this MVP: Thunder Forge should become a controlled compute resource for the Shared Goals platform, `whattodo`, and `text-forge` workloads. It should make model choice, model freshness, node readiness, routing, utilization, and auditability visible to an operator without requiring a web UI for every operation.
 
-oMLX is treated as a node-level runtime daemon: one oMLX server per inference node, serving one or more local models from a model directory. Thunder Forge remains the control plane; LiteLLM remains the frontend/router.
+oMLX is treated as a node-level runtime daemon: one oMLX server per inference node, serving one or more local models from a model directory. Thunder Forge remains the control plane. After the frontend smoke tests, the MVP router direction is Olla plus a minimal Thunder Forge edge; LiteLLM remains the proven production baseline/fallback, not the preferred fresh TF v2 frontend.
 
 ## Current node split
 
@@ -123,8 +123,9 @@ The preferred operator interface is a strict, auditable channel first: CLI/API, 
 studio
   Thunder Forge dev control plane
   future model cache hub
-  optional LiteLLM dev frontend
-    -> http://<msm3-runtime-host>:<dev-port>/v1
+  optional TF edge
+    -> Olla router
+      -> http://<msm3-runtime-host>:<dev-port>/v1
 
 msm3
   stable management path: msm3-wifi.lan
@@ -160,8 +161,8 @@ The MVP is accepted when all of the following are true:
    - no raw internal channel tokens;
    - no `There is no Stream(gpu, 1) in current thread` or equivalent runtime crash.
 8. The Thunderbolt point-to-point fabric requirement is documented with current status, naming/host-mapping options, and setup gap.
-9. A dev LiteLLM route exposes the model under an explicit test name if direct oMLX is healthy.
-10. The same smoke tests pass through LiteLLM if LiteLLM is included in the MVP run.
+9. A generated Olla route exposes the model under an explicit test name if direct oMLX is healthy.
+10. The same smoke tests pass through Olla, and then through the minimal TF edge if the edge is included in the MVP run.
 11. The compatibility matrix records the result and any limitations.
 
 ## Future Direction
@@ -169,7 +170,7 @@ The MVP is accepted when all of the following are true:
 After the MVP, Thunder Forge should support task-oriented model selection:
 
 ```text
-task -> choose appropriate compatible model/version -> prepare/cache -> select node -> run via node runtime -> route through LiteLLM
+task -> choose appropriate compatible model/version -> prepare/cache -> select node -> run via node runtime -> route through Olla/TF edge
 ```
 
 The fixed dev-node MVP is intentionally narrow. It is the first proof point for the later model-selection and cluster-management architecture. After the single-node default oMLX model-directory path works, Thunder Forge can generalize to downloading updated or more appropriate models directly into `studio`'s oMLX model directory and syncing those directories to inference nodes over the point-to-point Thunderbolt fabric.
@@ -180,7 +181,8 @@ A separate design sketch proposed a larger rebuild around FastAPI, PostgreSQL, S
 
 Accepted for direction:
 
-- LiteLLM remains the proven gateway/router/load-balancer.
+- LiteLLM remains the proven gateway/router/load-balancer fallback from the current production stack.
+- Olla plus a minimal TF edge is the chosen MVP frontend direction after smoke testing; see ADR 0002.
 - oMLX should run on each inference node as the node runtime.
 - Thunder Forge owns nodes, models, placements, reconcile, and auditability.
 - CLI is a first-class interface for Hermes/cron/ops.
