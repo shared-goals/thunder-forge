@@ -72,7 +72,7 @@ def build_artifact_readiness_plan(
 
 def _remote_path_exists(host: str, path: str) -> bool:
     result = subprocess.run(
-        ["ssh", host, "test", "-e", path],
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "test", "-e", path],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
