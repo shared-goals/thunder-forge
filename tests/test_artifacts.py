@@ -60,7 +60,7 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
         node_home_dir="/Users/shag",
     )
 
-    assert plan.source_path == "~/.omlx/models/bge-small-en-v1.5/"
+    assert plan.source_path == "/Users/shag/.omlx/models/bge-small-en-v1.5/"
     assert plan.destination == "shag@msm3-wifi.lan:/Users/shag/.omlx/models/bge-small-en-v1.5/"
     assert "shag@msm3-wifi.lan" in plan.command
     assert "bge-small-en-v1.5/" in plan.command
@@ -94,9 +94,34 @@ def test_artifact_download_plan_downloads_directly_to_omlx_model_dir() -> None:
         "download",
         "mlx-community/Qwen3-1.7B-4bit",
         "--local-dir",
-        "~/.omlx/models/Qwen3-1.7B-4bit",
+        "/Users/shag/.omlx/models/Qwen3-1.7B-4bit",
     ]
     assert ".cache/huggingface" not in plan.command
+
+
+def test_artifact_download_runner_ignores_socks_proxy(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        import subprocess
+
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    import thunder_forge.cluster.artifacts as artifacts_module
+
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:1080")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8888")
+    monkeypatch.setattr(artifacts_module.subprocess, "run", fake_run)
+
+    plan = build_artifact_download_plan(repo_id="mlx-community/Qwen3-1.7B-4bit")
+    artifacts_module.run_artifact_download(plan)
+
+    env = calls[0][1]["env"]
+    assert "ALL_PROXY" not in env
+    assert "all_proxy" not in env
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:8888"
 
 
 def test_artifact_sync_plan_can_use_fabric_host() -> None:

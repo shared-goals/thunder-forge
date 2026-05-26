@@ -109,7 +109,7 @@ def build_artifact_sync_plan(
     """Build a studio-to-node oMLX model-directory rsync plan."""
     _validate_user_host_path(node_user=node_user, node_host=node_host, node_home_dir=node_home_dir)
     model_dir_name = omlx_model_dir_name(repo_id)
-    source_path = f"{studio_omlx_models_dir}/{model_dir_name}/"
+    source_path = f"{Path(f'{studio_omlx_models_dir}/{model_dir_name}').expanduser()}/"
     remote_omlx_models_dir = f"{node_home_dir}/.omlx/models"
     destination = f"{node_user}@{node_host}:{remote_omlx_models_dir}/{model_dir_name}/"
     mkdir_args = [
@@ -151,6 +151,7 @@ def build_artifact_download_plan(
     """Build a plan to download a model directly into studio's oMLX model directory."""
     model_dir_name = omlx_model_dir_name(repo_id)
     destination = f"{studio_omlx_models_dir}/{model_dir_name}"
+    destination_arg = str(Path(destination).expanduser())
     args = [
         "uvx",
         "--from",
@@ -159,7 +160,7 @@ def build_artifact_download_plan(
         "download",
         repo_id,
         "--local-dir",
-        destination,
+        destination_arg,
     ]
     command = " ".join(shlex.quote(arg) for arg in args)
     return ArtifactDownloadPlan(
@@ -171,6 +172,16 @@ def build_artifact_download_plan(
     )
 
 
+def _env_without_socks_proxy() -> dict[str, str]:
+    """Return process env safe for httpx tools when SOCKS extras are unavailable."""
+    import os
+
+    env = os.environ.copy()
+    env.pop("ALL_PROXY", None)
+    env.pop("all_proxy", None)
+    return env
+
+
 def run_artifact_download(plan: ArtifactDownloadPlan, *, timeout: int = 7200) -> subprocess.CompletedProcess[str]:
     """Execute a previously built direct-to-oMLX download plan."""
     return subprocess.run(
@@ -178,6 +189,7 @@ def run_artifact_download(plan: ArtifactDownloadPlan, *, timeout: int = 7200) ->
         check=False,
         text=True,
         timeout=timeout,
+        env=_env_without_socks_proxy(),
     )
 
 

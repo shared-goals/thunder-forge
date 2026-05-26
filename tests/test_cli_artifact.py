@@ -143,7 +143,7 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
     assert "transport_host: msm3-wifi.lan" in result.stdout
     assert "action: sync_to_node_omlx" in result.stdout
     assert "rsync" in result.stdout
-    assert "~/.omlx/models/bge-small-en-v1.5/" in result.stdout
+    assert "/Users/shag/.omlx/models/bge-small-en-v1.5/" in result.stdout
     assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/bge-small-en-v1.5/" in result.stdout
     assert ".cache/huggingface" not in result.stdout
 
