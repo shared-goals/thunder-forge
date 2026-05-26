@@ -1,6 +1,12 @@
 """Thunder Forge CLI — cluster management commands."""
 
+from pathlib import Path
+from typing import cast
+
 import typer
+
+from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
+from thunder_forge.cluster.omlx import check_omlx_health
 
 app = typer.Typer(
     name="thunder-forge",
@@ -11,7 +17,7 @@ runtime_app = typer.Typer(help="Manage node-level runtimes such as oMLX.", no_ar
 app.add_typer(runtime_app, name="runtime")
 
 
-def _load_config() -> tuple:
+def _load_config() -> tuple[ClusterConfig, Path]:
     """Load cluster config from node-assignments.yaml. Returns (ClusterConfig, repo_root Path)."""
     from thunder_forge.cluster.config import find_repo_root, load_cluster_config
 
@@ -33,16 +39,10 @@ def _run_preflight(config: object, *, target_node: str | None = None) -> None:
         raise typer.Exit(1)
 
 
-@runtime_app.command("start")
-def runtime_start(
-    node: str = typer.Option(..., "--node", help="Node name to start runtime on (e.g. msm3)."),
-    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print command without executing by default."),
-) -> None:
-    """Start or dry-run a node-level runtime such as oMLX."""
+def _get_runtime_node(config: ClusterConfig, node: str) -> Node:
+    """Return a configured oMLX runtime node or exit with a CLI error."""
     from thunder_forge.cluster.config import RuntimeType
-    from thunder_forge.cluster.omlx import build_omlx_serve_command
 
-    config, _ = _load_config()
     if node not in config.nodes:
         typer.echo(f"Error: node '{node}' not found", err=True)
         raise typer.Exit(1)
@@ -53,15 +53,36 @@ def runtime_start(
     if runtime_node.runtime.type != RuntimeType.OMLX:
         typer.echo(f"Error: unsupported runtime '{runtime_node.runtime.type}'", err=True)
         raise typer.Exit(1)
+    return runtime_node
+
+
+def _runtime(runtime_node: Node) -> NodeRuntime:
+    return cast(NodeRuntime, runtime_node.runtime)
+
+
+def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
+    typer.echo(f"node: {node}")
+    typer.echo(f"runtime: {_runtime(runtime_node).type}")
+    typer.echo(f"management_host: {runtime_node.host}")
+    if runtime_node.fabric_host:
+        typer.echo(f"fabric_host: {runtime_node.fabric_host}")
+
+
+@runtime_app.command("start")
+def runtime_start(
+    node: str = typer.Option(..., "--node", help="Node name to start runtime on (e.g. msm3)."),
+    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print command without executing by default."),
+) -> None:
+    """Start or dry-run a node-level runtime such as oMLX."""
+    from thunder_forge.cluster.omlx import build_omlx_serve_command
+
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
     if runtime_node.home_dir is None:
         runtime_node.home_dir = f"/Users/{runtime_node.user}"
 
     command = build_omlx_serve_command(runtime_node)
-    typer.echo(f"node: {node}")
-    typer.echo(f"runtime: {runtime_node.runtime.type}")
-    typer.echo(f"management_host: {runtime_node.host}")
-    if runtime_node.fabric_host:
-        typer.echo(f"fabric_host: {runtime_node.fabric_host}")
+    _print_runtime_node_header(node, runtime_node)
     typer.echo(f"command: {command}")
 
     if dry_run:
@@ -70,6 +91,33 @@ def runtime_start(
 
     typer.echo("Error: runtime apply/start is not implemented yet; use --dry-run", err=True)
     raise typer.Exit(1)
+
+
+@runtime_app.command("status")
+def runtime_status(
+    node: str = typer.Option(..., "--node", help="Node name to check runtime status for (e.g. msm3)."),
+) -> None:
+    """Probe a node-level oMLX runtime directly, without LiteLLM."""
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
+    result = check_omlx_health(base_url)
+
+    _print_runtime_node_header(node, runtime_node)
+    typer.echo(f"base_url: {result.base_url}")
+    typer.echo(f"health: {'ok' if result.health_ok else 'fail'}")
+    typer.echo(f"models: {'ok' if result.models_ok else 'fail'}")
+    if result.status_ok is not None:
+        typer.echo(f"status: {'ok' if result.status_ok else 'unavailable'}")
+    if result.models:
+        typer.echo("served_models:")
+        for model_id in result.models:
+            typer.echo(f"  - {model_id}")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+
+    if not result.health_ok or not result.models_ok:
+        raise typer.Exit(1)
 
 
 @app.command()
