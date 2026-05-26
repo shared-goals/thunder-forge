@@ -68,7 +68,7 @@ nodes:
   msm2: { host: "msm2-wifi.lan", ram_gb: 128, role: node }
   msm3:
     host: "msm3-wifi.lan"
-    fabric_host: "msm3-fabric"  # Optional future point-to-point/fabric alias; configure before use.
+    fabric_host: "msm3-fabric"  # Optional fast fabric/TB alias; artifact sync auto-prefers it when reachable.
     ram_gb: 128
     role: node
     user: shag

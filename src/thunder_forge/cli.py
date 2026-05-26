@@ -15,6 +15,7 @@ from thunder_forge.cluster.artifacts import (
     run_artifact_sync,
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
+from thunder_forge.cluster.fabric import discover_link_local_fabric_host, resolve_fabric_host
 from thunder_forge.cluster.omlx import check_omlx_health
 
 app = typer.Typer(
@@ -148,17 +149,48 @@ def artifact_sync(
     model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
     node: str = typer.Option(..., "--node", help="Node name to sync artifact to (e.g. msm3)."),
     dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print sync command without executing by default."),
-    use_fabric: bool = typer.Option(False, "--use-fabric", help="Use the configured fabric_host for transfer."),
+    transport: str = typer.Option(
+        "auto",
+        "--transport",
+        help="Transport selection: auto, fabric, or management. Auto prefers configured reachable fabric.",
+    ),
+    management: bool = typer.Option(
+        False,
+        "--management",
+        help="Force management host even when fabric_host is configured.",
+    ),
     timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for rsync when applying."),
 ) -> None:
     """Sync an oMLX model directory from studio to a node."""
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
-    if use_fabric and runtime_node.fabric_host is None:
+    requested_transport = "management" if management else transport
+    if requested_transport not in {"auto", "fabric", "management"}:
+        typer.echo("Error: --transport must be one of: auto, fabric, management", err=True)
+        raise typer.Exit(1)
+
+    transport_host = runtime_node.host
+    resolved_transport_host = runtime_node.host
+    fabric_fallback = ""
+    if requested_transport in {"auto", "fabric"} and runtime_node.fabric_host:
+        resolved_fabric_host = resolve_fabric_host(runtime_node.fabric_host)
+        if resolved_fabric_host is None:
+            resolved_fabric_host = discover_link_local_fabric_host(
+                management_host=runtime_node.host,
+                node_user=runtime_node.user,
+            )
+        if resolved_fabric_host is not None:
+            transport_host = runtime_node.fabric_host
+            resolved_transport_host = resolved_fabric_host
+        elif requested_transport == "fabric":
+            typer.echo(f"Error: fabric_host '{runtime_node.fabric_host}' is not reachable", err=True)
+            raise typer.Exit(1)
+        else:
+            fabric_fallback = f"{runtime_node.fabric_host} unresolved"
+    elif requested_transport == "fabric":
         typer.echo(f"Error: node '{node}' has no fabric_host configured", err=True)
         raise typer.Exit(1)
-    transport_host = runtime_node.fabric_host if use_fabric else runtime_node.host
     presence = probe_artifact_presence(
         repo_id=model,
         node_host=runtime_node.host,
@@ -173,7 +205,7 @@ def artifact_sync(
     sync_plan = build_artifact_sync_plan(
         repo_id=model,
         node_user=runtime_node.user,
-        node_host=cast(str, transport_host),
+        node_host=resolved_transport_host,
         node_home_dir=node_home_dir,
     )
 
@@ -181,6 +213,10 @@ def artifact_sync(
     _print_runtime_node_header(node, runtime_node)
     typer.echo("source: studio")
     typer.echo(f"transport_host: {transport_host}")
+    if resolved_transport_host != transport_host:
+        typer.echo(f"resolved_transport_host: {resolved_transport_host}")
+    if fabric_fallback:
+        typer.echo(f"fabric_fallback: {fabric_fallback}")
     typer.echo(f"source_path: {sync_plan.source_path}")
     typer.echo(f"destination: {sync_plan.destination}")
     typer.echo("action: sync_to_node_omlx")

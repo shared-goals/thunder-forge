@@ -109,7 +109,7 @@ def test_artifact_download_dry_run_prints_direct_omlx_download_plan(tmp_path: Pa
 
 def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
-    _write_runtime_config(repo)
+    _write_runtime_config(repo, fabric_host=False)
 
     import thunder_forge.cli as cli_module
     import thunder_forge.cluster.config as config_module
@@ -148,9 +148,129 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
     assert ".cache/huggingface" not in result.stdout
 
 
-def test_artifact_sync_dry_run_can_use_fabric_host(tmp_path: Path, monkeypatch) -> None:
+def test_artifact_sync_uses_resolved_fabric_by_default_when_available(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo)
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+            studio_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+    monkeypatch.setattr(cli_module, "resolve_fabric_host", lambda host: "169.254.251.195")
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "BAAI/bge-small-en-v1.5",
+            "--node",
+            "msm3",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "transport_host: msm3-fabric" in result.stdout
+    assert "resolved_transport_host: 169.254.251.195" in result.stdout
+    assert "shag@169.254.251.195:/Users/shag/.omlx/models/bge-small-en-v1.5/" in result.stdout
+
+
+def test_artifact_sync_falls_back_to_management_host_when_fabric_is_unresolved(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = tmp_path
+    _write_runtime_config(repo)
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+            studio_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+    monkeypatch.setattr(cli_module, "resolve_fabric_host", lambda host: None)
+    monkeypatch.setattr(
+        cli_module,
+        "discover_link_local_fabric_host",
+        lambda *, management_host, node_user: None,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "BAAI/bge-small-en-v1.5",
+            "--node",
+            "msm3",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "fabric_fallback: msm3-fabric unresolved" in result.stdout
+    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/bge-small-en-v1.5/" in result.stdout
+
+
+def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config(repo)
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+            studio_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+    monkeypatch.setattr(cli_module, "resolve_fabric_host", lambda host: "169.254.251.195")
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "BAAI/bge-small-en-v1.5",
+            "--node",
+            "msm3",
+            "--management",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "resolved_transport_host" not in result.stdout
+    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/bge-small-en-v1.5/" in result.stdout
+
+
+def test_artifact_sync_without_fabric_host_uses_management_host(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config(repo, fabric_host=False)
 
     import thunder_forge.cli as cli_module
     import thunder_forge.cluster.config as config_module
@@ -174,40 +294,12 @@ def test_artifact_sync_dry_run_can_use_fabric_host(tmp_path: Path, monkeypatch) 
             "BAAI/bge-small-en-v1.5",
             "--node",
             "msm3",
-            "--use-fabric",
             "--dry-run",
         ],
     )
 
     assert result.exit_code == 0
-    assert "transport_host: msm3-fabric" in result.stdout
-    assert "shag@msm3-fabric:/Users/shag/.omlx/models/bge-small-en-v1.5/" in result.stdout
-
-
-def test_artifact_sync_use_fabric_requires_fabric_host(tmp_path: Path, monkeypatch) -> None:
-    repo = tmp_path
-    _write_runtime_config(repo, fabric_host=False)
-
-    import thunder_forge.cluster.config as config_module
-
-    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-
-    result = runner.invoke(
-        app,
-        [
-            "artifact",
-            "sync",
-            "--model",
-            "BAAI/bge-small-en-v1.5",
-            "--node",
-            "msm3",
-            "--use-fabric",
-            "--dry-run",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert "has no fabric_host configured" in result.stderr
+    assert "transport_host: msm3-wifi.lan" in result.stdout
 
 
 def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None:
