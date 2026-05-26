@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 import time
 from dataclasses import dataclass, field
 
 import httpx
 
 from thunder_forge.cluster.config import Node, RuntimeType
+
+
+@dataclass
+class OmlxStartResult:
+    returncode: int
+    pid: str = ""
+    stdout: str = ""
+    stderr: str = ""
 
 
 @dataclass
@@ -67,6 +76,41 @@ def build_omlx_serve_command(node: Node) -> str:
     if node.runtime.model_dir is not None:
         args.extend(["--model-dir", node.runtime.model_dir])
     return " ".join(shlex.quote(arg) for arg in args)
+
+
+def run_omlx_runtime_start(node: Node, *, timeout: int = 30) -> OmlxStartResult:
+    """Start a remote oMLX server under the node user with bounded SSH."""
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+
+    command = build_omlx_serve_command(node)
+    log_path = f"/tmp/thunder-forge-omlx-{node.runtime.port}.log"
+    remote_command = f"nohup {command} > {shlex.quote(log_path)} 2>&1 & echo $!"
+    completed = subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            f"{node.user}@{node.host}",
+            remote_command,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    return OmlxStartResult(
+        returncode=completed.returncode,
+        pid=completed.stdout.strip(),
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
 
 
 def _model_ids(payload: dict) -> list[str]:

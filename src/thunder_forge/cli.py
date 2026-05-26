@@ -16,7 +16,7 @@ from thunder_forge.cluster.artifacts import (
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.fabric import discover_link_local_fabric_host, resolve_fabric_host
-from thunder_forge.cluster.omlx import check_omlx_health, smoke_omlx_chat
+from thunder_forge.cluster.omlx import check_omlx_health, run_omlx_runtime_start, smoke_omlx_chat
 
 app = typer.Typer(
     name="thunder-forge",
@@ -246,6 +246,7 @@ def artifact_sync(
 def runtime_start(
     node: str = typer.Option(..., "--node", help="Node name to start runtime on (e.g. msm3)."),
     dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print command without executing by default."),
+    timeout: int = typer.Option(30, "--timeout", help="Timeout in seconds for the SSH start command."),
 ) -> None:
     """Start or dry-run a node-level runtime such as oMLX."""
     from thunder_forge.cluster.omlx import build_omlx_serve_command
@@ -263,8 +264,22 @@ def runtime_start(
         typer.echo("mode: dry-run")
         return
 
-    typer.echo("Error: runtime apply/start is not implemented yet; use --dry-run", err=True)
-    raise typer.Exit(1)
+    base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
+    health = check_omlx_health(base_url)
+    if health.health_ok and health.models_ok:
+        typer.echo(f"base_url: {health.base_url}")
+        typer.echo("status: already running")
+        return
+
+    result = run_omlx_runtime_start(runtime_node, timeout=timeout)
+    if result.returncode != 0:
+        typer.echo(f"Error: runtime start failed with exit code {result.returncode}", err=True)
+        if result.stderr:
+            typer.echo(result.stderr.strip(), err=True)
+        raise typer.Exit(result.returncode)
+    if result.pid:
+        typer.echo(f"pid: {result.pid}")
+    typer.echo("status: started")
 
 
 @runtime_app.command("status")
