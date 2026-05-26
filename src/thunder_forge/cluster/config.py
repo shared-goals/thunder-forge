@@ -183,6 +183,14 @@ class Assignment:
 
 
 @dataclass
+class RuntimeRoute:
+    model_name: str
+    runtime: RuntimeType | str
+    node: str
+    model: str
+
+
+@dataclass
 class ExternalEndpoint:
     model_name: str
     api_base: str
@@ -197,6 +205,7 @@ class ClusterConfig:
     models: dict[str, Model] = field(default_factory=dict)
     nodes: dict[str, Node] = field(default_factory=dict)
     assignments: dict[str, list[Assignment]] = field(default_factory=dict)
+    runtime_routes: list[RuntimeRoute] = field(default_factory=list)
     external_endpoints: list[ExternalEndpoint] = field(default_factory=list)
 
     @property
@@ -371,6 +380,16 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             for s in slots
         ]
 
+    runtime_routes = [
+        RuntimeRoute(
+            model_name=route["model_name"],
+            runtime=RuntimeType(route["runtime"]),
+            node=route["node"],
+            model=route["model"],
+        )
+        for route in raw.get("runtime_routes", [])
+    ]
+
     external_endpoints = [
         ExternalEndpoint(
             model_name=ep["model_name"],
@@ -383,7 +402,13 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
         for ep in raw.get("external_endpoints", [])
     ]
 
-    return ClusterConfig(models=models, nodes=nodes, assignments=assignments, external_endpoints=external_endpoints)
+    return ClusterConfig(
+        models=models,
+        nodes=nodes,
+        assignments=assignments,
+        runtime_routes=runtime_routes,
+        external_endpoints=external_endpoints,
+    )
 
 
 def load_cluster_config(path: Path) -> ClusterConfig:
@@ -544,6 +569,23 @@ def generate_litellm_config(config: ClusterConfig) -> str:
                             break
                 if emb_model:
                     model_list.append(_build_embedding_entry(emb_name, emb_model, node.ip, slot.port))
+    for route in config.runtime_routes:
+        if route.runtime != RuntimeType.OMLX:
+            continue
+        node = config.nodes[route.node]
+        if node.runtime is None:
+            msg = f"Runtime route '{route.model_name}' references node '{route.node}' without runtime"
+            raise ValueError(msg)
+        model_list.append(
+            {
+                "model_name": route.model_name,
+                "litellm_params": {
+                    "model": f"openai/{route.model}",
+                    "api_base": f"http://{node.host}:{node.runtime.port}/v1",
+                    "api_key": "dummy",
+                },
+            }
+        )
     for ep in config.external_endpoints:
         entry = {
             "model_name": ep.model_name,

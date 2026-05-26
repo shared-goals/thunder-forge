@@ -293,6 +293,41 @@ def test_generate_litellm_config_basic(assignments_yaml: Path) -> None:
     assert parsed["general_settings"]["master_key"] == "os.environ/LITELLM_MASTER_KEY"
 
 
+def test_generate_litellm_config_runtime_endpoint_route(tmp_path: Path) -> None:
+    content = dedent("""\
+        models: {}
+        nodes:
+          msm3:
+            host: msm3-wifi.lan
+            ram_gb: 128
+            user: shag
+            role: node
+            runtime:
+              type: omlx
+              port: 8018
+        runtime_routes:
+          - model_name: qwen3-1.7b-omlx-msm3-test
+            runtime: omlx
+            node: msm3
+            model: Qwen3-1.7B-4bit
+        assignments: {}
+    """)
+    p = tmp_path / "node-assignments.yaml"
+    p.write_text(content)
+    config = load_cluster_config(p)
+
+    result = generate_litellm_config(config)
+    parsed = yaml_lib.safe_load(result)
+
+    entry = parsed["model_list"][0]
+    assert entry["model_name"] == "qwen3-1.7b-omlx-msm3-test"
+    assert entry["litellm_params"] == {
+        "model": "openai/Qwen3-1.7B-4bit",
+        "api_base": "http://msm3-wifi.lan:8018/v1",
+        "api_key": "dummy",
+    }
+
+
 def test_generate_litellm_config_multi_node(multi_model_yaml: Path) -> None:
     config = load_cluster_config(multi_model_yaml)
     result = generate_litellm_config(config)

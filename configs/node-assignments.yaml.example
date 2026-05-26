@@ -93,3 +93,12 @@ assignments:
   #     port: 8000
   #   - model: fast
   #     port: 8001
+
+# ── Node-level runtime routes ───────────────────────
+# Optional dev routes for node runtimes such as oMLX. These expose a model
+# already served by the node runtime through the generated LiteLLM config.
+runtime_routes:
+  - model_name: qwen3-1.7b-omlx-msm3-test
+    runtime: omlx
+    node: msm3
+    model: Qwen3-1.7B-4bit
