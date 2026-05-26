@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import textwrap
 import time
 from dataclasses import dataclass, field
 
 import httpx
 
 from thunder_forge.cluster.config import Node, RuntimeType
+from thunder_forge.cluster.ssh import ssh_run
+
+LAUNCHD_LABEL_PREFIX = "com.thunder-forge.omlx"
+
+
+def launchd_label_for_node(node: Node) -> str:
+    """Build the launchd service label for a node runtime."""
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    return f"{LAUNCHD_LABEL_PREFIX}-{node.runtime.port}"
 
 
 @dataclass
@@ -235,3 +247,151 @@ def _chat_completion_answer(payload: dict) -> str:
         return ""
     content = message.get("content", "")
     return content if isinstance(content, str) else ""
+
+
+@dataclass
+class OmlxInstallResult:
+    node: str
+    plist_path: str
+    label: str
+    plist_content: str = ""
+    commands: list[str] = field(default_factory=list)
+    applied: bool = False
+    service_label_verified: bool = False
+    health_ok: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.applied and self.service_label_verified and self.health_ok and not self.errors
+
+
+def _omlx_binary_path(node: Node) -> str:
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+    return f"{node.home_dir}/.local/bin/omlx"
+
+
+def generate_launchd_plist(node: Node) -> str:
+    """Generate a macOS launchd plist for a node-level oMLX daemon."""
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+
+    label = launchd_label_for_node(node)
+    log_dir = f"{node.home_dir}/Library/Logs"
+    stdout_log = f"{log_dir}/omlx-{node.runtime.port}.stdout.log"
+    stderr_log = f"{log_dir}/omlx-{node.runtime.port}.stderr.log"
+
+    program_arguments = [
+        _omlx_binary_path(node),
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(node.runtime.port),
+    ]
+    if node.runtime.model_dir is not None:
+        program_arguments.extend(["--model-dir", node.runtime.model_dir])
+
+    program_arguments_xml = "\n".join(f"        <string>{arg}</string>" for arg in program_arguments)
+
+    plist = textwrap.dedent(
+        f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{program_arguments_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{stdout_log}</string>
+    <key>StandardErrorPath</key>
+    <string>{stderr_log}</string>
+    <key>WorkingDirectory</key>
+    <string>{node.home_dir}</string>
+</dict>
+</plist>
+"""
+    )
+    return plist
+
+
+def _install_commands(label: str, plist_path: str, port: int) -> list[str]:
+    """The ordered command sequence for a safe launchd install."""
+    return [
+        "mkdir -p ~/Library/LaunchAgents ~/Library/Logs",
+        f"launchctl bootout gui/$(id -u)/{label} 2>/dev/null || true",
+        f"rm -f {plist_path}",
+        (
+            f"pkill -f '^.*omlx serve --host 0\\.0\\.0\\.0 --port {port}.*$' 2>/dev/null || true"
+        ),
+        f"launchctl bootstrap gui/$(id -u) {plist_path}",
+        f"launchctl list {label} 2>/dev/null | grep -q {label}",
+    ]
+
+
+def run_omlx_install(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
+    """Generate plist and, if apply, install/update the launchd daemon on the node."""
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    runtime = node.runtime
+    label = launchd_label_for_node(node)
+    plist_path = f"~/Library/LaunchAgents/{label}.plist"
+    result = OmlxInstallResult(
+        node=f"{node.host}",
+        plist_path=plist_path,
+        label=label,
+    )
+    # Capture the generated plist content regardless of apply/dry-run for CLI output.
+    try:
+        result.plist_content = generate_launchd_plist(node)
+    except (ValueError, AttributeError) as exc:
+        result.errors.append(str(exc))
+        return result
+
+    result.commands = _install_commands(label, plist_path, runtime.port)
+    if not apply:
+        return result
+
+    # Apply path: run each command via SSH in order, stop on hard failures.
+    for cmd in result.commands[:-1]:  # all except the verify step
+        run_res = ssh_run(node.user, node.host, cmd, timeout=timeout)
+        if run_res.returncode != 0:
+            result.errors.append(f"Command failed: {cmd}: {(run_res.stderr or '').strip()}")
+            return result
+
+    # Final verify step: confirm launchctl list shows the label.
+    verify_cmd = result.commands[-1]
+    verify_res = ssh_run(node.user, node.host, verify_cmd, timeout=timeout)
+    result.service_label_verified = verify_res.returncode == 0
+    if not result.service_label_verified:
+        result.errors.append(f"Service label not found after install: {label}")
+
+    # Health check: probe the daemon port
+    try:
+        health = check_omlx_health(
+            f"http://{node.host}:{runtime.port}",
+            timeout=10.0,
+        )
+        result.health_ok = health.health_ok and health.models_ok
+        if not result.health_ok:
+            result.errors.extend(health.errors)
+    except Exception as exc:  # noqa: BLE001
+        result.errors.append(f"Health check failed: {exc}")
+
+    result.applied = True
+    return result

@@ -19,7 +19,12 @@ from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.edge import EdgeClient, EdgeProxyConfig, serve_edge_proxy, smoke_edge_contract
 from thunder_forge.cluster.fabric import discover_link_local_fabric_host, resolve_fabric_host
 from thunder_forge.cluster.olla import dev_smoke_olla, smoke_olla_router
-from thunder_forge.cluster.omlx import check_omlx_health, run_omlx_runtime_start, smoke_omlx_chat
+from thunder_forge.cluster.omlx import (
+    check_omlx_health,
+    run_omlx_install,
+    run_omlx_runtime_start,
+    smoke_omlx_chat,
+)
 
 app = typer.Typer(
     name="thunder-forge",
@@ -471,6 +476,45 @@ def runtime_smoke(
         typer.echo(f"Error: {error}", err=True)
 
     if not result.ok:
+        raise typer.Exit(1)
+
+
+@runtime_app.command("install")
+def runtime_install(
+    node: str = typer.Option(..., "--node", help="Node name to install launchd daemon for (e.g. msm3)."),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print plist and commands without executing by default.",
+    ),
+    timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds for each SSH command."),
+) -> None:
+    """Install or update a node-level oMLX launchd daemon."""
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    if runtime_node.home_dir is None:
+        runtime_node.home_dir = f"/Users/{runtime_node.user}"
+
+    result = run_omlx_install(runtime_node, apply=not dry_run, timeout=timeout)
+
+    _print_runtime_node_header(node, runtime_node)
+    typer.echo(f"plist_path: {result.plist_path}")
+    typer.echo(f"label: {result.label}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    if result.plist_content:
+        typer.echo("plist:")
+        for line in result.plist_content.splitlines():
+            typer.echo(f"  {line}")
+    if result.commands:
+        typer.echo("commands:")
+        for cmd in result.commands:
+            typer.echo(f"  - {cmd}")
+    if result.applied:
+        typer.echo(f"service_label_verified: {'yes' if result.service_label_verified else 'no'}")
+        typer.echo(f"health_ok: {'yes' if result.health_ok else 'no'}")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+    if not result.ok and result.applied:
         raise typer.Exit(1)
 
 

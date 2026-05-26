@@ -414,3 +414,44 @@ def test_olla_dev_smoke_cli_prints_summary(monkeypatch) -> None:
     assert "olla_terminated: yes" in result.stdout
     assert "health: ok" in result.stdout
     assert "chat: ok" in result.stdout
+
+
+def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text(
+        dedent(
+            """\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                fabric_host: msm3-fabric
+                ram_gb: 128
+                user: shag
+                role: node
+                home_dir: /Users/shag
+                runtime:
+                  type: omlx
+                  port: 8018
+            assignments: {}
+        """
+        )
+    )
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    result = runner.invoke(app, ["runtime", "install", "--node", "msm3", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "node: msm3" in result.stdout
+    assert "plist_path: ~/Library/LaunchAgents/com.thunder-forge.omlx-8018.plist" in result.stdout
+    assert "label: com.thunder-forge.omlx-8018" in result.stdout
+    assert "mode: dry-run" in result.stdout
+    assert "com.thunder-forge.omlx-8018" in result.stdout
+    assert "/Users/shag/.local/bin/omlx" in result.stdout
+    assert "bootout" in result.stdout
+    assert "bootstrap" in result.stdout
