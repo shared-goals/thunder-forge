@@ -39,16 +39,7 @@ models:
     max_context: 131072
     notes: "Heavy agent. 122B MoE with VLM support. Thinking mode."
 
-  agent-llama4:
-    source:
-      type: huggingface
-      repo: "mlx-community/Llama-4-Scout-17B-16E-Instruct-4bit"
-      revision: "main"
-    disk_gb: 61.0
-    kv_per_32k_gb: 2.0
-    active_params: "17B of 109B"
-    max_context: 10485760
-    notes: "10M context. Solid tool calling. Benchmark candidate."
+
 
   memory:
     source:
@@ -132,8 +123,6 @@ assignments:
       role: agent
     - model: agent-qwen3.5
       role: agent
-    - model: agent-llama4
-      role: agent
 
 # ── Node-level runtime routes ───────────────────────
 # Optional dev routes for node runtimes such as oMLX. These expose a model
@@ -161,23 +150,19 @@ runtime_routes:
     node: msm3
     model: Qwen3.5-122B-A10B-4bit
 
-  - model_name: llama4-scout-agent-omlx-msm3
-    runtime: omlx
-    node: msm3
-    model: Llama-4-Scout-17B-16E-Instruct-4bit
-
-  # Memory (all nodes) — requires mlx-openai-server, not standard oMLX serve
-  - model_name: gpt-oss-20b-memory-omlx-msm1
-    runtime: mlx-openai-server
-    node: msm1
-    model: gpt-oss-20b-MLX-8bit
-
-  - model_name: gpt-oss-20b-memory-omlx-msm2
-    runtime: mlx-openai-server
-    node: msm2
-    model: gpt-oss-20b-MLX-8bit
-
-  - model_name: gpt-oss-20b-memory-omlx-msm3
-    runtime: mlx-openai-server
-    node: msm3
-    model: gpt-oss-20b-MLX-8bit
+  # Memory (separate mlx-openai-server process, not routed through Olla)
+  # Deployed via `thunder-forge deploy` with `serving: mlx-openai-server`
+  # - model_name: gpt-oss-20b-memory-omlx-msm1
+  #   runtime: mlx-openai-server
+  #   node: msm1
+  #   model: gpt-oss-20b-MLX-8bit
+  #
+  # - model_name: gpt-oss-20b-memory-omlx-msm2
+  #   runtime: mlx-openai-server
+  #   node: msm2
+  #   model: gpt-oss-20b-MLX-8bit
+  #
+  # - model_name: gpt-oss-20b-memory-omlx-msm3
+  #   runtime: mlx-openai-server
+  #   node: msm3
+  #   model: gpt-oss-20b-MLX-8bit
