@@ -15,48 +15,56 @@ models:
     kv_per_32k_gb: 0.75
     active_params: "3B of 80B"
     max_context: 262144
-    notes: "Best for agentic coding (tool calling, error recovery)."
+    notes: "SOTA agentic coding. Tool calling, error recovery, 262K context."
 
-  fast:
+  agent-qwen3.6:
     source:
       type: huggingface
-      repo: "mlx-community/Qwen3.5-9B-MLX-4bit"
+      repo: "mlx-community/Qwen3.6-35B-A3B-4bit"
       revision: "main"
-    disk_gb: 5.6
-    kv_per_32k_gb: 0.3
-    active_params: "9B dense"
+    disk_gb: 20.5
+    kv_per_32k_gb: 0.5
+    active_params: "3B of 35B"
     max_context: 262144
-    notes: "Fast fallback for simple queries. ~80-120 tok/s on M4 Max."
+    notes: "Fast agent. 73.4% SWE-bench. Thinking mode by default."
 
-  embedding:
+  agent-qwen3.5:
     source:
       type: huggingface
-      repo: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+      repo: "mlx-community/Qwen3.5-122B-A10B-4bit"
       revision: "main"
-    disk_gb: 0.5
-    active_params: "0.6B"
-    max_context: 8192
-    serving: embedding
-    notes: "Lazy-loaded embedding model, ~0.5 GB RAM."
+    disk_gb: 65.0
+    kv_per_32k_gb: 1.2
+    active_params: "10B of 122B"
+    max_context: 131072
+    notes: "Heavy agent. 122B MoE with VLM support. Thinking mode."
 
-  # Optional: serve chat models through mlx-openai-server instead of mlx_lm.server.
-  # Useful for models that need a parser, e.g. gpt-oss Harmony channels.
-  # Keep parser flags in extra_args so the serving mode stays generic.
-  # gpt-oss-20b:
-  #   source:
-  #     type: huggingface
-  #     repo: "mlx-community/gpt-oss-20b-MXFP4-Q8"
-  #     revision: "main"
-  #   disk_gb: 12.1
-  #   kv_per_32k_gb: 8.0
-  #   max_context: 131072
-  #   serving: mlx-openai-server
-  #   extra_args:
-  #     - --reasoning-parser
-  #     - harmony
-  #     - --tool-call-parser
-  #     - harmony
-  #   notes: "gpt-oss/Harmony example; smoke-test output before routing production traffic."
+  agent-llama4:
+    source:
+      type: huggingface
+      repo: "mlx-community/Llama-4-Scout-17B-16E-Instruct-4bit"
+      revision: "main"
+    disk_gb: 61.0
+    kv_per_32k_gb: 2.0
+    active_params: "17B of 109B"
+    max_context: 10485760
+    notes: "10M context. Solid tool calling. Benchmark candidate."
+
+  memory:
+    source:
+      type: huggingface
+      repo: "lmstudio-community/gpt-oss-20b-MLX-8bit"
+      revision: "main"
+    disk_gb: 21.0
+    kv_per_32k_gb: 8.0
+    max_context: 131072
+    serving: mlx-openai-server
+    extra_args:
+      - --reasoning-parser
+      - harmony
+      - --tool-call-parser
+      - harmony
+    notes: "Hindsight LLM (retain/reflect/consolidation). Recommended by Hindsight benchmarks. Requires mlx-openai-server, not standard oMLX serve."
 
 # ── Nodes ──────────────────────────────────────────
 # Per-node host may be a DNS name or IP address. Prefer .lan FQDNs.
@@ -64,41 +72,112 @@ models:
 # then $USER (current OS user). Role is "node" (compute) or "gateway" (infra/hub).
 nodes:
   rock: { host: "rock.lan", ram_gb: 32, role: gateway }
-  msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
-  msm2: { host: "msm2-wifi.lan", ram_gb: 128, role: node }
-  msm3:
-    host: "msm3-wifi.lan"
-    fabric_host: "msm3-fabric"  # Optional fast fabric/TB alias; artifact sync auto-prefers it when reachable.
+
+  msm1:
+    host: "msm1-wifi.lan"
     ram_gb: 128
     role: node
     user: shag
     runtime:
       type: omlx
       port: 8018
-      # model_dir omitted: oMLX default ~/.omlx/models is used, so runtime start does not pass --model-dir.
+
+  msm2:
+    host: "msm2-wifi.lan"
+    ram_gb: 128
+    role: node
+    user: shag
+    runtime:
+      type: omlx
+      port: 8018
+
+  msm3:
+    host: "msm3-wifi.lan"
+    fabric_host: "msm3-fabric"
+    ram_gb: 128
+    role: node
+    user: shag
+    runtime:
+      type: omlx
+      port: 8018
+
+  # msm4: reserved — dedicated direct oMLX node for Hindsight
+  # (bypasses Olla cluster, managed separately)
+  # host: "msm4-wifi.lan"
+  # ram_gb: 128
+  # role: node
+  # user: shag
 
 # ── Node assignments ────────────────────────────────
-# Each node gets a list of {model, port} pairs.
-# One vllm-mlx process per entry.
+# Memory + Coder (msm1, msm2) or Memory + Agent (msm3).
+# Olla LRU manages active model loading — not all models loaded simultaneously.
+# Budget: memory ~12GB + coder/agent up to ~90GB = ~102GB of 110GB usable.
 assignments:
   msm1:
+    - model: memory
+      role: memory
     - model: coder
-      port: 8000
+      role: coder
+
   msm2:
+    - model: memory
+      role: memory
     - model: coder
-      port: 8000
-  # Multi-model setup example:
-  # msm3:
-  #   - model: coder
-  #     port: 8000
-  #   - model: fast
-  #     port: 8001
+      role: coder
+
+  msm3:
+    - model: memory
+      role: memory
+    - model: agent-qwen3.6
+      role: agent
+    - model: agent-qwen3.5
+      role: agent
+    - model: agent-llama4
+      role: agent
 
 # ── Node-level runtime routes ───────────────────────
 # Optional dev routes for node runtimes such as oMLX. These expose a model
 # already served by the node runtime through the generated LiteLLM config.
 runtime_routes:
-  - model_name: qwen3-1.7b-omlx-msm3-test
+  # Coder (msm1, msm2)
+  - model_name: qwen3-coder-next-omlx-msm1
+    runtime: omlx
+    node: msm1
+    model: Qwen3-Coder-Next-4bit
+
+  - model_name: qwen3-coder-next-omlx-msm2
+    runtime: omlx
+    node: msm2
+    model: Qwen3-Coder-Next-4bit
+
+  # Agent candidates (msm3 — benchmark to select best)
+  - model_name: qwen3.6-35b-agent-omlx-msm3
     runtime: omlx
     node: msm3
-    model: Qwen3-1.7B-4bit
+    model: Qwen3.6-35B-A3B-4bit
+
+  - model_name: qwen3.5-122b-agent-omlx-msm3
+    runtime: omlx
+    node: msm3
+    model: Qwen3.5-122B-A10B-4bit
+
+  - model_name: llama4-scout-agent-omlx-msm3
+    runtime: omlx
+    node: msm3
+    model: Llama-4-Scout-17B-16E-Instruct-4bit
+
+  # Memory (all nodes) — requires mlx-openai-server, not standard oMLX serve
+  - model_name: gpt-oss-20b-memory-omlx-msm1
+    runtime: mlx-openai-server
+    node: msm1
+    model: gpt-oss-20b-MLX-8bit
+
+  - model_name: gpt-oss-20b-memory-omlx-msm2
+    runtime: mlx-openai-server
+    node: msm2
+    model: gpt-oss-20b-MLX-8bit
+
+  - model_name: gpt-oss-20b-memory-omlx-msm3
+    runtime: mlx-openai-server
+    node: msm3
+    model: gpt-oss-20b-MLX-8bit
