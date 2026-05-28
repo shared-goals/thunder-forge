@@ -16,7 +16,18 @@ from thunder_forge.cluster.artifacts import (
     run_artifact_sync,
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
-from thunder_forge.cluster.edge import EdgeClient, EdgeProxyConfig, serve_edge_proxy, smoke_edge_contract
+from thunder_forge.cluster.edge import (
+    DEFAULT_EDGE_ACCESS_LOG,
+    EDGE_ACCESS_LOG_ENV,
+    EDGE_USERS_ENV,
+    EdgeProxyConfig,
+    build_edge_clients_from_env,
+    edge_api_key_from_env,
+    ensure_edge_api_keys,
+    serve_edge_proxy,
+    smoke_edge_contract,
+    summarize_edge_usage,
+)
 from thunder_forge.cluster.fabric import build_transport_plan
 from thunder_forge.cluster.olla import dev_smoke_olla, smoke_olla_router
 from thunder_forge.cluster.omlx import (
@@ -55,6 +66,37 @@ def _load_config() -> tuple[ClusterConfig, Path]:
         typer.echo(f"Error: {cluster_config_path} not found", err=True)
         raise typer.Exit(1)
     return load_cluster_config(cluster_config_path), repo_root
+
+
+def _repo_root() -> Path:
+    from thunder_forge.cluster.config import find_repo_root
+
+    return find_repo_root()
+
+
+def _load_repo_dotenv() -> tuple[Path, Path]:
+    """Load repo-local .env without overriding process env. Returns (repo_root, env_file)."""
+    from dotenv import load_dotenv
+
+    repo_root = _repo_root()
+    env_file = repo_root / ".env"
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
+    return repo_root, env_file
+
+
+def _repo_relative_path(repo_root: Path, path: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded if expanded.is_absolute() else repo_root / expanded
+
+
+def _edge_access_log_path(repo_root: Path, access_log: Path | None) -> Path:
+    configured = (
+        str(access_log)
+        if access_log is not None
+        else os.environ.get(EDGE_ACCESS_LOG_ENV, DEFAULT_EDGE_ACCESS_LOG)
+    )
+    return _repo_relative_path(repo_root, Path(configured))
 
 
 def _run_preflight(config: object, *, target_node: str | None = None) -> None:
@@ -108,15 +150,21 @@ def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
 @edge_app.command("smoke")
 def edge_smoke(
     base_url: str = typer.Option(..., "--base-url", help="TF edge base URL, for example http://127.0.0.1:40116."),
-    api_key_env: str = typer.Option(..., "--api-key-env", help="Environment variable containing the edge API key."),
+    users_env: str = typer.Option(
+        EDGE_USERS_ENV,
+        "--users-env",
+        help="Environment variable containing client API-key JSON.",
+    ),
+    client_id: str = typer.Option(..., "--client-id", help="Client id whose API key should be used."),
     model: str = typer.Option(..., "--model", help="Model or alias to use for the chat smoke."),
     prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
 ) -> None:
     """Run a black-box smoke test against a running TF edge."""
-    api_key = os.environ.get(api_key_env)
+    _load_repo_dotenv()
+    env_name, api_key = edge_api_key_from_env(client_id=client_id, users_env=users_env)
     if not api_key:
-        typer.echo(f"Error: {api_key_env} is not set", err=True)
+        typer.echo(f"Error: {env_name} does not contain client '{client_id}'", err=True)
         raise typer.Exit(1)
 
     result = smoke_edge_contract(base_url=base_url, api_key=api_key, model=model, prompt=prompt, timeout=timeout)
@@ -134,6 +182,83 @@ def edge_smoke(
         typer.echo(f"Error: {error}", err=True)
     if not result.ok:
         raise typer.Exit(1)
+
+
+@edge_app.command("keys")
+def edge_keys(
+    clients: list[str] = typer.Option(
+        [],
+        "--client",
+        help="Client id to ensure in .env. Repeat for multiple clients.",
+    ),
+    env_file: Path = typer.Option(Path(".env"), "--env-file", help="Dotenv file to update."),
+    users_env: str = typer.Option(
+        EDGE_USERS_ENV,
+        "--users-env",
+        help="Environment variable containing client API-key JSON.",
+    ),
+    access_log: str = typer.Option(
+        DEFAULT_EDGE_ACCESS_LOG,
+        "--access-log",
+        help="Default JSONL access log path to store in .env.",
+    ),
+) -> None:
+    """Generate missing MVP TF edge API keys into a local dotenv file."""
+    if not clients:
+        typer.echo("Error: provide at least one --client", err=True)
+        raise typer.Exit(1)
+    repo_root, _ = _load_repo_dotenv()
+    env_path = _repo_relative_path(repo_root, env_file)
+    result = ensure_edge_api_keys(
+        env_file=env_path,
+        clients=clients,
+        users_env=users_env,
+        access_log_path=access_log,
+    )
+    typer.echo(f"env_file: {result.env_file}")
+    typer.echo(f"users_env: {users_env}")
+    for key in result.keys:
+        typer.echo(f"client: {key.client_id}")
+        typer.echo(f"status: {key.status}")
+    typer.echo(f"access_log_env: {result.access_log_env_name}")
+    typer.echo(f"access_log: {result.access_log_path}")
+    typer.echo(f"access_log_status: {result.access_log_status}")
+    typer.echo("secrets_printed: no")
+
+
+@edge_app.command("usage")
+def edge_usage(
+    access_log: Path | None = typer.Option(
+        None,
+        "--access-log",
+        help="JSONL access log path. Defaults to .env TF_EDGE_ACCESS_LOG.",
+    ),
+) -> None:
+    """Summarize TF edge JSONL request accounting by client id."""
+    repo_root, _ = _load_repo_dotenv()
+    log_path = _edge_access_log_path(repo_root, access_log)
+    summary = summarize_edge_usage(log_path)
+    typer.echo(f"access_log: {summary.access_log_path}")
+    typer.echo(f"requests_total: {summary.requests_total}")
+    typer.echo(f"invalid_lines: {summary.invalid_lines}")
+    if not summary.clients:
+        typer.echo("clients: []")
+        return
+    typer.echo("clients:")
+    for client in summary.clients:
+        typer.echo(f"  - client_id: {client.client_id}")
+        typer.echo(f"    requests: {client.requests}")
+        typer.echo(f"    failures: {client.failures}")
+        typer.echo(f"    latency_ms_p50: {client.latency_ms_p50}")
+        typer.echo(f"    latency_ms_p95: {client.latency_ms_p95}")
+        if client.models:
+            typer.echo("    models:")
+            for model, count in client.models.items():
+                typer.echo(f"      {model}: {count}")
+        if client.endpoints:
+            typer.echo("    endpoints:")
+            for endpoint, count in client.endpoints.items():
+                typer.echo(f"      {endpoint}: {count}")
 
 
 @olla_app.command("smoke")
@@ -206,26 +331,48 @@ def edge_serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Host/interface for the TF edge listener."),
     port: int = typer.Option(40116, "--port", help="Port for the TF edge listener."),
     olla_base_url: str = typer.Option(..., "--olla-base-url", help="Olla base URL, e.g. http://127.0.0.1:40115."),
-    api_key_env: str = typer.Option(..., "--api-key-env", help="Environment variable containing the edge API key."),
-    client_id: str = typer.Option("shag-dev", "--client-id", help="Client identity mapped to the API key."),
+    users_env: str = typer.Option(
+        EDGE_USERS_ENV,
+        "--users-env",
+        help="Environment variable containing client API-key JSON.",
+    ),
+    access_log: Path | None = typer.Option(
+        None,
+        "--access-log",
+        help="JSONL access log path. Defaults to .env TF_EDGE_ACCESS_LOG.",
+    ),
 ) -> None:
     """Run the minimal non-streaming TF edge proxy."""
-    api_key = os.environ.get(api_key_env)
-    if not api_key:
-        typer.echo(f"Error: {api_key_env} is not set", err=True)
+    repo_root, _ = _load_repo_dotenv()
+    clients_by_key = build_edge_clients_from_env(
+        users_env=users_env,
+    )
+    if not clients_by_key:
+        typer.echo(
+            f"Error: no edge API keys found. Run `make edge-keys EDGE_CLIENTS=...` or set {users_env}.",
+            err=True,
+        )
         raise typer.Exit(1)
 
+    access_log_path = _edge_access_log_path(repo_root, access_log)
+
     def log_sink(line: str) -> None:
-        typer.echo(line)
+        access_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with access_log_path.open("a") as handle:
+            handle.write(f"{line}\n")
+
+    client_ids = sorted({client.client_id for client in clients_by_key.values()})
 
     config = EdgeProxyConfig(
         olla_base_url=olla_base_url,
-        clients_by_key={api_key: EdgeClient(client_id=client_id)},
+        clients_by_key=clients_by_key,
         access_log_sink=log_sink,
     )
     typer.echo(f"serving_edge: http://{host}:{port}")
     typer.echo(f"olla_base_url: {olla_base_url}")
-    typer.echo(f"client_id: {client_id}")
+    typer.echo(f"clients: {', '.join(client_ids)}")
+    typer.echo(f"api_key_count: {len(clients_by_key)}")
+    typer.echo(f"access_log: {access_log_path}")
     serve_edge_proxy(host=host, port=port, config=config)
 
 

@@ -228,7 +228,7 @@ uv run thunder-forge gateway olla smoke \
 ```bash
 uv run thunder-forge edge smoke \
   --base-url http://127.0.0.1:40116 \
-  --api-key-env TF_DEV_EDGE_KEY \
+  --client-id <client-id> \
   --model qwen3-1.7b-omlx-msm3-test
 ```
 
@@ -238,6 +238,7 @@ uv run thunder-forge edge smoke \
 - invalid API key -> `401`;
 - valid API key -> `/v1/models` works;
 - valid API key -> `/v1/chat/completions` works through Olla;
+- per-user MVP keys live in ignored `.env` as one `TF_USERS` JSON hash mapping client ids to API keys;
 - edge rewrites `/v1/*` to Olla provider path;
 - edge supplies or passes `X-Olla-Session-ID`;
 - edge logs a structured JSON access line with:
@@ -250,6 +251,8 @@ uv run thunder-forge edge smoke \
   - latency_ms;
   - Olla endpoint from response header when present;
   - no API key value.
+
+Generate the initial local keys with `make edge-keys EDGE_CLIENTS="client-a client-b"`, then summarize JSONL request load with `make edge-usage`.
 
 ## Task 7: Implement the minimal TF edge proxy
 

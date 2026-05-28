@@ -1,5 +1,8 @@
 """CLI tests for Thunder Forge edge smoke commands."""
 
+import json
+from pathlib import Path
+
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
@@ -11,7 +14,8 @@ runner = CliRunner()
 def test_edge_smoke_cli_reads_api_key_from_env_and_prints_summary(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
-    monkeypatch.setenv("TF_DEV_EDGE_KEY", "dev-secret")
+    monkeypatch.setenv("TF_USERS", '{"client-a":"dev-secret"}')
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (Path.cwd(), Path.cwd() / ".env"), raising=False)
     monkeypatch.setattr(
         cli_module,
         "smoke_edge_contract",
@@ -36,8 +40,8 @@ def test_edge_smoke_cli_reads_api_key_from_env_and_prints_summary(monkeypatch) -
             "smoke",
             "--base-url",
             "http://127.0.0.1:40116",
-            "--api-key-env",
-            "TF_DEV_EDGE_KEY",
+            "--client-id",
+            "client-a",
             "--model",
             "qwen3-1.7b-omlx-msm3-test",
         ],
@@ -55,8 +59,11 @@ def test_edge_smoke_cli_reads_api_key_from_env_and_prints_summary(monkeypatch) -
     assert "dev-secret" not in result.stdout
 
 
-def test_edge_smoke_cli_fails_when_api_key_env_is_missing(monkeypatch) -> None:
-    monkeypatch.delenv("TF_DEV_EDGE_KEY", raising=False)
+def test_edge_smoke_cli_fails_when_client_api_key_is_missing(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    monkeypatch.delenv("TF_USERS", raising=False)
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (Path.cwd(), Path.cwd() / ".env"), raising=False)
 
     result = runner.invoke(
         app,
@@ -65,22 +72,23 @@ def test_edge_smoke_cli_fails_when_api_key_env_is_missing(monkeypatch) -> None:
             "smoke",
             "--base-url",
             "http://127.0.0.1:40116",
-            "--api-key-env",
-            "TF_DEV_EDGE_KEY",
+            "--client-id",
+            "client-a",
             "--model",
             "qwen3-1.7b-omlx-msm3-test",
         ],
     )
 
     assert result.exit_code == 1
-    assert "Error: TF_DEV_EDGE_KEY is not set" in result.stderr
+    assert "Error: TF_USERS does not contain client 'client-a'" in result.stderr
 
 
 def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     captured: dict[str, object] = {}
-    monkeypatch.setenv("TF_DEV_EDGE_KEY", "dev-secret")
+    monkeypatch.setenv("TF_USERS", '{"client-a":"secret-a","client-b":"secret-b"}')
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (Path.cwd(), Path.cwd() / ".env"), raising=False)
 
     def fake_serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
         captured["host"] = host
@@ -100,10 +108,6 @@ def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkey
             "40116",
             "--olla-base-url",
             "http://127.0.0.1:40115",
-            "--api-key-env",
-            "TF_DEV_EDGE_KEY",
-            "--client-id",
-            "shag-dev",
         ],
     )
 
@@ -113,5 +117,60 @@ def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkey
     config = captured["config"]
     assert isinstance(config, EdgeProxyConfig)
     assert config.olla_base_url == "http://127.0.0.1:40115"
-    assert config.clients_by_key["dev-secret"].client_id == "shag-dev"
-    assert "dev-secret" not in result.stdout
+    assert config.clients_by_key["secret-a"].client_id == "client-a"
+    assert config.clients_by_key["secret-b"].client_id == "client-b"
+    assert "clients: client-a, client-b" in result.stdout
+    assert "api_key_count: 2" in result.stdout
+    assert "secret-a" not in result.stdout
+    assert "secret-b" not in result.stdout
+
+
+def test_edge_keys_cli_generates_user_hash_without_printing_secrets(tmp_path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (tmp_path, env_file), raising=False)
+
+    result = runner.invoke(app, ["edge", "keys", "--client", "client-a", "--client", "client-b"])
+
+    assert result.exit_code == 0
+    assert "users_env: TF_USERS" in result.stdout
+    assert "client: client-a" in result.stdout
+    assert "client: client-b" in result.stdout
+    assert "secrets_printed: no" in result.stdout
+    content = env_file.read_text()
+    assert "TF_USERS='" in content
+    assert '"client-a":"' in content
+    assert '"client-b":"' in content
+    assert "TF_EDGE_ACCESS_LOG=logs/tf-edge-access.jsonl" in content
+    user_hash = next(line.partition("=")[2] for line in content.splitlines() if line.startswith("TF_USERS="))
+    assert user_hash not in result.stdout
+
+
+def test_edge_usage_cli_summarizes_access_log_by_client(tmp_path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    log_path = tmp_path / "access.jsonl"
+    log_path.write_text(
+        json.dumps(
+            {
+                "client_id": "client-b",
+                "path": "/v1/chat/completions",
+                "model": "memory",
+                "status_code": 200,
+                "latency_ms": 25,
+                "olla_endpoint": "msm3-omlx-live",
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (tmp_path, tmp_path / ".env"), raising=False)
+
+    result = runner.invoke(app, ["edge", "usage", "--access-log", str(log_path)])
+
+    assert result.exit_code == 0
+    assert f"access_log: {log_path}" in result.stdout
+    assert "requests_total: 1" in result.stdout
+    assert "client_id: client-b" in result.stdout
+    assert "memory: 1" in result.stdout
+    assert "msm3-omlx-live: 1" in result.stdout

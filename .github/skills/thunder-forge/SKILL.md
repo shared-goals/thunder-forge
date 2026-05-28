@@ -28,13 +28,18 @@ uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --app
 uv run thunder-forge runtime restart --node msm3 --manager daemon --apply
 uv run thunder-forge runtime smoke --node msm3 --model <model>
 uv run thunder-forge olla dev-smoke --binary <path> --model <model> --alias <alias>
+uv run thunder-forge edge keys --client <client-id>
 uv run thunder-forge generate-olla-config
-uv run thunder-forge edge serve
+uv run thunder-forge edge serve --olla-base-url http://127.0.0.1:40115
+uv run thunder-forge edge smoke --base-url http://127.0.0.1:40116 --client-id <client-id> --model memory
+uv run thunder-forge edge usage
 uv run pytest --tb=short -q
 uv run ruff check .
 ```
 
 Use implemented Thunder Forge commands or Make targets for normal production work. Avoid manual `ssh`, `rsync`, `launchctl`, or direct file moves unless the TF command does not exist yet; when that happens, document the missing target and prefer adding it.
+
+TF edge MVP API keys live in one ignored `.env` JSON hash named `TF_USERS`, mapping client ids to API keys. Generate local clients with `make edge-keys EDGE_CLIENTS="client-a client-b"` or `uv run thunder-forge edge keys --client <client-id>`. Do not print key values. Edge JSONL accounting records include `client_id`, model, status, latency, and Olla endpoint but no API keys; summarize with `make edge-usage` or `uv run thunder-forge edge usage`.
 
 Runtime restart managers:
 

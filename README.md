@@ -26,6 +26,14 @@ uv run thunder-forge generate-olla-config
 # Run dev smoke test
 uv run thunder-forge olla dev-smoke --binary /path/to/olla --model <model> --alias <alias>
 
+# Generate local TF edge API keys for MVP clients in .env
+make edge-keys EDGE_CLIENTS="client-a client-b"
+
+# Run and smoke the TF edge with per-user API keys
+uv run thunder-forge edge serve --olla-base-url http://127.0.0.1:40115
+uv run thunder-forge edge smoke --base-url http://127.0.0.1:40116 --client-id <client-id> --model memory
+uv run thunder-forge edge usage
+
 # Restart a remote node runtime after artifact sync
 uv run thunder-forge runtime restart --node msm3 --apply
 
@@ -102,6 +110,10 @@ Target production spread on 128 GB nodes:
 | msm4 | memory + agent | memory around 20 GB runtime RAM; agent around 40-90 GB |
 
 Role placement and routing should preserve no-swap headroom and keep every major role ready. For example, memory traffic should avoid consuming coder-node capacity when healthy memory replicas are available elsewhere.
+
+## Edge Users
+
+For the MVP, TF edge API keys are local secrets stored in one ignored `.env` JSON hash named `TF_USERS`. Generate the local client map with `make edge-keys EDGE_CLIENTS="client-a client-b"`. TF edge logs JSONL accounting records without secrets; `make edge-usage` summarizes request load by `client_id`, model, endpoint, failures, and latency percentiles.
 
 ## Model Selection
 

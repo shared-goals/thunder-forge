@@ -8,16 +8,29 @@ makes the edge behavior testable before wiring an ASGI/proxy process.
 from __future__ import annotations
 
 import json
+import math
+import os
+import re
+import secrets
 import time
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
 
 OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
+EDGE_USERS_ENV = "TF_USERS"
+DEFAULT_EDGE_ACCESS_LOG = "logs/tf-edge-access.jsonl"
+EDGE_ACCESS_LOG_ENV = "TF_EDGE_ACCESS_LOG"
+
+_ENV_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +97,49 @@ class EdgeSmokeResult:
 
 
 @dataclass(frozen=True)
+class EdgeKeyStatus:
+    """Status for one client key in a local dotenv file."""
+
+    client_id: str
+    env_name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class EdgeKeySetupResult:
+    """Result of ensuring MVP edge API keys exist in .env."""
+
+    env_file: str
+    keys: list[EdgeKeyStatus]
+    access_log_env_name: str
+    access_log_path: str
+    access_log_status: str
+
+
+@dataclass(frozen=True)
+class EdgeUsageClientSummary:
+    """Per-client summary of TF edge JSONL accounting records."""
+
+    client_id: str
+    requests: int
+    failures: int
+    models: dict[str, int]
+    endpoints: dict[str, int]
+    latency_ms_p50: int
+    latency_ms_p95: int
+
+
+@dataclass(frozen=True)
+class EdgeUsageSummary:
+    """Aggregate summary of a TF edge access log."""
+
+    access_log_path: str
+    requests_total: int
+    invalid_lines: int
+    clients: list[EdgeUsageClientSummary]
+
+
+@dataclass(frozen=True)
 class EdgeAccessLog:
     """Minimal JSONL accounting record.
 
@@ -125,6 +181,182 @@ def _bearer_token(authorization: str | None) -> str:
     return token.strip()
 
 
+def validate_edge_client_id(client_id: str) -> str:
+    """Return a stripped client id after validating it is safe for logs and JSON env storage."""
+    normalized = client_id.strip()
+    if not normalized:
+        msg = "client id must contain at least one alphanumeric character"
+        raise ValueError(msg)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", normalized):
+        msg = "client id may contain only letters, numbers, dots, underscores, and dashes"
+        raise ValueError(msg)
+    return normalized
+
+
+def parse_edge_users_json(value: str) -> dict[str, str]:
+    """Parse the TF_USERS client-id -> API-key JSON hash."""
+    if not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        msg = f"{EDGE_USERS_ENV} must be a JSON object mapping client ids to API keys"
+        raise ValueError(msg) from exc
+    if not isinstance(payload, dict):
+        msg = f"{EDGE_USERS_ENV} must be a JSON object mapping client ids to API keys"
+        raise ValueError(msg)
+
+    users: dict[str, str] = {}
+    for raw_client_id, raw_api_key in payload.items():
+        if not isinstance(raw_client_id, str) or not isinstance(raw_api_key, str):
+            msg = f"{EDGE_USERS_ENV} keys and values must be strings"
+            raise ValueError(msg)
+        client_id = validate_edge_client_id(raw_client_id)
+        api_key = raw_api_key.strip()
+        if api_key:
+            users[client_id] = api_key
+    return users
+
+
+def _encode_edge_users_json(users: dict[str, str]) -> str:
+    return json.dumps(dict(sorted(users.items())), separators=(",", ":"))
+
+
+def _quote_dotenv_value(value: str) -> str:
+    return f"'{value}'"
+
+
+def _decode_dotenv_value(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
+        return stripped[1:-1]
+    return stripped
+
+
+def load_edge_user_keys_from_env(
+    *,
+    env: dict[str, str] | None = None,
+    users_env: str = EDGE_USERS_ENV,
+) -> dict[str, str]:
+    """Load the TF edge client-id -> API-key hash from the environment."""
+    source = env if env is not None else os.environ
+    return parse_edge_users_json(source.get(users_env, ""))
+
+
+def edge_api_key_from_env(
+    *,
+    env: dict[str, str] | None = None,
+    client_id: str,
+    users_env: str = EDGE_USERS_ENV,
+) -> tuple[str, str]:
+    """Return (env_name, api_key) for one configured client id from the TF_USERS hash."""
+    users = load_edge_user_keys_from_env(env=env, users_env=users_env)
+    return users_env, users.get(validate_edge_client_id(client_id), "")
+
+
+def load_edge_clients_from_env(
+    *,
+    env: dict[str, str] | None = None,
+    users_env: str = EDGE_USERS_ENV,
+) -> dict[str, EdgeClient]:
+    """Load all TF edge clients from the TF_USERS client-id -> API-key hash."""
+    clients: dict[str, EdgeClient] = {}
+    for client_id, api_key in load_edge_user_keys_from_env(env=env, users_env=users_env).items():
+        clients[api_key] = EdgeClient(client_id=client_id)
+    return clients
+
+
+def build_edge_clients_from_env(
+    *,
+    env: dict[str, str] | None = None,
+    users_env: str = EDGE_USERS_ENV,
+) -> dict[str, EdgeClient]:
+    """Build edge auth mapping from the configured TF_USERS hash."""
+    return load_edge_clients_from_env(env=env, users_env=users_env)
+
+
+def _env_raw_value_is_empty(raw_value: str) -> bool:
+    value = raw_value.strip()
+    if value in {'""', "''"}:
+        return True
+    return value == ""
+
+
+def _get_env_value_from_lines(lines: list[str], env_name: str) -> str:
+    for line in lines:
+        match = _ENV_LINE_RE.match(line)
+        if match is not None and match.group("name") == env_name:
+            return _decode_dotenv_value(match.group("value"))
+    return ""
+
+
+def _set_or_append_env_value(lines: list[str], env_name: str, value: str, *, overwrite: bool = False) -> str:
+    replacement = f"{env_name}={value}"
+    for index, line in enumerate(lines):
+        match = _ENV_LINE_RE.match(line)
+        if match is None or match.group("name") != env_name:
+            continue
+        if overwrite:
+            lines[index] = replacement
+            return "updated"
+        if _env_raw_value_is_empty(match.group("value")):
+            lines[index] = replacement
+            return "created"
+        return "present"
+    lines.append(replacement)
+    return "created"
+
+
+def ensure_edge_api_keys(
+    *,
+    env_file: Path,
+    clients: list[str] | tuple[str, ...],
+    users_env: str = EDGE_USERS_ENV,
+    access_log_path: str = DEFAULT_EDGE_ACCESS_LOG,
+) -> EdgeKeySetupResult:
+    """Create missing local TF edge API keys in a single dotenv JSON hash without printing secrets."""
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    if env_file.exists():
+        lines = env_file.read_text().splitlines()
+    else:
+        lines = []
+
+    users = parse_edge_users_json(_get_env_value_from_lines(lines, users_env))
+
+    statuses: list[EdgeKeyStatus] = []
+    seen_clients: set[str] = set()
+    for client_id in clients:
+        normalized_client_id = validate_edge_client_id(client_id)
+        if not normalized_client_id or normalized_client_id in seen_clients:
+            continue
+        seen_clients.add(normalized_client_id)
+        if normalized_client_id in users and users[normalized_client_id].strip():
+            status = "present"
+        else:
+            users[normalized_client_id] = secrets.token_urlsafe(32)
+            status = "created"
+        statuses.append(EdgeKeyStatus(client_id=normalized_client_id, env_name=users_env, status=status))
+
+    _set_or_append_env_value(
+        lines,
+        users_env,
+        _quote_dotenv_value(_encode_edge_users_json(users)),
+        overwrite=True,
+    )
+
+    access_log_status = _set_or_append_env_value(lines, EDGE_ACCESS_LOG_ENV, access_log_path)
+    env_file.write_text("\n".join(lines) + "\n")
+    env_file.chmod(0o600)
+
+    return EdgeKeySetupResult(
+        env_file=str(env_file),
+        keys=statuses,
+        access_log_env_name=EDGE_ACCESS_LOG_ENV,
+        access_log_path=access_log_path,
+        access_log_status=access_log_status,
+    )
+
+
 def authenticate_edge_request(
     authorization: str | None,
     clients_by_key: dict[str, EdgeClient],
@@ -135,6 +367,106 @@ def authenticate_edge_request(
     if client is None:
         return EdgeAuthResult(allowed=False, status_code=401)
     return EdgeAuthResult(allowed=True, status_code=200, client_id=client.client_id)
+
+
+def _nearest_rank_percentile(values: list[int], percentile: float) -> int:
+    if not values:
+        return 0
+    sorted_values = sorted(values)
+    rank = max(1, math.ceil((percentile / 100) * len(sorted_values)))
+    return sorted_values[rank - 1]
+
+
+def summarize_edge_usage(access_log_path: Path) -> EdgeUsageSummary:
+    """Summarize TF edge JSONL access logs by authenticated client id."""
+    records: dict[str, dict[str, object]] = defaultdict(
+        lambda: {
+            "requests": 0,
+            "failures": 0,
+            "models": Counter(),
+            "endpoints": Counter(),
+            "latencies": [],
+        }
+    )
+    requests_total = 0
+    invalid_lines = 0
+
+    if not access_log_path.exists():
+        return EdgeUsageSummary(
+            access_log_path=str(access_log_path),
+            requests_total=0,
+            invalid_lines=0,
+            clients=[],
+        )
+
+    for line in access_log_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            invalid_lines += 1
+            continue
+        if not isinstance(payload, dict):
+            invalid_lines += 1
+            continue
+        client_id = payload.get("client_id")
+        if not isinstance(client_id, str) or not client_id:
+            invalid_lines += 1
+            continue
+
+        requests_total += 1
+        record = records[client_id]
+        record["requests"] = int(record["requests"]) + 1
+
+        status_code = payload.get("status_code")
+        if isinstance(status_code, int) and status_code >= 400:
+            record["failures"] = int(record["failures"]) + 1
+
+        model = payload.get("model")
+        if isinstance(model, str) and model:
+            models = record["models"]
+            assert isinstance(models, Counter)
+            models[model] += 1
+
+        endpoint = payload.get("olla_endpoint")
+        if isinstance(endpoint, str) and endpoint:
+            endpoints = record["endpoints"]
+            assert isinstance(endpoints, Counter)
+            endpoints[endpoint] += 1
+
+        latency_ms = payload.get("latency_ms")
+        if isinstance(latency_ms, int):
+            latencies = record["latencies"]
+            assert isinstance(latencies, list)
+            latencies.append(latency_ms)
+
+    clients = []
+    for client_id, record in sorted(records.items()):
+        latencies = record["latencies"]
+        assert isinstance(latencies, list)
+        models = record["models"]
+        endpoints = record["endpoints"]
+        assert isinstance(models, Counter)
+        assert isinstance(endpoints, Counter)
+        clients.append(
+            EdgeUsageClientSummary(
+                client_id=client_id,
+                requests=int(record["requests"]),
+                failures=int(record["failures"]),
+                models=dict(models.most_common()),
+                endpoints=dict(endpoints.most_common()),
+                latency_ms_p50=_nearest_rank_percentile(latencies, 50),
+                latency_ms_p95=_nearest_rank_percentile(latencies, 95),
+            )
+        )
+
+    return EdgeUsageSummary(
+        access_log_path=str(access_log_path),
+        requests_total=requests_total,
+        invalid_lines=invalid_lines,
+        clients=clients,
+    )
 
 
 def rewrite_openai_path(path: str) -> str:
