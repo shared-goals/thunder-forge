@@ -156,8 +156,9 @@ def build_artifact_sync_plan(
     ]
     rsync_args = [
         "rsync",
-        "-az",
+        "-a",
         "--progress",
+        "--partial",
         "-e",
         "ssh -o BatchMode=yes -o ConnectTimeout=8",
         source_path,

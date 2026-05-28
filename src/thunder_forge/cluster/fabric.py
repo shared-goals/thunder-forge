@@ -106,11 +106,15 @@ def discover_link_local_fabric_host(
 ) -> str | None:
     """Discover a reachable link-local fabric address for a node.
 
-    This is deliberately small: ask the node over its management hostname for
-    link-local IPv4 addresses, then try a bounded SSH hostname check against each
-    candidate from the local machine. The first candidate that answers is the
-    current point-to-point fabric address.
+    Ask the node over its management hostname for Thunderbolt interface
+    inventory and link-local IPv4 addresses, then verify from the local machine
+    that the route to the candidate also uses a Thunderbolt interface. This
+    avoids treating unrelated 169.254 addresses as fabric.
     """
+    local_thunderbolt_devices = _local_thunderbolt_devices(timeout=timeout)
+    if not local_thunderbolt_devices:
+        return None
+
     result = subprocess.run(
         [
             "ssh",
@@ -119,7 +123,7 @@ def discover_link_local_fabric_host(
             "-o",
             "ConnectTimeout=8",
             f"{node_user}@{management_host}",
-            "ifconfig",
+            "networksetup -listallhardwareports 2>/dev/null; printf '\\n__TF_IFCONFIG__\\n'; ifconfig",
         ],
         check=False,
         capture_output=True,
@@ -129,19 +133,73 @@ def discover_link_local_fabric_host(
     if result.returncode != 0:
         return None
 
-    for address in _extract_link_local_ipv4(result.stdout):
-        if _ssh_hostname_check(address, node_user=node_user, timeout=timeout):
+    remote_inventory, _, remote_ifconfig = result.stdout.partition("__TF_IFCONFIG__")
+    remote_thunderbolt_devices = _extract_thunderbolt_devices(remote_inventory)
+    if not remote_thunderbolt_devices:
+        return None
+
+    for address in _extract_link_local_ipv4(remote_ifconfig, allowed_interfaces=remote_thunderbolt_devices):
+        if (
+            _route_uses_allowed_interface(address, allowed_interfaces=local_thunderbolt_devices, timeout=timeout)
+            and _ssh_hostname_check(address, node_user=node_user, timeout=timeout)
+        ):
             return address
     return None
 
 
-def _extract_link_local_ipv4(text: str) -> list[str]:
+def _local_thunderbolt_devices(*, timeout: int) -> set[str]:
+    result = subprocess.run(
+        ["networksetup", "-listallhardwareports"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        return set()
+    return _extract_thunderbolt_devices(result.stdout)
+
+
+def _extract_thunderbolt_devices(text: str) -> set[str]:
+    devices: set[str] = set()
+    for block in re.split(r"\n\s*\n", text):
+        if "Thunderbolt" not in block:
+            continue
+        match = re.search(r"^Device:\s*(\S+)\s*$", block, flags=re.MULTILINE)
+        if match:
+            devices.add(match.group(1))
+    return devices
+
+
+def _extract_link_local_ipv4(text: str, *, allowed_interfaces: set[str] | None = None) -> list[str]:
     addresses: list[str] = []
-    for match in re.finditer(r"\binet\s+(169\.254\.\d{1,3}\.\d{1,3})\b", text):
-        address = match.group(1)
-        if _is_acceptable_fabric_address(address) and address not in addresses:
-            addresses.append(address)
+    current_interface = ""
+    for line in text.splitlines():
+        interface_match = re.match(r"^([A-Za-z0-9._-]+):", line)
+        if interface_match:
+            current_interface = interface_match.group(1)
+        if allowed_interfaces is not None and current_interface not in allowed_interfaces:
+            continue
+        match = re.search(r"\binet\s+(169\.254\.\d{1,3}\.\d{1,3})\b", line)
+        if match:
+            address = match.group(1)
+            if _is_acceptable_fabric_address(address) and address not in addresses:
+                addresses.append(address)
     return addresses
+
+
+def _route_uses_allowed_interface(address: str, *, allowed_interfaces: set[str], timeout: int) -> bool:
+    result = subprocess.run(
+        ["route", "-n", "get", address],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        return False
+    match = re.search(r"^\s*interface:\s*(\S+)\s*$", result.stdout, flags=re.MULTILINE)
+    return bool(match and match.group(1) in allowed_interfaces)
 
 
 def _ssh_hostname_check(address: str, *, node_user: str, timeout: int) -> bool:

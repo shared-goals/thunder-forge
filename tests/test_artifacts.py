@@ -89,6 +89,9 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
         "/Users/shag/.omlx/models",
     ]
     assert plan.rsync_args[0] == "rsync"
+    assert "-a" in plan.rsync_args
+    assert "-az" not in plan.rsync_args
+    assert "--partial" in plan.rsync_args
     assert plan.rsync_args[-1] == plan.destination
 
 
