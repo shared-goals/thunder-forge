@@ -21,7 +21,11 @@ from thunder_forge.cluster.fabric import build_transport_plan
 from thunder_forge.cluster.olla import dev_smoke_olla, smoke_olla_router
 from thunder_forge.cluster.omlx import (
     check_omlx_health,
+    run_omlx_daemon_restart,
+    run_omlx_daemon_setup,
     run_omlx_install,
+    run_omlx_process_restart,
+    run_omlx_runtime_restart,
     run_omlx_runtime_start,
     smoke_omlx_chat,
 )
@@ -406,6 +410,185 @@ def runtime_start(
     if result.pid:
         typer.echo(f"pid: {result.pid}")
     typer.echo("status: started")
+
+
+@runtime_app.command("setup-daemon")
+def runtime_setup_daemon(
+    node: str = typer.Option(..., "--node", help="Node name to set up for system oMLX daemon management."),
+    admin_user: str = typer.Option(
+        "",
+        "--admin-user",
+        help="Admin account that can run sudo on the node. Defaults to the configured node user.",
+    ),
+    via_su: bool = typer.Option(
+        False,
+        "--via-su/--ssh-admin",
+        help="SSH as the node user, then run the setup script through su - ADMIN_USER.",
+    ),
+    script_path: str = typer.Option(
+        "",
+        "--script-path",
+        help="Remote path for the generated setup script. Defaults to /tmp/thunder-forge-setup-<label>.sh.",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print the setup script and remote commands without executing by default.",
+    ),
+    timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for remote setup when applying."),
+) -> None:
+    """Set up a node for sudo-backed system oMLX daemon management."""
+    if via_su and not admin_user:
+        typer.echo("Error: --via-su requires --admin-user", err=True)
+        raise typer.Exit(1)
+
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    if runtime_node.home_dir is None:
+        runtime_node.home_dir = f"/Users/{runtime_node.user}"
+
+    result = run_omlx_daemon_setup(
+        runtime_node,
+        admin_user=admin_user or None,
+        via_su=via_su,
+        script_path=script_path or None,
+        apply=not dry_run,
+        timeout=timeout,
+    )
+
+    _print_runtime_node_header(node, runtime_node)
+    typer.echo("manager: daemon")
+    typer.echo(f"admin_user: {result.admin_user}")
+    typer.echo(f"ssh_user: {result.ssh_user}")
+    typer.echo(f"via_su: {'yes' if result.via_su else 'no'}")
+    typer.echo(f"plist_path: {result.plist_path}")
+    typer.echo(f"staging_plist_path: {result.staging_plist_path}")
+    typer.echo(f"sudoers_path: {result.sudoers_path}")
+    typer.echo(f"script_path: {result.script_path}")
+    typer.echo(f"label: {result.label}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    if dry_run and result.script_content:
+        typer.echo("script:")
+        for line in result.script_content.splitlines():
+            typer.echo(f"  {line}")
+    if result.commands:
+        typer.echo("commands:")
+        for cmd in result.commands:
+            typer.echo(f"  - {cmd}")
+    if result.applied:
+        typer.echo(f"sudoers_verified: {'yes' if result.sudoers_verified else 'no'}")
+        typer.echo(f"service_label_verified: {'yes' if result.service_label_verified else 'no'}")
+        typer.echo(f"health_ok: {'yes' if result.health_ok else 'no'}")
+        if result.ok:
+            typer.echo("status: daemon setup complete")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+    if result.applied and not result.ok:
+        raise typer.Exit(1)
+
+
+@runtime_app.command("restart")
+def runtime_restart(
+    node: str = typer.Option(..., "--node", help="Node name to restart runtime on (e.g. msm3)."),
+    manager: str = typer.Option(
+        "process",
+        "--manager",
+        help=(
+            "Restart manager: process for no-GUI/no-sudo SSH control, "
+            "daemon for sudo-backed system launchd, or launchd for a user LaunchAgent."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print plist and commands without executing by default.",
+    ),
+    timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds for each SSH command."),
+) -> None:
+    """Restart a node-level runtime on a remote node."""
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    if runtime_node.home_dir is None:
+        runtime_node.home_dir = f"/Users/{runtime_node.user}"
+
+    _print_runtime_node_header(node, runtime_node)
+    normalized_manager = manager.lower()
+    typer.echo(f"manager: {normalized_manager}")
+
+    if normalized_manager == "process":
+        process_result = run_omlx_process_restart(runtime_node, apply=not dry_run, timeout=timeout)
+        typer.echo(f"command: {process_result.command}")
+        typer.echo(f"pid_path: {process_result.pid_path}")
+        typer.echo(f"stdout_log: {process_result.stdout_log}")
+        typer.echo(f"stderr_log: {process_result.stderr_log}")
+        typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+        if process_result.commands:
+            typer.echo("commands:")
+            for cmd in process_result.commands:
+                typer.echo(f"  - {cmd}")
+        if process_result.applied:
+            if process_result.pid:
+                typer.echo(f"pid: {process_result.pid}")
+            typer.echo(f"health_ok: {'yes' if process_result.health_ok else 'no'}")
+            if process_result.ok:
+                typer.echo("status: restarted")
+        for error in process_result.errors:
+            typer.echo(f"Error: {error}", err=True)
+        if not process_result.ok and process_result.applied:
+            raise typer.Exit(1)
+        return
+
+    if normalized_manager == "daemon":
+        result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+        typer.echo(f"plist_path: {result.plist_path}")
+        if result.staging_plist_path:
+            typer.echo(f"staging_plist_path: {result.staging_plist_path}")
+        typer.echo(f"label: {result.label}")
+        typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+        if result.plist_content:
+            typer.echo("plist:")
+            for line in result.plist_content.splitlines():
+                typer.echo(f"  {line}")
+        if result.commands:
+            typer.echo("commands:")
+            for cmd in result.commands:
+                typer.echo(f"  - {cmd}")
+        if result.applied:
+            typer.echo(f"service_label_verified: {'yes' if result.service_label_verified else 'no'}")
+            typer.echo(f"health_ok: {'yes' if result.health_ok else 'no'}")
+            if result.ok:
+                typer.echo("status: restarted")
+        for error in result.errors:
+            typer.echo(f"Error: {error}", err=True)
+        if not result.ok and result.applied:
+            raise typer.Exit(1)
+        return
+
+    if normalized_manager != "launchd":
+        typer.echo("Error: --manager must be 'process', 'daemon', or 'launchd'", err=True)
+        raise typer.Exit(1)
+
+    result = run_omlx_runtime_restart(runtime_node, apply=not dry_run, timeout=timeout)
+    typer.echo(f"plist_path: {result.plist_path}")
+    typer.echo(f"label: {result.label}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    if result.plist_content:
+        typer.echo("plist:")
+        for line in result.plist_content.splitlines():
+            typer.echo(f"  {line}")
+    if result.commands:
+        typer.echo("commands:")
+        for cmd in result.commands:
+            typer.echo(f"  - {cmd}")
+    if result.applied:
+        typer.echo(f"service_label_verified: {'yes' if result.service_label_verified else 'no'}")
+        typer.echo(f"health_ok: {'yes' if result.health_ok else 'no'}")
+        if result.ok:
+            typer.echo("status: restarted")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+    if not result.ok and result.applied:
+        raise typer.Exit(1)
 
 
 @runtime_app.command("status")

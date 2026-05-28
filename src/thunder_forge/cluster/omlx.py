@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from thunder_forge.cluster.config import Node, RuntimeType
-from thunder_forge.cluster.ssh import ssh_run
+from thunder_forge.cluster.ssh import scp_content, ssh_run
 
 LAUNCHD_LABEL_PREFIX = "com.thunder-forge.omlx"
 
@@ -258,6 +258,7 @@ class OmlxInstallResult:
     node: str
     plist_path: str
     label: str
+    staging_plist_path: str = ""
     plist_content: str = ""
     commands: list[str] = field(default_factory=list)
     applied: bool = False
@@ -270,6 +271,54 @@ class OmlxInstallResult:
         return self.applied and self.service_label_verified and self.health_ok and not self.errors
 
 
+@dataclass
+class OmlxProcessResult:
+    node: str
+    command: str
+    pid_path: str
+    stdout_log: str
+    stderr_log: str
+    commands: list[str] = field(default_factory=list)
+    pid: str = ""
+    applied: bool = False
+    health_ok: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.applied and self.health_ok and not self.errors
+
+
+@dataclass
+class OmlxDaemonSetupResult:
+    node: str
+    label: str
+    plist_path: str
+    staging_plist_path: str
+    sudoers_path: str
+    script_path: str
+    admin_user: str
+    ssh_user: str
+    via_su: bool = False
+    script_content: str = ""
+    commands: list[str] = field(default_factory=list)
+    applied: bool = False
+    sudoers_verified: bool = False
+    service_label_verified: bool = False
+    health_ok: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return (
+            self.applied
+            and self.sudoers_verified
+            and self.service_label_verified
+            and self.health_ok
+            and not self.errors
+        )
+
+
 def _omlx_binary_path(node: Node) -> str:
     if node.home_dir is None:
         msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
@@ -277,7 +326,7 @@ def _omlx_binary_path(node: Node) -> str:
     return f"{node.home_dir}/.local/bin/omlx"
 
 
-def generate_launchd_plist(node: Node) -> str:
+def generate_launchd_plist(node: Node, *, system_daemon: bool = False) -> str:
     """Generate a macOS launchd plist for a node-level oMLX daemon."""
     if node.runtime is None:
         msg = "Node has no runtime configured"
@@ -303,6 +352,20 @@ def generate_launchd_plist(node: Node) -> str:
         program_arguments.extend(["--model-dir", node.runtime.model_dir])
 
     program_arguments_xml = "\n".join(f"        <string>{arg}</string>" for arg in program_arguments)
+    daemon_user_xml = ""
+    daemon_environment_xml = ""
+    if system_daemon:
+        daemon_user_xml = f"    <key>UserName</key>\n    <string>{node.user}</string>\n"
+        daemon_path = f"{node.home_dir}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        daemon_environment_xml = (
+            "    <key>EnvironmentVariables</key>\n"
+            "    <dict>\n"
+            "        <key>HOME</key>\n"
+            f"        <string>{node.home_dir}</string>\n"
+            "        <key>PATH</key>\n"
+            f"        <string>{daemon_path}</string>\n"
+            "    </dict>\n"
+        )
 
     plist = textwrap.dedent(
         f"""\
@@ -312,7 +375,7 @@ def generate_launchd_plist(node: Node) -> str:
 <dict>
     <key>Label</key>
     <string>{label}</string>
-    <key>ProgramArguments</key>
+{daemon_user_xml}{daemon_environment_xml}    <key>ProgramArguments</key>
     <array>
 {program_arguments_xml}
     </array>
@@ -337,18 +400,132 @@ def _install_commands(label: str, plist_path: str, port: int) -> list[str]:
     """The ordered command sequence for a safe launchd install."""
     return [
         "mkdir -p ~/Library/LaunchAgents ~/Library/Logs",
-        f"launchctl bootout gui/$(id -u)/{label} 2>/dev/null || true",
+        f"launchctl bootout user/$(id -u)/{label} 2>/dev/null || true",
         f"rm -f {plist_path}",
         (
             f"pkill -f '^.*omlx serve --host 0\\.0\\.0\\.0 --port {port}.*$' 2>/dev/null || true"
         ),
-        f"launchctl bootstrap gui/$(id -u) {plist_path}",
+        f"launchctl bootstrap user/$(id -u) {plist_path}",
         f"launchctl list {label} 2>/dev/null | grep -q {label}",
     ]
 
 
-def run_omlx_install(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
-    """Generate plist and, if apply, install/update the launchd daemon on the node."""
+def _daemon_commands(label: str, staging_plist_path: str, plist_path: str, port: int) -> list[str]:
+    """The ordered command sequence for a sudo-backed system LaunchDaemon."""
+    return [
+        "mkdir -p ~/.omlx/run ~/Library/Logs",
+        f"/usr/bin/sudo -n /usr/bin/install -o root -g wheel -m 644 {staging_plist_path} {plist_path}",
+        f"launchctl bootout user/$(id -u)/{label} 2>/dev/null || true",
+        f"launchctl bootout gui/$(id -u)/{label} 2>/dev/null || true",
+        f"/usr/bin/sudo -n /bin/launchctl bootout system/{label} 2>/dev/null || true",
+        (
+            f"pkill -f '^.*omlx serve --host 0\\.0\\.0\\.0 --port {port}.*$' "
+            "2>/dev/null || true"
+        ),
+        f"/usr/bin/sudo -n /bin/launchctl bootstrap system {plist_path}",
+        f"/usr/bin/sudo -n /bin/launchctl kickstart -k system/{label}",
+        f"/usr/bin/sudo -n /bin/launchctl print system/{label} >/dev/null",
+    ]
+
+
+def daemon_sudoers_path_for_node(node: Node) -> str:
+    """Return the sudoers include path used for a node's oMLX daemon manager."""
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    return f"/etc/sudoers.d/thunder-forge-omlx-{node.runtime.port}"
+
+
+def generate_daemon_sudoers(node: Node) -> str:
+    """Generate the narrow sudoers rule needed by the oMLX system daemon manager."""
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+
+    port = node.runtime.port
+    label = launchd_label_for_node(node)
+    plist_path = f"/Library/LaunchDaemons/{label}.plist"
+    staging_plist_path = f"{node.home_dir}/.omlx/run/{label}.plist"
+    alias_prefix = f"TF_OMLX_{port}"
+    launchd_command_list = ", ".join(
+        [
+            f"/bin/launchctl bootout system/{label}",
+            f"/bin/launchctl bootstrap system {plist_path}",
+            f"/bin/launchctl kickstart -k system/{label}",
+            f"/bin/launchctl print system/{label}",
+        ]
+    )
+    return textwrap.dedent(
+        f"""\
+        Cmnd_Alias {alias_prefix}_INSTALL = /usr/bin/install -o root -g wheel -m 644 {staging_plist_path} {plist_path}
+        Cmnd_Alias {alias_prefix}_LAUNCHD = {launchd_command_list}
+        {node.user} ALL=(root) NOPASSWD: {alias_prefix}_INSTALL, {alias_prefix}_LAUNCHD
+        """
+    )
+
+
+def _process_restart_commands(node: Node) -> tuple[OmlxProcessResult, int | None]:
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+
+    port = node.runtime.port
+    label = launchd_label_for_node(node)
+    command = build_omlx_serve_command(node)
+    pid_path = f"{node.home_dir}/.omlx/run/omlx-{port}.pid"
+    stdout_log = f"{node.home_dir}/Library/Logs/omlx-{port}.stdout.log"
+    stderr_log = f"{node.home_dir}/Library/Logs/omlx-{port}.stderr.log"
+    process_pattern = f"^.*omlx serve --host 0\\.0\\.0\\.0 --port {port}.*$"
+
+    stop_command = " ; ".join(
+        [
+            f"launchctl bootout user/$(id -u)/{label} 2>/dev/null || true",
+            f"launchctl bootout gui/$(id -u)/{label} 2>/dev/null || true",
+            (
+                f"if [ -f {shlex.quote(pid_path)} ]; then "
+                f"existing_pid=$(cat {shlex.quote(pid_path)} 2>/dev/null || true); "
+                'if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then '
+                'kill "$existing_pid" 2>/dev/null || true; '
+                "fi; "
+                f"rm -f {shlex.quote(pid_path)}; "
+                "fi"
+            ),
+            f"pkill -f {shlex.quote(process_pattern)} 2>/dev/null || true",
+        ]
+    )
+    start_command = (
+        f"mkdir -p {shlex.quote(node.home_dir + '/.omlx/run')} {shlex.quote(node.home_dir + '/Library/Logs')} && "
+        f"nohup {command} > {shlex.quote(stdout_log)} 2> {shlex.quote(stderr_log)} < /dev/null & "
+        f"echo $! > {shlex.quote(pid_path)} && "
+        f"cat {shlex.quote(pid_path)}"
+    )
+    result = OmlxProcessResult(
+        node=node.host,
+        command=command,
+        pid_path=pid_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        commands=[stop_command, start_command],
+    )
+    return result, port
+
+
+def _wait_for_omlx_health(base_url: str, *, wait_seconds: int) -> OmlxHealthResult:
+    deadline = time.monotonic() + wait_seconds
+    last_result = check_omlx_health(base_url, timeout=10.0)
+    while not (last_result.health_ok and last_result.models_ok) and time.monotonic() < deadline:
+        time.sleep(1)
+        last_result = check_omlx_health(base_url, timeout=10.0)
+    return last_result
+
+
+def _build_omlx_launchd_result(node: Node) -> tuple[OmlxInstallResult, int | None]:
     if node.runtime is None:
         msg = "Node has no runtime configured"
         raise ValueError(msg)
@@ -365,31 +542,396 @@ def run_omlx_install(node: Node, *, apply: bool = True, timeout: int = 60) -> Om
         result.plist_content = generate_launchd_plist(node)
     except (ValueError, AttributeError) as exc:
         result.errors.append(str(exc))
-        return result
+        return result, None
 
     result.commands = _install_commands(label, plist_path, runtime.port)
-    if not apply:
+    return result, runtime.port
+
+
+def _build_omlx_daemon_result(node: Node) -> tuple[OmlxInstallResult, int | None]:
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+    runtime = node.runtime
+    label = launchd_label_for_node(node)
+    plist_path = f"/Library/LaunchDaemons/{label}.plist"
+    staging_plist_path = f"{node.home_dir}/.omlx/run/{label}.plist"
+    result = OmlxInstallResult(
+        node=f"{node.host}",
+        plist_path=plist_path,
+        staging_plist_path=staging_plist_path,
+        label=label,
+    )
+    try:
+        result.plist_content = generate_launchd_plist(node, system_daemon=True)
+    except (ValueError, AttributeError) as exc:
+        result.errors.append(str(exc))
+        return result, None
+
+    result.commands = _daemon_commands(label, staging_plist_path, plist_path, runtime.port)
+    return result, runtime.port
+
+
+def generate_daemon_setup_script(node: Node, *, sudoers_path: str | None = None) -> str:
+    """Generate the node-side admin script that installs the system daemon and sudoers rule."""
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+
+    daemon_result, _ = _build_omlx_daemon_result(node)
+    if daemon_result.errors:
+        msg = "; ".join(daemon_result.errors)
+        raise ValueError(msg)
+
+    label = daemon_result.label
+    sudoers_content = generate_daemon_sudoers(node).rstrip()
+    sudoers_path = sudoers_path or daemon_sudoers_path_for_node(node)
+    process_pattern = f"^.*omlx serve --host 0\\.0\\.0\\.0 --port {node.runtime.port}.*$"
+
+    return f"""#!/bin/zsh
+set -euo pipefail
+
+NODE_USER={shlex.quote(node.user)}
+NODE_HOME={shlex.quote(node.home_dir)}
+LABEL={shlex.quote(label)}
+PLIST_PATH={shlex.quote(daemon_result.plist_path)}
+STAGING_PLIST_PATH={shlex.quote(daemon_result.staging_plist_path)}
+SUDOERS_PATH={shlex.quote(sudoers_path)}
+PROCESS_PATTERN={shlex.quote(process_pattern)}
+
+run_root() {{
+    if [[ "$(/usr/bin/id -u)" -eq 0 ]]; then
+        "$@"
+    else
+        /usr/bin/sudo "$@"
+    fi
+}}
+
+if [[ "$(/usr/bin/uname -s)" != "Darwin" ]]; then
+    echo "Thunder Forge oMLX daemon setup currently supports macOS nodes only" >&2
+    exit 1
+fi
+
+if ! /usr/bin/id -u "$NODE_USER" >/dev/null 2>&1; then
+    echo "Node user does not exist: $NODE_USER" >&2
+    exit 1
+fi
+
+SUDOERS_DIR="$(/usr/bin/dirname "$SUDOERS_PATH")"
+TMP_PLIST="$(/usr/bin/mktemp "/tmp/$LABEL.plist.XXXXXX")"
+TMP_SUDOERS="$(/usr/bin/mktemp "/tmp/thunder-forge-sudoers.XXXXXX")"
+cleanup() {{
+    /bin/rm -f "$TMP_PLIST" "$TMP_SUDOERS"
+}}
+trap cleanup EXIT
+
+/bin/cat > "$TMP_PLIST" <<'THUNDER_FORGE_PLIST'
+{daemon_result.plist_content.rstrip()}
+THUNDER_FORGE_PLIST
+
+/bin/cat > "$TMP_SUDOERS" <<'THUNDER_FORGE_SUDOERS'
+{sudoers_content}
+THUNDER_FORGE_SUDOERS
+
+run_root /bin/mkdir -p "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs" "$SUDOERS_DIR"
+run_root /usr/sbin/chown -R "$NODE_USER":staff "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs"
+run_root /usr/sbin/visudo -cf "$TMP_SUDOERS"
+run_root /usr/bin/install -o "$NODE_USER" -g staff -m 644 "$TMP_PLIST" "$STAGING_PLIST_PATH"
+run_root /usr/bin/install -o root -g wheel -m 644 "$TMP_PLIST" "$PLIST_PATH"
+run_root /usr/bin/install -o root -g wheel -m 440 "$TMP_SUDOERS" "$SUDOERS_PATH"
+
+NODE_UID="$(/usr/bin/id -u "$NODE_USER")"
+run_root /bin/launchctl bootout "user/$NODE_UID/$LABEL" 2>/dev/null || true
+run_root /bin/launchctl bootout "gui/$NODE_UID/$LABEL" 2>/dev/null || true
+run_root /bin/launchctl bootout "system/$LABEL" 2>/dev/null || true
+run_root /usr/bin/pkill -f "$PROCESS_PATTERN" 2>/dev/null || true
+run_root /bin/launchctl bootstrap system "$PLIST_PATH"
+run_root /bin/launchctl kickstart -k "system/$LABEL"
+run_root /bin/launchctl print "system/$LABEL" >/dev/null
+
+echo "installed: $PLIST_PATH"
+echo "sudoers: $SUDOERS_PATH"
+echo "label: $LABEL"
+"""
+
+
+def _daemon_setup_run_command(script_path: str, *, admin_user: str, via_su: bool) -> str:
+    quoted_script = shlex.quote(script_path)
+    if not via_su:
+        return f"chmod 700 {quoted_script} && sudo /bin/zsh {quoted_script}"
+    admin_shell = f"sudo /bin/zsh {quoted_script}"
+    return f"chmod 700 {quoted_script} && su - {shlex.quote(admin_user)} -c {shlex.quote(admin_shell)}"
+
+
+def _build_omlx_daemon_setup_result(
+    node: Node,
+    *,
+    admin_user: str | None,
+    via_su: bool,
+    script_path: str | None,
+) -> OmlxDaemonSetupResult:
+    daemon_result, _ = _build_omlx_daemon_result(node)
+    if node.runtime is None:
+        msg = "Node has no runtime configured"
+        raise ValueError(msg)
+
+    resolved_admin_user = admin_user or node.user
+    resolved_ssh_user = node.user if via_su else resolved_admin_user
+    resolved_script_path = script_path or f"/tmp/thunder-forge-setup-{daemon_result.label}.sh"
+    sudoers_path = daemon_sudoers_path_for_node(node)
+    setup_result = OmlxDaemonSetupResult(
+        node=node.host,
+        label=daemon_result.label,
+        plist_path=daemon_result.plist_path,
+        staging_plist_path=daemon_result.staging_plist_path,
+        sudoers_path=sudoers_path,
+        script_path=resolved_script_path,
+        admin_user=resolved_admin_user,
+        ssh_user=resolved_ssh_user,
+        via_su=via_su,
+    )
+    if daemon_result.errors:
+        setup_result.errors.extend(daemon_result.errors)
+        return setup_result
+
+    setup_result.script_content = generate_daemon_setup_script(node, sudoers_path=sudoers_path)
+    run_command = _daemon_setup_run_command(
+        resolved_script_path,
+        admin_user=resolved_admin_user,
+        via_su=via_su,
+    )
+    setup_result.commands = [
+        f"copy setup script to {resolved_ssh_user}@{node.host}:{resolved_script_path}",
+        f"ssh -tt {resolved_ssh_user}@{node.host} {shlex.quote(run_command)}",
+        f"ssh {node.user}@{node.host} /usr/bin/sudo -n /bin/launchctl print system/{daemon_result.label}",
+    ]
+    return setup_result
+
+
+def _apply_omlx_launchd_update(
+    node: Node,
+    result: OmlxInstallResult,
+    *,
+    timeout: int,
+    operation: str,
+) -> OmlxInstallResult:
+    if not result.commands:
+        result.errors.append(f"No launchd commands generated for {operation}")
         return result
 
-    # Apply path: run each command via SSH in order, stop on hard failures.
-    for cmd in result.commands[:-1]:  # all except the verify step
+    # Apply path: prepare dirs, unload any old daemon, remove stale plist, copy the generated plist, then bootstrap.
+    setup_commands = result.commands[:3]
+    start_commands = result.commands[3:-1]
+    verify_cmd = result.commands[-1]
+
+    for cmd in setup_commands:
+        run_res = ssh_run(node.user, node.host, cmd, timeout=timeout)
+        if run_res.returncode != 0:
+            result.errors.append(f"Command failed: {cmd}: {(run_res.stderr or '').strip()}")
+            return result
+
+    copy_res = scp_content(node.user, node.host, result.plist_content, result.plist_path, shell=node.shell)
+    if copy_res.returncode != 0:
+        result.errors.append(f"Failed to write launchd plist: {(copy_res.stderr or '').strip()}")
+        return result
+
+    for cmd in start_commands:
         run_res = ssh_run(node.user, node.host, cmd, timeout=timeout)
         if run_res.returncode != 0:
             result.errors.append(f"Command failed: {cmd}: {(run_res.stderr or '').strip()}")
             return result
 
     # Final verify step: confirm launchctl list shows the label.
+    verify_res = ssh_run(node.user, node.host, verify_cmd, timeout=timeout)
+    result.service_label_verified = verify_res.returncode == 0
+    if not result.service_label_verified:
+        result.errors.append(f"Service label not found after {operation}: {result.label}")
+
+    # Health check: probe the daemon port.
+    if node.runtime is not None:
+        try:
+            health = _wait_for_omlx_health(
+                f"http://{node.host}:{node.runtime.port}",
+                wait_seconds=min(max(timeout, 10), 60),
+            )
+            result.health_ok = health.health_ok and health.models_ok
+            if not result.health_ok:
+                result.errors.extend(health.errors)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"Health check failed: {exc}")
+
+    result.applied = True
+    return result
+
+
+def _apply_omlx_daemon_update(
+    node: Node,
+    result: OmlxInstallResult,
+    *,
+    timeout: int,
+) -> OmlxInstallResult:
+    if not result.commands:
+        result.errors.append("No daemon commands generated for restart")
+        return result
+
+    setup_command = result.commands[0]
+    run_res = ssh_run(node.user, node.host, setup_command, timeout=timeout)
+    if run_res.returncode != 0:
+        result.errors.append(f"Command failed: {setup_command}: {(run_res.stderr or '').strip()}")
+        return result
+
+    copy_res = scp_content(node.user, node.host, result.plist_content, result.staging_plist_path, shell=node.shell)
+    if copy_res.returncode != 0:
+        result.errors.append(f"Failed to stage launchd plist: {(copy_res.stderr or '').strip()}")
+        return result
+
+    for cmd in result.commands[1:-1]:
+        run_res = ssh_run(node.user, node.host, cmd, timeout=timeout)
+        if run_res.returncode != 0:
+            result.errors.append(f"Command failed: {cmd}: {(run_res.stderr or '').strip()}")
+            return result
+
     verify_cmd = result.commands[-1]
     verify_res = ssh_run(node.user, node.host, verify_cmd, timeout=timeout)
     result.service_label_verified = verify_res.returncode == 0
     if not result.service_label_verified:
-        result.errors.append(f"Service label not found after install: {label}")
+        result.errors.append(f"Service label not found after daemon restart: {result.label}")
 
-    # Health check: probe the daemon port
+    if node.runtime is not None:
+        try:
+            health = _wait_for_omlx_health(
+                f"http://{node.host}:{node.runtime.port}",
+                wait_seconds=min(max(timeout, 10), 60),
+            )
+            result.health_ok = health.health_ok and health.models_ok
+            if not result.health_ok:
+                result.errors.extend(health.errors)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"Health check failed: {exc}")
+
+    result.applied = True
+    return result
+
+
+def run_omlx_install(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
+    """Generate plist and, if apply, install/update the launchd daemon on the node."""
+    result, _ = _build_omlx_launchd_result(node)
+    if not apply:
+        return result
+    return _apply_omlx_launchd_update(node, result, timeout=timeout, operation="install")
+
+
+def run_omlx_runtime_restart(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
+    """Restart/update the node-level oMLX launchd daemon on the node."""
+    result, _ = _build_omlx_launchd_result(node)
+    if not apply:
+        return result
+    return _apply_omlx_launchd_update(node, result, timeout=timeout, operation="restart")
+
+
+def run_omlx_daemon_restart(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
+    """Install/update and restart oMLX as a sudo-backed system LaunchDaemon."""
+    result, _ = _build_omlx_daemon_result(node)
+    if not apply:
+        return result
+    return _apply_omlx_daemon_update(node, result, timeout=timeout)
+
+
+def run_omlx_daemon_setup(
+    node: Node,
+    *,
+    admin_user: str | None = None,
+    via_su: bool = False,
+    script_path: str | None = None,
+    apply: bool = True,
+    timeout: int = 300,
+) -> OmlxDaemonSetupResult:
+    """Install the sudoers rule and system LaunchDaemon using an admin-side setup script."""
+    result = _build_omlx_daemon_setup_result(
+        node,
+        admin_user=admin_user,
+        via_su=via_su,
+        script_path=script_path,
+    )
+    if not apply:
+        return result
+    if via_su and not admin_user:
+        result.errors.append("--via-su requires --admin-user")
+        return result
+
+    copy_res = scp_content(result.ssh_user, node.host, result.script_content, result.script_path, shell=node.shell)
+    if copy_res.returncode != 0:
+        result.errors.append(f"Failed to copy setup script: {(copy_res.stderr or '').strip()}")
+        return result
+
+    run_command = _daemon_setup_run_command(
+        result.script_path,
+        admin_user=result.admin_user,
+        via_su=result.via_su,
+    )
+    run_res = ssh_run(
+        result.ssh_user,
+        node.host,
+        run_command,
+        timeout=timeout,
+        stream=True,
+        shell=node.shell,
+        tty=True,
+    )
+    result.applied = True
+    if run_res.returncode != 0:
+        result.errors.append(f"Setup script failed with exit code {run_res.returncode}")
+        return result
+
+    verify_cmd = f"/usr/bin/sudo -n /bin/launchctl print system/{result.label} >/dev/null"
+    verify_res = ssh_run(node.user, node.host, verify_cmd, timeout=timeout, shell=node.shell)
+    result.sudoers_verified = verify_res.returncode == 0
+    result.service_label_verified = verify_res.returncode == 0
+    if verify_res.returncode != 0:
+        result.errors.append(f"Daemon sudoers verification failed: {(verify_res.stderr or '').strip()}")
+
+    if node.runtime is not None:
+        try:
+            health = _wait_for_omlx_health(
+                f"http://{node.host}:{node.runtime.port}",
+                wait_seconds=min(max(timeout, 10), 60),
+            )
+            result.health_ok = health.health_ok and health.models_ok
+            if not result.health_ok:
+                result.errors.extend(health.errors)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"Health check failed: {exc}")
+
+    return result
+
+
+def run_omlx_process_restart(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxProcessResult:
+    """Restart a node-level oMLX process without launchd, sudo, or a GUI session."""
+    result, port = _process_restart_commands(node)
+    if not apply:
+        return result
+    if port is None:
+        result.errors.append("No runtime port available")
+        return result
+
+    for index, cmd in enumerate(result.commands):
+        run_res = ssh_run(node.user, node.host, cmd, timeout=timeout)
+        if run_res.returncode != 0:
+            result.errors.append(f"Command failed: {cmd}: {(run_res.stderr or '').strip()}")
+            return result
+        if index == 1:
+            result.pid = run_res.stdout.strip()
+
     try:
-        health = check_omlx_health(
-            f"http://{node.host}:{runtime.port}",
-            timeout=10.0,
+        health = _wait_for_omlx_health(
+            f"http://{node.host}:{port}",
+            wait_seconds=min(max(timeout, 10), 60),
         )
         result.health_ok = health.health_ok and health.models_ok
         if not result.health_ok:

@@ -23,6 +23,9 @@ uv run thunder-forge --help
 uv run thunder-forge artifact download --model <hf-repo> --apply
 uv run thunder-forge artifact sync --model <hf-repo> --node msm3 --apply
 uv run thunder-forge runtime status --node msm3
+uv run thunder-forge runtime restart --node msm3 --apply
+uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply
+uv run thunder-forge runtime restart --node msm3 --manager daemon --apply
 uv run thunder-forge runtime smoke --node msm3 --model <model>
 uv run thunder-forge olla dev-smoke --binary <path> --model <model> --alias <alias>
 uv run thunder-forge generate-olla-config
@@ -32,6 +35,14 @@ uv run ruff check .
 ```
 
 Use implemented Thunder Forge commands or Make targets for normal production work. Avoid manual `ssh`, `rsync`, `launchctl`, or direct file moves unless the TF command does not exist yet; when that happens, document the missing target and prefer adding it.
+
+Runtime restart managers:
+
+- `process` is the default no-GUI/no-sudo SSH path. It manages a user-owned detached `omlx serve` process and is good for dev recovery, but it is not reboot durable.
+- `daemon` is the preferred production path after node setup grants narrow `sudo -n` rights for `/usr/bin/install` and `/bin/launchctl`. It installs `/Library/LaunchDaemons/com.thunder-forge.omlx-<port>.plist`, runs oMLX as the configured node user via `UserName`, and manages `system/com.thunder-forge.omlx-<port>` through launchd.
+- `launchd` is the user LaunchAgent path; use it only when the remote user launchd domain is known to accept SSH-managed services.
+
+Use `runtime setup-daemon --node <node> --admin-user <admin>` for the one-time production setup. It generates a node-side admin script, validates sudoers with `visudo -cf`, installs the system LaunchDaemon, and installs the narrow sudoers include used by future `runtime restart --manager daemon` calls. Add `--via-su` when SSH should connect as the node user and then run `su - <admin> -c 'sudo /bin/zsh <script>'` on the node.
 
 ## Current Topology
 

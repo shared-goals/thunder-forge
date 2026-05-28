@@ -25,7 +25,48 @@ uv run thunder-forge generate-olla-config
 
 # Run dev smoke test
 uv run thunder-forge olla dev-smoke --binary /path/to/olla --model <model> --alias <alias>
+
+# Restart a remote node runtime after artifact sync
+uv run thunder-forge runtime restart --node msm3 --apply
+
+# One-time durable no-GUI production setup through an admin account
+uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply
+
+# Durable production restart after setup
+uv run thunder-forge runtime restart --node msm3 --manager daemon --apply
 ```
+
+## Runtime Management
+
+`runtime restart` supports three managers:
+
+- `process` (default): rootless SSH control. It stops any existing oMLX process on the node port, starts `omlx serve` as the node user with `nohup`, writes `~/.omlx/run/omlx-<port>.pid`, and health-checks the runtime. This works without a GUI session and without sudo, but it is not reboot durable.
+- `daemon`: production system launchd control. It stages a plist under `~/.omlx/run`, installs `/Library/LaunchDaemons/com.thunder-forge.omlx-<port>.plist` with `sudo -n install`, and manages `system/com.thunder-forge.omlx-<port>` with `sudo -n launchctl`. The daemon runs as the configured node user via `UserName` and survives logout/reboot.
+- `launchd`: user LaunchAgent control. This is useful only when the remote user launchd domain accepts the service; on headless SSH sessions macOS may reject `gui/<uid>` and `user/<uid>` LaunchAgent bootstraps.
+
+For production nodes, prefer `--manager daemon` after node setup grants only the required non-interactive sudo commands. Use the default `process` manager for dev recovery and immediate no-sudo operation.
+
+`runtime setup-daemon` is the one-time setup path. By default it prints the generated node-side admin script and remote commands. With `--apply`, it copies the script to the node and runs it through an admin account:
+
+```bash
+uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply
+```
+
+If the admin account is not reachable over SSH but can be reached from the node user with `su`, use:
+
+```bash
+uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --via-su --apply
+```
+
+The setup script installs the LaunchDaemon, stages a node-user-writable plist copy under `~/.omlx/run`, validates sudoers with `visudo -cf`, and installs a narrow sudoers include like this for one oMLX daemon on port `8018`:
+
+```sudoers
+Cmnd_Alias TF_OMLX_8018_INSTALL = /usr/bin/install -o root -g wheel -m 644 /Users/shag/.omlx/run/com.thunder-forge.omlx-8018.plist /Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist
+Cmnd_Alias TF_OMLX_8018_LAUNCHD = /bin/launchctl bootout system/com.thunder-forge.omlx-8018, /bin/launchctl bootstrap system /Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist, /bin/launchctl kickstart -k system/com.thunder-forge.omlx-8018, /bin/launchctl print system/com.thunder-forge.omlx-8018
+shag ALL=(root) NOPASSWD: TF_OMLX_8018_INSTALL, TF_OMLX_8018_LAUNCHD
+```
+
+Future TF daemon restarts use `sudo -n`, so a missing or invalid setup rule fails instead of prompting or hanging.
 
 ## Config
 

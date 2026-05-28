@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from thunder_forge.cli import app
 from thunder_forge.cluster.olla import OllaDevSmokeResult, OllaSmokeResult
-from thunder_forge.cluster.omlx import OmlxHealthResult, OmlxSmokeResult
+from thunder_forge.cluster.omlx import OmlxDaemonSetupResult, OmlxHealthResult, OmlxProcessResult, OmlxSmokeResult
 
 runner = CliRunner()
 
@@ -140,6 +140,243 @@ def test_runtime_start_apply_skips_when_runtime_is_already_healthy(tmp_path: Pat
     assert result.exit_code == 0
     assert started is False
     assert "status: already running" in result.stdout
+
+
+def test_runtime_restart_dry_run_prints_process_commands(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                fabric_host: true
+                ram_gb: 128
+                user: shag
+                role: node
+                home_dir: /Users/shag
+                runtime:
+                  type: omlx
+                  port: 8018
+        """)
+    )
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    result = runner.invoke(app, ["runtime", "restart", "--node", "msm3", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "node: msm3" in result.stdout
+    assert "manager: process" in result.stdout
+    assert "command: /Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018" in result.stdout
+    assert "pid_path: /Users/shag/.omlx/run/omlx-8018.pid" in result.stdout
+    assert "mode: dry-run" in result.stdout
+    assert "bootout" in result.stdout
+    assert "nohup" in result.stdout
+
+
+def test_runtime_restart_daemon_dry_run_prints_plist_and_sudo_commands(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                fabric_host: true
+                ram_gb: 128
+                user: shag
+                role: node
+                home_dir: /Users/shag
+                runtime:
+                  type: omlx
+                  port: 8018
+        """)
+    )
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    result = runner.invoke(app, ["runtime", "restart", "--node", "msm3", "--manager", "daemon", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "manager: daemon" in result.stdout
+    assert "plist_path: /Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist" in result.stdout
+    assert "staging_plist_path: /Users/shag/.omlx/run/com.thunder-forge.omlx-8018.plist" in result.stdout
+    assert "<key>UserName</key>" in result.stdout
+    assert "sudo -n /usr/bin/install" in result.stdout
+    assert "sudo -n /bin/launchctl bootstrap system" in result.stdout
+
+
+def test_runtime_setup_daemon_dry_run_prints_admin_script(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                fabric_host: true
+                ram_gb: 128
+                user: shag
+                role: node
+                home_dir: /Users/shag
+                runtime:
+                  type: omlx
+                  port: 8018
+        """)
+    )
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    result = runner.invoke(app, ["runtime", "setup-daemon", "--node", "msm3", "--admin-user", "admin"])
+
+    assert result.exit_code == 0
+    assert "manager: daemon" in result.stdout
+    assert "admin_user: admin" in result.stdout
+    assert "ssh_user: admin" in result.stdout
+    assert "sudoers_path: /etc/sudoers.d/thunder-forge-omlx-8018" in result.stdout
+    assert "script:" in result.stdout
+    assert "#!/bin/zsh" in result.stdout
+    assert "run_root /usr/sbin/visudo -cf" in result.stdout
+    assert "copy setup script to admin@msm3-wifi.lan" in result.stdout
+
+
+def test_runtime_setup_daemon_apply_hides_admin_script(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                fabric_host: true
+                ram_gb: 128
+                user: shag
+                role: node
+                home_dir: /Users/shag
+                runtime:
+                  type: omlx
+                  port: 8018
+        """)
+    )
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "run_omlx_daemon_setup",
+        lambda runtime_node, *, admin_user, via_su, script_path, apply, timeout: OmlxDaemonSetupResult(
+            node=runtime_node.host,
+            label="com.thunder-forge.omlx-8018",
+            plist_path="/Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist",
+            staging_plist_path="/Users/shag/.omlx/run/com.thunder-forge.omlx-8018.plist",
+            sudoers_path="/etc/sudoers.d/thunder-forge-omlx-8018",
+            script_path="/tmp/thunder-forge-setup-com.thunder-forge.omlx-8018.sh",
+            admin_user=admin_user or runtime_node.user,
+            ssh_user=runtime_node.user if via_su else (admin_user or runtime_node.user),
+            via_su=via_su,
+            script_content="#!/bin/zsh\necho hidden\n",
+            commands=["copy setup script", "run setup script"],
+            applied=True,
+            sudoers_verified=True,
+            service_label_verified=True,
+            health_ok=True,
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["runtime", "setup-daemon", "--node", "msm3", "--admin-user", "admin", "--apply"],
+    )
+
+    assert result.exit_code == 0
+    assert "mode: apply" in result.stdout
+    assert "script:" not in result.stdout
+    assert "echo hidden" not in result.stdout
+    assert "status: daemon setup complete" in result.stdout
+
+
+def test_runtime_setup_daemon_via_su_requires_admin_user(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text("models: {}\nnodes: {}\n")
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    result = runner.invoke(app, ["runtime", "setup-daemon", "--node", "msm3", "--via-su"])
+
+    assert result.exit_code == 1
+    assert "--via-su requires --admin-user" in result.stderr
+
+
+def test_runtime_restart_apply_reports_restarted(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                fabric_host: true
+                ram_gb: 128
+                user: shag
+                role: node
+                home_dir: /Users/shag
+                runtime:
+                  type: omlx
+                  port: 8018
+        """)
+    )
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "run_omlx_process_restart",
+        lambda runtime_node, *, apply, timeout: OmlxProcessResult(
+            node=runtime_node.host,
+            command="/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018",
+            pid_path="/Users/shag/.omlx/run/omlx-8018.pid",
+            stdout_log="/Users/shag/Library/Logs/omlx-8018.stdout.log",
+            stderr_log="/Users/shag/Library/Logs/omlx-8018.stderr.log",
+            commands=["nohup /Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018"],
+            pid="12345",
+            applied=True,
+            health_ok=True,
+        ),
+    )
+
+    result = runner.invoke(app, ["runtime", "restart", "--node", "msm3", "--apply"])
+
+    assert result.exit_code == 0
+    assert "manager: process" in result.stdout
+    assert "mode: apply" in result.stdout
+    assert "pid: 12345" in result.stdout
+    assert "health_ok: yes" in result.stdout
+    assert "status: restarted" in result.stdout
 
 
 def test_runtime_status_reports_omlx_health(tmp_path: Path, monkeypatch) -> None:
