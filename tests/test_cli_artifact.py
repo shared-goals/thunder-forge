@@ -65,10 +65,10 @@ def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> N
     assert "model: mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
     assert "node: msm3" in result.stdout
     assert "management_host: msm3-wifi.lan" in result.stdout
-    assert "model_dir_name: hf--mlx-community--gpt-oss-20b-MXFP4-Q8" in result.stdout
-    assert "runtime_model_id: hf--mlx-community--gpt-oss-20b-MXFP4-Q8" in result.stdout
-    assert "studio_omlx_model_dir_path: ~/.omlx/models/hf--mlx-community--gpt-oss-20b-MXFP4-Q8" in result.stdout
-    assert "node_omlx_model_dir_path: /Users/shag/.omlx/models/hf--mlx-community--gpt-oss-20b-MXFP4-Q8" in result.stdout
+    assert "model_dir_name: mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
+    assert "runtime_model_id: gpt-oss-20b-MXFP4-Q8" in result.stdout
+    assert "studio_omlx_model_dir_path: ~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
+    assert "node_omlx_model_dir_path: /Users/shag/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
     assert "studio_omlx_model_dir: ready" in result.stdout
     assert "node_omlx_model_dir: missing_or_incomplete" in result.stdout
     assert "ready: no" in result.stdout
@@ -98,14 +98,14 @@ def test_artifact_download_dry_run_prints_direct_omlx_download_plan(tmp_path: Pa
 
     assert result.exit_code == 0
     assert "model: mlx-community/Qwen3-1.7B-4bit" in result.stdout
-    assert "model_dir_name: hf--mlx-community--Qwen3-1.7B-4bit" in result.stdout
-    assert "runtime_model_id: hf--mlx-community--Qwen3-1.7B-4bit" in result.stdout
-    assert "destination: ~/.omlx/models/hf--mlx-community--Qwen3-1.7B-4bit" in result.stdout
+    assert "model_dir_name: mlx-community/Qwen3-1.7B-4bit" in result.stdout
+    assert "runtime_model_id: Qwen3-1.7B-4bit" in result.stdout
+    assert "destination: ~/.omlx/models/mlx-community/Qwen3-1.7B-4bit" in result.stdout
     assert "action: download_to_studio_omlx" in result.stdout
     assert "mode: dry-run" in result.stdout
-    assert "hf download mlx-community/Qwen3-1.7B-4bit" in result.stdout
-    assert "--local-dir" in result.stdout
-    assert "hf--mlx-community--Qwen3-1.7B-4bit" in result.stdout
+    assert "omlx serve" in result.stdout
+    assert "/admin/api/hf/download" in result.stdout
+    assert "mlx-community/Qwen3-1.7B-4bit" in result.stdout
     assert ".cache/huggingface" not in result.stdout
 
 
@@ -144,12 +144,12 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
     assert "source: studio" in result.stdout
     assert "transport_host: msm3-wifi.lan" in result.stdout
     assert "fabric_fallback" not in result.stdout
-    assert "model_dir_name: hf--BAAI--bge-small-en-v1.5" in result.stdout
-    assert "runtime_model_id: hf--BAAI--bge-small-en-v1.5" in result.stdout
+    assert "model_dir_name: BAAI/bge-small-en-v1.5" in result.stdout
+    assert "runtime_model_id: bge-small-en-v1.5" in result.stdout
     assert "action: sync_to_node_omlx" in result.stdout
     assert "rsync" in result.stdout
-    assert "/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/" in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/" in result.stdout
+    assert "/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
+    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
     assert ".cache/huggingface" not in result.stdout
 
 
@@ -192,7 +192,8 @@ def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Pat
     assert result.exit_code == 0
     assert "transport_host: 169.254.251.195" in result.stdout
     assert "resolved_transport_host" not in result.stdout
-    assert "shag@169.254.251.195:/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/" in result.stdout
+    assert "HostKeyAlias=msm3-wifi.lan" in result.stdout
+    assert "shag@169.254.251.195:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_falls_back_to_management_host_when_fabric_is_unresolved(
@@ -237,7 +238,7 @@ def test_artifact_sync_falls_back_to_management_host_when_fabric_is_unresolved(
     assert result.exit_code == 0
     assert "transport_host: msm3-wifi.lan" in result.stdout
     assert "fabric_fallback: dynamic probe unresolved" in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/" in result.stdout
+    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(tmp_path: Path, monkeypatch) -> None:
@@ -274,7 +275,7 @@ def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(
     assert result.exit_code == 0
     assert "transport_host: msm3-wifi.lan" in result.stdout
     assert "resolved_transport_host" not in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/" in result.stdout
+    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_without_fabric_host_uses_management_even_when_probe_would_work(
@@ -319,7 +320,7 @@ def test_artifact_sync_without_fabric_host_uses_management_even_when_probe_would
     assert result.exit_code == 0
     assert "transport_host: msm3-wifi.lan" in result.stdout
     assert "resolved_transport_host" not in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/" in result.stdout
+    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None:
@@ -380,8 +381,16 @@ def test_artifact_download_apply_invokes_runner(tmp_path: Path, monkeypatch) -> 
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
 
-    def fake_run_artifact_download(plan, *, timeout):
-        calls.append((plan, timeout))
+    def fake_run_artifact_download(plan, *, timeout, progress_callback):
+        calls.append((plan, timeout, progress_callback))
+        progress_callback(
+            {
+                "status": "downloading",
+                "progress": 50.0,
+                "downloaded_size": 1024**3,
+                "total_size": 2 * 1024**3,
+            }
+        )
         return subprocess.CompletedProcess(args=plan.args, returncode=0)
 
     monkeypatch.setattr(cli_module, "run_artifact_download", fake_run_artifact_download)
@@ -400,8 +409,9 @@ def test_artifact_download_apply_invokes_runner(tmp_path: Path, monkeypatch) -> 
     )
 
     assert result.exit_code == 0
+    assert "download_progress: downloading 50.0% (1.0 GB / 2.0 GB)" in result.stdout
     assert "status: downloaded" in result.stdout
-    assert calls[0][0].destination == "~/.omlx/models/hf--mlx-community--Qwen3-1.7B-4bit"
+    assert calls[0][0].destination == "~/.omlx/models/mlx-community/Qwen3-1.7B-4bit"
     assert calls[0][1] == 456
 
 

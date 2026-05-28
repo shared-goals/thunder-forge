@@ -59,6 +59,9 @@ def test_discover_link_local_fabric_host_returns_first_ssh_reachable_node_addres
         "shag@msm3-wifi.lan",
         "networksetup -listallhardwareports 2>/dev/null; printf '\\n__TF_IFCONFIG__\\n'; ifconfig",
     ]
+    hostname_call = calls[-1]
+    assert "HostKeyAlias=msm3-wifi.lan" in hostname_call
+    assert "shag@169.254.251.195" in hostname_call
 
 
 def test_discover_link_local_fabric_host_rejects_non_thunderbolt_local_route(monkeypatch) -> None:

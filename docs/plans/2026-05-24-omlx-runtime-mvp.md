@@ -21,7 +21,7 @@
 - Treat `msm3-wifi.lan` as stable management/bootstrap path.
 - Treat future Thunderbolt/fabric paths as point-to-point, not necessarily `.lan`; do not assume any fabric hostname exists until `/etc/hosts`, mDNS, or another macOS mapping is configured.
 - Do not model Hugging Face cache layout as TF v2/oMLX product state. Download MVP model weights directly into the oMLX default model directory on `studio`, then sync that model directory to the node.
-- Use oMLX's default model-directory format: models are direct subdirectories of `/Users/shag/.omlx/models`, and `omlx serve` uses the subdirectory name as the model id. For a Hugging Face repo id like `mlx-community/Qwen3.6-35B-A3B-4bit`, the default local directory is `/Users/shag/.omlx/models/Qwen3.6-35B-A3B-4bit`. The normal serve command should omit `--model-dir`.
+- Use oMLX's default download layout under `/Users/shag/.omlx/models/<owner>/<repo>`. For a Hugging Face repo id like `mlx-community/Qwen3.6-35B-A3B-4bit`, the default local directory is `/Users/shag/.omlx/models/mlx-community/Qwen3.6-35B-A3B-4bit`, and oMLX exposes `Qwen3.6-35B-A3B-4bit` as the runtime model id.
 - Prefer dev port `8018` on `msm3` until stale `admin`-owned MLX processes are fully removed.
 - Do not touch Hindsight production traffic during this MVP.
 - Keep public docs framed around operator expectations and system behavior, not personal user stories.

@@ -123,9 +123,9 @@ models:
       repo: mlx-community/Qwen3.6-35B-A3B-4bit
     runtime_artifact:
       repo: mlx-community/Qwen3.6-35B-A3B-4bit
-      model_dir_name: Qwen3.6-35B-A3B-4bit
-      studio_path: /Users/shag/.omlx/models/Qwen3.6-35B-A3B-4bit
-      node_path: /Users/shag/.omlx/models/Qwen3.6-35B-A3B-4bit
+      model_dir_name: mlx-community/Qwen3.6-35B-A3B-4bit
+      studio_path: /Users/shag/.omlx/models/mlx-community/Qwen3.6-35B-A3B-4bit
+      node_path: /Users/shag/.omlx/models/mlx-community/Qwen3.6-35B-A3B-4bit
       status: sync-first
     intended_workloads:
       - tf-v2-dev-smoke
@@ -136,7 +136,7 @@ runtime_routes:
   - model_name: agent
     runtime: omlx
     node: msm3
-    model: hf--mlx-community--Qwen3.6-35B-A3B-4bit
+    model: Qwen3.6-35B-A3B-4bit
 ```
 
 The exact field names are not final. The important architectural distinctions are: the node has both stable LAN management identity and future point-to-point fabric identity; oMLX runtime state is node-level; runtime models live under the oMLX default model directory and the normal `omlx serve` command should not pass `--model-dir` unless there is a deliberate reason to override it.

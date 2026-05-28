@@ -11,7 +11,7 @@ Client → Caddy → TF edge → Olla → oMLX nodes (Apple Silicon)
 - **TF edge** — auth (API key → client identity), session management, proxy to Olla
 - **Olla** — model routing, sticky sessions, load balancing, health checks
 - **oMLX** — multi-model inference server for Apple Silicon (MLX native)
-- **Artifacts** — TF-managed oMLX model dirs preserve HF namespace, e.g. `~/.omlx/models/hf--mlx-community--gpt-oss-20b-MXFP4-Q8`
+- **Artifacts** — oMLX-native model dirs under `~/.omlx/models/<owner>/<repo>`, e.g. `~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8`
 
 ## Quickstart
 

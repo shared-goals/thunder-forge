@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import re
+import secrets
 import shlex
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+
+import httpx
 
 DEFAULT_OMLX_MODELS_DIR = "~/.omlx/models"
 
@@ -66,30 +71,25 @@ class ArtifactDownloadPlan:
     destination: str
     command: str
     args: list[str]
+    base_url: str
+    hf_token_env: str = "HF_TOKEN"
 
 
 def omlx_model_dir_name(repo_id: str) -> str:
-    """Return the TF-managed oMLX model directory name for a HF repo id.
-
-    oMLX discovers direct children of ``~/.omlx/models`` and uses the
-    subdirectory name as the runtime model id. Thunder Forge preserves the
-    Hugging Face namespace in that direct-child name to avoid collisions while
-    keeping oMLX discovery simple.
-    """
+    """Return the oMLX-native model directory path for a Hugging Face repo id."""
     return build_artifact_identity(repo_id).model_dir_name
 
 
 def build_artifact_identity(repo_id: str) -> ArtifactIdentity:
-    """Build the canonical TF artifact identity for a Hugging Face repo id."""
+    """Build the oMLX-native artifact identity for a Hugging Face repo id."""
     _validate_repo_id(repo_id)
     namespace, repo_name = repo_id.split("/", maxsplit=1)
-    model_dir_name = f"hf--{namespace}--{repo_name}"
     return ArtifactIdentity(
         repo_id=repo_id,
         namespace=namespace,
         repo_name=repo_name,
-        model_dir_name=model_dir_name,
-        runtime_model_id=model_dir_name,
+        model_dir_name=repo_id,
+        runtime_model_id=repo_name,
     )
 
 
@@ -103,9 +103,9 @@ def build_artifact_readiness_plan(
 ) -> ArtifactReadinessPlan:
     """Build a read-only plan for making a model ready for oMLX on a node.
 
-    TF v2/oMLX product state uses only the oMLX default model directory shape:
-    ``~/.omlx/models/<model-dir>``. Hugging Face cache layout is intentionally
-    not part of the product flow.
+    TF uses oMLX's native download layout under ``~/.omlx/models/<owner>/<repo>``.
+    oMLX discovers those nested directories and exposes the repo directory name
+    as the runtime model id.
     """
     identity = build_artifact_identity(repo_id)
     studio_omlx_model_dir = f"{studio_omlx_models_dir}/{identity.model_dir_name}"
@@ -136,23 +136,32 @@ def build_artifact_sync_plan(
     node_host: str,
     node_home_dir: str,
     studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
+    ssh_host_key_alias: str | None = None,
 ) -> ArtifactSyncPlan:
     """Build a studio-to-node oMLX model-directory rsync plan."""
     _validate_user_host_path(node_user=node_user, node_host=node_host, node_home_dir=node_home_dir)
+    if ssh_host_key_alias is not None:
+        _validate_host(ssh_host_key_alias, name="ssh_host_key_alias")
     identity = build_artifact_identity(repo_id)
     source_path = f"{Path(f'{studio_omlx_models_dir}/{identity.model_dir_name}').expanduser()}/"
     remote_omlx_models_dir = f"{node_home_dir}/.omlx/models"
+    remote_model_parent_dir = f"{remote_omlx_models_dir}/{identity.namespace}"
     destination = f"{node_user}@{node_host}:{remote_omlx_models_dir}/{identity.model_dir_name}/"
-    mkdir_args = [
-        "ssh",
+    ssh_options = [
         "-o",
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=8",
+    ]
+    if ssh_host_key_alias:
+        ssh_options.extend(["-o", f"HostKeyAlias={ssh_host_key_alias}"])
+    mkdir_args = [
+        "ssh",
+        *ssh_options,
         f"{node_user}@{node_host}",
         "mkdir",
         "-p",
-        remote_omlx_models_dir,
+        remote_model_parent_dir,
     ]
     rsync_args = [
         "rsync",
@@ -160,7 +169,7 @@ def build_artifact_sync_plan(
         "--progress",
         "--partial-dir=.rsync-partial",
         "-e",
-        "ssh -o BatchMode=yes -o ConnectTimeout=8",
+        "ssh " + " ".join(shlex.quote(option) for option in ssh_options),
         source_path,
         destination,
     ]
@@ -182,21 +191,27 @@ def build_artifact_download_plan(
     repo_id: str,
     studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
 ) -> ArtifactDownloadPlan:
-    """Build a plan to download a model directly into studio's oMLX model directory."""
+    """Build a plan to download a model through oMLX into studio's model directory."""
     identity = build_artifact_identity(repo_id)
     destination = f"{studio_omlx_models_dir}/{identity.model_dir_name}"
-    destination_arg = str(Path(destination).expanduser())
+    models_dir_arg = str(Path(studio_omlx_models_dir).expanduser())
+    base_url = "http://127.0.0.1:8020"
     args = [
-        "uvx",
-        "--from",
-        "huggingface_hub",
-        "hf",
-        "download",
-        repo_id,
-        "--local-dir",
-        destination_arg,
+        "omlx",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8020",
+        "--model-dir",
+        models_dir_arg,
+        "--max-model-memory",
+        "disabled",
     ]
-    command = " ".join(shlex.quote(arg) for arg in args)
+    command = (
+        " ".join(shlex.quote(arg) for arg in args)
+        + f"; POST {base_url}/admin/api/hf/download repo_id={shlex.quote(repo_id)} hf_token=$HF_TOKEN"
+    )
     return ArtifactDownloadPlan(
         repo_id=repo_id,
         model_dir_name=identity.model_dir_name,
@@ -204,6 +219,7 @@ def build_artifact_download_plan(
         destination=destination,
         command=command,
         args=args,
+        base_url=base_url,
     )
 
 
@@ -212,20 +228,100 @@ def _env_without_socks_proxy() -> dict[str, str]:
     import os
 
     env = os.environ.copy()
+    _load_dotenv_into_env(env, start_dir=Path.cwd())
     env.pop("ALL_PROXY", None)
     env.pop("all_proxy", None)
     return env
 
 
-def run_artifact_download(plan: ArtifactDownloadPlan, *, timeout: int = 7200) -> subprocess.CompletedProcess[str]:
-    """Execute a previously built direct-to-oMLX download plan."""
-    return subprocess.run(
-        plan.args,
-        check=False,
-        text=True,
-        timeout=timeout,
-        env=_env_without_socks_proxy(),
-    )
+def _load_dotenv_into_env(env: dict[str, str], *, start_dir: Path) -> None:
+    env_file = _find_dotenv(start_dir)
+    if env_file is None:
+        return
+
+    for raw_line in env_file.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", maxsplit=1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if not env.get(key):
+            env[key] = value
+
+
+def _find_dotenv(start_dir: Path) -> Path | None:
+    current = start_dir if start_dir.is_dir() else start_dir.parent
+    for directory in (current, *current.parents):
+        candidate = directory / ".env"
+        if candidate.is_file():
+            return candidate
+        if (directory / ".git").exists():
+            break
+    return None
+
+
+def run_artifact_download(
+    plan: ArtifactDownloadPlan,
+    *,
+    timeout: int = 7200,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a previously built download plan through oMLX's downloader API."""
+    env = _env_without_socks_proxy()
+    server_process: subprocess.Popen[str] | None = None
+    server_started = False
+    stdout = ""
+    stderr = ""
+
+    try:
+        downloader_api_key = env.get("TF_OMLX_DOWNLOADER_API_KEY") or env.get("OMLX_API_KEY")
+        if not _omlx_server_ready(plan.base_url):
+            downloader_api_key = secrets.token_urlsafe(24)
+            server_process = subprocess.Popen(
+                [*plan.args, "--api-key", downloader_api_key],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                env=env,
+            )
+            server_started = True
+            _wait_for_omlx_server(plan.base_url, process=server_process, timeout_seconds=60)
+
+        token = env.get(plan.hf_token_env, "")
+        client = _omlx_admin_client(plan.base_url, api_key=downloader_api_key)
+        try:
+            task = _start_omlx_hf_download(client, plan.repo_id, hf_token=token)
+            task = _poll_omlx_hf_task(
+                client,
+                task_id=task["task_id"],
+                repo_id=plan.repo_id,
+                timeout_seconds=timeout,
+                progress_callback=progress_callback,
+            )
+        finally:
+            client.close()
+        stdout = f"download_task: {task['task_id']}\nstatus: {task['status']}\n"
+        return subprocess.CompletedProcess(args=plan.args, returncode=0, stdout=stdout, stderr=stderr)
+    except Exception as exc:  # noqa: BLE001
+        stderr = str(exc)
+        return subprocess.CompletedProcess(args=plan.args, returncode=1, stdout=stdout, stderr=stderr)
+    finally:
+        if server_started and server_process is not None:
+            server_process.terminate()
+            try:
+                server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server_process.kill()
+                server_process.wait(timeout=10)
 
 
 def run_artifact_sync(plan: ArtifactSyncPlan, *, timeout: int = 7200) -> subprocess.CompletedProcess[str]:
@@ -244,6 +340,100 @@ def run_artifact_sync(plan: ArtifactSyncPlan, *, timeout: int = 7200) -> subproc
         text=True,
         timeout=timeout,
     )
+
+
+def _omlx_server_ready(base_url: str) -> bool:
+    try:
+        with httpx.Client(base_url=base_url, timeout=2.0, trust_env=False) as client:
+            response = client.get("/health")
+            return response.is_success
+    except httpx.HTTPError:
+        return False
+
+
+def _wait_for_omlx_server(
+    base_url: str,
+    *,
+    process: subprocess.Popen[str],
+    timeout_seconds: int,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"oMLX downloader server exited with code {process.returncode}")
+        if _omlx_server_ready(base_url):
+            return
+        time.sleep(1)
+    raise TimeoutError(f"oMLX downloader server did not become ready: {base_url}")
+
+
+def _omlx_admin_client(base_url: str, *, api_key: str | None) -> httpx.Client:
+    client = httpx.Client(base_url=base_url, timeout=30.0, trust_env=False)
+    if api_key:
+        response = client.post("/admin/api/login", json={"api_key": api_key, "remember": False})
+        response.raise_for_status()
+    return client
+
+
+def _start_omlx_hf_download(client: httpx.Client, repo_id: str, *, hf_token: str) -> dict:
+    response = client.post(
+        "/admin/api/hf/download",
+        json={"repo_id": repo_id, "hf_token": hf_token},
+    )
+    if response.status_code == 401:
+        raise RuntimeError(
+            "oMLX downloader admin API requires authentication; set TF_OMLX_DOWNLOADER_API_KEY "
+            "or stop the existing local server so TF can start a transient downloader"
+        )
+    if response.status_code == 400 and "already in progress" in response.text:
+        return _find_omlx_hf_task(client, repo_id)
+    response.raise_for_status()
+    payload = response.json()
+    task = payload.get("task")
+    if not isinstance(task, dict):
+        raise RuntimeError(f"oMLX downloader returned no task for {repo_id}")
+    return task
+
+
+def _find_omlx_hf_task(client: httpx.Client, repo_id: str) -> dict:
+    response = client.get("/admin/api/hf/tasks")
+    response.raise_for_status()
+    tasks = response.json().get("tasks", [])
+    for task in tasks:
+        if task.get("repo_id") == repo_id and task.get("status") in {"pending", "downloading"}:
+            return task
+    raise RuntimeError(f"No active oMLX download task found for {repo_id}")
+
+
+def _poll_omlx_hf_task(
+    client: httpx.Client,
+    *,
+    task_id: str,
+    repo_id: str,
+    timeout_seconds: int,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> dict:
+    deadline = time.monotonic() + timeout_seconds
+    last_task: dict | None = None
+    while time.monotonic() < deadline:
+        response = client.get("/admin/api/hf/tasks")
+        response.raise_for_status()
+        tasks = response.json().get("tasks", [])
+        for task in tasks:
+            if task.get("task_id") == task_id:
+                last_task = task
+                if progress_callback:
+                    progress_callback(task)
+                status = task.get("status")
+                if status == "completed":
+                    return task
+                if status in {"failed", "cancelled"}:
+                    error = task.get("error") or f"download {status}"
+                    raise RuntimeError(f"oMLX download failed for {repo_id}: {error}")
+                break
+        time.sleep(2)
+    detail = f"last status: {last_task}" if last_task else "task not found"
+    raise TimeoutError(f"Timed out waiting for oMLX download {repo_id}; {detail}")
 
 
 def is_local_artifact_complete(model_dir: Path) -> bool:
@@ -293,14 +483,18 @@ def _validate_user_host_path(*, node_user: str, node_host: str, node_home_dir: s
     if not re.fullmatch(r"[A-Za-z0-9._-]+", node_user):
         msg = f"Invalid node_user: {node_user!r}"
         raise ValueError(msg)
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", node_host):
-        msg = f"Invalid node_host: {node_host!r}"
-        raise ValueError(msg)
+    _validate_host(node_host, name="node_host")
     if not node_home_dir.startswith("/Users/"):
         msg = f"Invalid node_home_dir: {node_home_dir!r}"
         raise ValueError(msg)
     if not re.fullmatch(r"/[A-Za-z0-9._/-]+", node_home_dir):
         msg = f"Invalid node_home_dir: {node_home_dir!r}"
+        raise ValueError(msg)
+
+
+def _validate_host(host: str, *, name: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", host):
+        msg = f"Invalid {name}: {host!r}"
         raise ValueError(msg)
 
 

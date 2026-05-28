@@ -12,13 +12,13 @@ from thunder_forge.cluster.artifacts import (
 )
 
 
-def test_artifact_identity_preserves_hf_namespace_in_direct_child_dir() -> None:
+def test_artifact_identity_uses_omlx_native_owner_model_dir() -> None:
     identity = build_artifact_identity("mlx-community/gpt-oss-20b-MXFP4-Q8")
 
     assert identity.namespace == "mlx-community"
     assert identity.repo_name == "gpt-oss-20b-MXFP4-Q8"
-    assert identity.model_dir_name == "hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
-    assert identity.runtime_model_id == "hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
+    assert identity.model_dir_name == "mlx-community/gpt-oss-20b-MXFP4-Q8"
+    assert identity.runtime_model_id == "gpt-oss-20b-MXFP4-Q8"
     assert omlx_model_dir_name("mlx-community/gpt-oss-20b-MXFP4-Q8") == identity.model_dir_name
 
 
@@ -32,10 +32,10 @@ def test_artifact_plan_downloads_to_studio_omlx_when_studio_model_dir_missing() 
 
     assert plan.ready is False
     assert plan.actions == [ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX]
-    assert plan.model_dir_name == "hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
-    assert plan.runtime_model_id == "hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
-    assert plan.studio_omlx_model_dir == "~/.omlx/models/hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
-    assert plan.node_omlx_model_dir == "/Users/shag/.omlx/models/hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
+    assert plan.model_dir_name == "mlx-community/gpt-oss-20b-MXFP4-Q8"
+    assert plan.runtime_model_id == "gpt-oss-20b-MXFP4-Q8"
+    assert plan.studio_omlx_model_dir == "~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8"
+    assert plan.node_omlx_model_dir == "/Users/shag/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8"
 
 
 def test_artifact_plan_syncs_to_node_when_studio_omlx_model_dir_exists() -> None:
@@ -70,12 +70,12 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
         node_home_dir="/Users/shag",
     )
 
-    assert plan.model_dir_name == "hf--BAAI--bge-small-en-v1.5"
-    assert plan.runtime_model_id == "hf--BAAI--bge-small-en-v1.5"
-    assert plan.source_path == "/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/"
-    assert plan.destination == "shag@msm3-wifi.lan:/Users/shag/.omlx/models/hf--BAAI--bge-small-en-v1.5/"
+    assert plan.model_dir_name == "BAAI/bge-small-en-v1.5"
+    assert plan.runtime_model_id == "bge-small-en-v1.5"
+    assert plan.source_path == "/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/"
+    assert plan.destination == "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/"
     assert "shag@msm3-wifi.lan" in plan.command
-    assert "hf--BAAI--bge-small-en-v1.5/" in plan.command
+    assert "BAAI/bge-small-en-v1.5/" in plan.command
     assert ".cache/huggingface" not in plan.command
     assert plan.mkdir_args == [
         "ssh",
@@ -86,7 +86,7 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
         "shag@msm3-wifi.lan",
         "mkdir",
         "-p",
-        "/Users/shag/.omlx/models",
+        "/Users/shag/.omlx/models/BAAI",
     ]
     assert plan.rsync_args[0] == "rsync"
     assert "-a" in plan.rsync_args
@@ -99,37 +99,94 @@ def test_artifact_download_plan_downloads_directly_to_omlx_model_dir() -> None:
     plan = build_artifact_download_plan(repo_id="mlx-community/Qwen3-1.7B-4bit")
 
     assert plan.repo_id == "mlx-community/Qwen3-1.7B-4bit"
-    assert plan.model_dir_name == "hf--mlx-community--Qwen3-1.7B-4bit"
-    assert plan.runtime_model_id == "hf--mlx-community--Qwen3-1.7B-4bit"
-    assert plan.destination == "~/.omlx/models/hf--mlx-community--Qwen3-1.7B-4bit"
+    assert plan.model_dir_name == "mlx-community/Qwen3-1.7B-4bit"
+    assert plan.runtime_model_id == "Qwen3-1.7B-4bit"
+    assert plan.destination == "~/.omlx/models/mlx-community/Qwen3-1.7B-4bit"
     assert plan.args == [
-        "uvx",
-        "--from",
-        "huggingface_hub",
-        "hf",
-        "download",
-        "mlx-community/Qwen3-1.7B-4bit",
-        "--local-dir",
-        "/Users/shag/.omlx/models/hf--mlx-community--Qwen3-1.7B-4bit",
+        "omlx",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8020",
+        "--model-dir",
+        "/Users/shag/.omlx/models",
+        "--max-model-memory",
+        "disabled",
     ]
+    assert "/admin/api/hf/download" in plan.command
     assert ".cache/huggingface" not in plan.command
 
 
-def test_artifact_download_runner_ignores_socks_proxy(monkeypatch) -> None:
-    calls = []
-
-    def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        import subprocess
-
-        return subprocess.CompletedProcess(args=args, returncode=0)
-
+def test_artifact_download_env_loads_hf_token_from_dotenv(tmp_path, monkeypatch) -> None:
     import thunder_forge.cluster.artifacts as artifacts_module
 
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("HF_TOKEN=secret-from-dotenv\n")
+
+    env = artifacts_module._env_without_socks_proxy()
+
+    assert env["HF_TOKEN"] == "secret-from-dotenv"
+
+
+def test_artifact_download_env_keeps_existing_hf_token(tmp_path, monkeypatch) -> None:
+    import thunder_forge.cluster.artifacts as artifacts_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "secret-from-process")
+    (tmp_path / ".env").write_text("HF_TOKEN=secret-from-dotenv\n")
+
+    env = artifacts_module._env_without_socks_proxy()
+
+    assert env["HF_TOKEN"] == "secret-from-process"
+
+
+def test_artifact_download_runner_ignores_socks_proxy(tmp_path, monkeypatch) -> None:
+    import thunder_forge.cluster.artifacts as artifacts_module
+
+    calls = []
+
+    class FakePopen:
+        returncode = None
+
+        def __init__(self, args, **kwargs):
+            calls.append((args, kwargs))
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.returncode = 0
+
+        def wait(self, timeout):
+            self.returncode = 0
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:1080")
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8888")
-    monkeypatch.setattr(artifacts_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(artifacts_module, "_omlx_server_ready", lambda base_url: False)
+    monkeypatch.setattr(artifacts_module, "_wait_for_omlx_server", lambda base_url, process, timeout_seconds: None)
+    monkeypatch.setattr(artifacts_module, "_omlx_admin_client", lambda base_url, api_key: FakeClient())
+    monkeypatch.setattr(
+        artifacts_module,
+        "_start_omlx_hf_download",
+        lambda base_url, repo_id, hf_token: {"task_id": "1"},
+    )
+    monkeypatch.setattr(
+        artifacts_module,
+        "_poll_omlx_hf_task",
+        lambda base_url, task_id, repo_id, timeout_seconds, progress_callback=None: {
+            "task_id": "1",
+            "status": "completed",
+        },
+    )
+    monkeypatch.setattr(artifacts_module.subprocess, "Popen", FakePopen)
 
     plan = build_artifact_download_plan(repo_id="mlx-community/Qwen3-1.7B-4bit")
     artifacts_module.run_artifact_download(plan)
@@ -141,8 +198,8 @@ def test_artifact_download_runner_ignores_socks_proxy(monkeypatch) -> None:
 
 
 def test_local_artifact_complete_requires_config_and_weight_file(tmp_path) -> None:
-    model_dir = tmp_path / "hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
-    model_dir.mkdir()
+    model_dir = tmp_path / "mlx-community" / "gpt-oss-20b-MXFP4-Q8"
+    model_dir.mkdir(parents=True)
 
     assert is_local_artifact_complete(model_dir) is False
 
@@ -154,23 +211,22 @@ def test_local_artifact_complete_requires_config_and_weight_file(tmp_path) -> No
 
 
 def test_local_artifact_complete_rejects_incomplete_download_marker(tmp_path) -> None:
-    model_dir = tmp_path / "hf--mlx-community--gpt-oss-20b-MXFP4-Q8"
-    model_dir.mkdir()
+    model_dir = tmp_path / "mlx-community" / "gpt-oss-20b-MXFP4-Q8"
+    model_dir.mkdir(parents=True)
     (model_dir / "config.json").write_text("{}")
     (model_dir / "model.safetensors").write_text("weights")
     (model_dir / "model.safetensors.incomplete").write_text("partial")
 
     assert is_local_artifact_complete(model_dir) is False
 
+def test_local_artifact_complete_rejects_rsync_partial_dir(tmp_path) -> None:
+    model_dir = tmp_path / "BAAI" / "model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}")
+    (model_dir / "model.safetensors").write_text("weights")
+    (model_dir / ".rsync-partial").mkdir()
 
-    def test_local_artifact_complete_rejects_rsync_partial_dir(tmp_path) -> None:
-        model_dir = tmp_path / "model"
-        model_dir.mkdir()
-        (model_dir / "config.json").write_text("{}")
-        (model_dir / "model.safetensors").write_text("weights")
-        (model_dir / ".rsync-partial").mkdir()
-
-        assert is_local_artifact_complete(model_dir) is False
+    assert is_local_artifact_complete(model_dir) is False
 
 
 def test_artifact_sync_plan_can_use_fabric_host() -> None:
@@ -179,10 +235,13 @@ def test_artifact_sync_plan_can_use_fabric_host() -> None:
         node_user="shag",
         node_host="169.254.251.195",
         node_home_dir="/Users/shag",
+        ssh_host_key_alias="msm3-wifi.lan",
     )
 
     assert plan.destination.startswith("shag@169.254.251.195:")
     assert "shag@169.254.251.195" in plan.mkdir_args
+    assert "HostKeyAlias=msm3-wifi.lan" in plan.mkdir_args
+    assert "HostKeyAlias=msm3-wifi.lan" in plan.rsync_args[5]
 
 
 def test_artifact_sync_plan_rejects_invalid_repo_id() -> None:

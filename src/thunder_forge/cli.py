@@ -84,6 +84,15 @@ def _get_runtime_node(config: ClusterConfig, node: str) -> Node:
     return runtime_node
 
 
+def _format_bytes(size_bytes: int) -> str:
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
 def _runtime(runtime_node: Node) -> NodeRuntime:
     return cast(NodeRuntime, runtime_node.runtime)
 
@@ -280,9 +289,36 @@ def artifact_download(
         typer.echo("mode: dry-run")
         return
 
-    result = run_artifact_download(plan, timeout=timeout)
+    last_progress_bucket: int | None = None
+    last_progress_status: str | None = None
+
+    def print_progress(task: dict) -> None:
+        nonlocal last_progress_bucket, last_progress_status
+        status = str(task.get("status") or "unknown")
+        progress = float(task.get("progress") or 0.0)
+        progress_bucket = int(progress)
+        if status == last_progress_status and progress_bucket == last_progress_bucket:
+            return
+        last_progress_status = status
+        last_progress_bucket = progress_bucket
+        downloaded_size = int(task.get("downloaded_size") or 0)
+        total_size = int(task.get("total_size") or 0)
+        if total_size > 0:
+            typer.echo(
+                "download_progress: "
+                f"{status} {progress:.1f}% "
+                f"({_format_bytes(downloaded_size)} / {_format_bytes(total_size)})"
+            )
+        elif downloaded_size > 0:
+            typer.echo(f"download_progress: {status} {_format_bytes(downloaded_size)}")
+        else:
+            typer.echo(f"download_progress: {status}")
+
+    result = run_artifact_download(plan, timeout=timeout, progress_callback=print_progress)
     if result.returncode != 0:
         typer.echo(f"Error: download failed with exit code {result.returncode}", err=True)
+        if result.stderr:
+            typer.echo(result.stderr, err=True)
         raise typer.Exit(result.returncode)
     typer.echo("status: downloaded")
 
@@ -334,6 +370,7 @@ def artifact_sync(
         node_user=runtime_node.user,
         node_host=transport_plan.resolved_transport_host,
         node_home_dir=node_home_dir,
+        ssh_host_key_alias=runtime_node.host if transport_plan.uses_fabric else None,
     )
 
     typer.echo(f"model: {model}")

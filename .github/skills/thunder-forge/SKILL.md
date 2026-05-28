@@ -100,29 +100,27 @@ Model recommendations and routing changes should mention the impact on the node'
 
 ## Artifact Identity
 
-Target refactor direction:
-
-- Preserve HuggingFace namespace in TF-managed oMLX artifact paths.
-- Use one clean namespaced path scheme; do not add legacy compatibility shims.
-- Prefer direct children of `~/.omlx/models` so oMLX discovery stays simple.
-
-Recommended shape:
+Use oMLX's native download layout as the TF cache and sync layout:
 
 ```text
-~/.omlx/models/hf--<namespace>--<repo-name>
+~/.omlx/models/<namespace>/<repo-name>
 ```
 
 Example:
 
 ```text
-~/.omlx/models/hf--mlx-community--gpt-oss-20b-MXFP4-Q8
+~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8
 ```
+
+Studio's `~/.omlx/models` is the cache hub for downloads and node sync. Do not use the old `hf--<namespace>--<repo>` direct-child layout in new TF code.
+
+oMLX discovers nested `<namespace>/<repo-name>` directories and exposes the repo directory name as the runtime model id, for example `gpt-oss-20b-MXFP4-Q8`. Requests that include a provider prefix can still resolve because oMLX strips the prefix if needed, but TF `runtime_routes` should use the visible runtime id.
 
 Separate these concepts in code and docs:
 
 - HF `repo_id`
-- TF-managed artifact directory
-- runtime model id seen by oMLX/Olla
+- oMLX artifact directory path under `~/.omlx/models`
+- runtime model id seen by oMLX/Olla (`repo-name` for nested layout)
 - public role alias seen by clients
 
 For TF v2, use `runtime_routes` as the single operational route layer. Do not add a separate `assignments` section for Olla routing; that shape came from the older per-model-service stack.
@@ -199,7 +197,7 @@ Swap is a hard warning. If a candidate needs swap during loading or at expected 
 Current preferred model:
 
 - HF: `mlx-community/gpt-oss-20b-MXFP4-Q8`
-- TF-managed runtime model id: `hf--mlx-community--gpt-oss-20b-MXFP4-Q8`
+- TF-managed runtime model id: `gpt-oss-20b-MXFP4-Q8`
 - Serving: standard `omlx serve`
 - Purpose: Hindsight retain/reflect/consolidation LLM, not embeddings
 - Budget: roughly 20 GB runtime RAM at practical Hindsight context

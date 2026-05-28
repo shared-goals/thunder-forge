@@ -107,7 +107,7 @@ runtime_routes:
   - model_name: agent
     runtime: omlx
     node: msm3
-    model: hf--mlx-community--Qwen3.6-35B-A3B-4bit
+    model: Qwen3.6-35B-A3B-4bit
 
 models:
   qwen3-dev:

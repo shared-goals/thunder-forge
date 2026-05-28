@@ -141,7 +141,12 @@ def discover_link_local_fabric_host(
     for address in _extract_link_local_ipv4(remote_ifconfig, allowed_interfaces=remote_thunderbolt_devices):
         if (
             _route_uses_allowed_interface(address, allowed_interfaces=local_thunderbolt_devices, timeout=timeout)
-            and _ssh_hostname_check(address, node_user=node_user, timeout=timeout)
+            and _ssh_hostname_check(
+                address,
+                node_user=node_user,
+                host_key_alias=management_host,
+                timeout=timeout,
+            )
         ):
             return address
     return None
@@ -202,17 +207,20 @@ def _route_uses_allowed_interface(address: str, *, allowed_interfaces: set[str],
     return bool(match and match.group(1) in allowed_interfaces)
 
 
-def _ssh_hostname_check(address: str, *, node_user: str, timeout: int) -> bool:
+def _ssh_hostname_check(address: str, *, node_user: str, host_key_alias: str, timeout: int) -> bool:
+    ssh_args = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={timeout}",
+        "-o",
+        f"HostKeyAlias={host_key_alias}",
+        f"{node_user}@{address}",
+        "hostname",
+    ]
     result = subprocess.run(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"ConnectTimeout={timeout}",
-            f"{node_user}@{address}",
-            "hostname",
-        ],
+        ssh_args,
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
