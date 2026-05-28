@@ -76,6 +76,8 @@ Use exactly these role names unless the config explicitly says otherwise:
 - `coder`: coding, code review, and long dev sessions.
 - `agent`: tool calling, structured output, self-correction, and long-context autonomous work.
 
+Temporary benchmark aliases such as `memory-bf16` may exist in `runtime_routes`, but they are not canonical roles and should stay clearly marked as comparison routes.
+
 ## Target Role Spread
 
 All MSM nodes are 128 GB Mac Studio nodes. The role budget numbers are required runtime RAM on the node, not model names.
@@ -209,6 +211,13 @@ Current preferred model:
 - Note: reasoning models may return `reasoning_content` instead of `content`; smoke tests must accept both
 
 Prefer this over `lmstudio-community/gpt-oss-20b-MLX-8bit` unless the 8-bit quality gain is proven worth the extra RAM and swap pressure.
+
+Benchmark route:
+
+- Alias: `memory-bf16`
+- HF: `mlx-community/gpt-oss-20b-mxfp4-bf16`
+- Runtime model id: `gpt-oss-20b-mxfp4-bf16`
+- Purpose: compare quality/latency/RAM against the canonical Q8 `memory` route on `msm3`; do not promote until benchmarked.
 
 ### Original openai/gpt-oss-20b
 

@@ -84,7 +84,7 @@ Edit `configs/node-assignments.yaml.example`, copy to `configs/node-assignments.
 cp configs/node-assignments.yaml.example configs/node-assignments.yaml
 ```
 
-For TF v2, `runtime_routes` is the operational routing surface. It maps stable public aliases such as `memory`, `coder`, and `agent` to oMLX runtime model ids on nodes. Do not add a second per-node route layer; Olla config generation reads `runtime_routes` directly.
+For TF v2, `runtime_routes` is the operational routing surface. It maps stable public aliases such as `memory`, `coder`, and `agent` to oMLX runtime model ids on nodes. Temporary comparison aliases such as `memory-bf16` may be used for benchmarks, but they are not canonical role names. Do not add a second per-node route layer; Olla config generation reads `runtime_routes` directly.
 
 ## Topology and Rollout
 
@@ -98,7 +98,7 @@ After `msm3` tests and use cases are stable, migrate nodes into TF v2 in order: 
 
 ## Roles
 
-Canonical role aliases are `memory`, `coder`, and `agent`. Use `memory` for the Hindsight memory LLM; do not introduce a second Hindsight memory alias unless compatibility requires it.
+Canonical role aliases are `memory`, `coder`, and `agent`. Use `memory` for the Hindsight memory LLM; do not introduce a second Hindsight memory alias unless compatibility requires it. Benchmark-only aliases such as `memory-bf16` should stay clearly marked and temporary.
 
 Target production spread on 128 GB nodes:
 
