@@ -158,7 +158,7 @@ def build_artifact_sync_plan(
         "rsync",
         "-a",
         "--progress",
-        "--partial",
+        "--partial-dir=.rsync-partial",
         "-e",
         "ssh -o BatchMode=yes -o ConnectTimeout=8",
         source_path,
@@ -254,6 +254,8 @@ def is_local_artifact_complete(model_dir: Path) -> bool:
         return False
     if any(model_dir.rglob("*.incomplete")):
         return False
+    if (model_dir / ".rsync-partial").exists():
+        return False
     return any(model_dir.rglob("*.safetensors")) or any(model_dir.rglob("*.bin"))
 
 
@@ -265,6 +267,7 @@ def _remote_artifact_complete(host: str, path: str) -> bool:
             f"test -d {quoted_path}",
             f"test -f {quoted_config}",
             f"test -z \"$(find {quoted_path} -name '*.incomplete' -print -quit)\"",
+            f"test ! -e {shlex.quote(f'{path}/.rsync-partial')}",
             (
                 f"test -n \"$(find {quoted_path} "
                 "\\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""

@@ -91,7 +91,7 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
     assert plan.rsync_args[0] == "rsync"
     assert "-a" in plan.rsync_args
     assert "-az" not in plan.rsync_args
-    assert "--partial" in plan.rsync_args
+    assert "--partial-dir=.rsync-partial" in plan.rsync_args
     assert plan.rsync_args[-1] == plan.destination
 
 
@@ -161,6 +161,16 @@ def test_local_artifact_complete_rejects_incomplete_download_marker(tmp_path) ->
     (model_dir / "model.safetensors.incomplete").write_text("partial")
 
     assert is_local_artifact_complete(model_dir) is False
+
+
+    def test_local_artifact_complete_rejects_rsync_partial_dir(tmp_path) -> None:
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}")
+        (model_dir / "model.safetensors").write_text("weights")
+        (model_dir / ".rsync-partial").mkdir()
+
+        assert is_local_artifact_complete(model_dir) is False
 
 
 def test_artifact_sync_plan_can_use_fabric_host() -> None:
