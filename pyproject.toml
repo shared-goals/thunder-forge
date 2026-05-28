@@ -36,3 +36,10 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"v1/**/*.py" = ["ALL"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--ignore=v1"
