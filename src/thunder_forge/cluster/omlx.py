@@ -246,7 +246,11 @@ def _chat_completion_answer(payload: dict) -> str:
     if not isinstance(message, dict):
         return ""
     content = message.get("content", "")
-    return content if isinstance(content, str) else ""
+    if isinstance(content, str) and content:
+        return content
+    # Reasoning models (e.g. gpt-oss) return reasoning_content instead of content
+    reasoning = message.get("reasoning_content", "")
+    return reasoning if isinstance(reasoning, str) else ""
 
 
 @dataclass
