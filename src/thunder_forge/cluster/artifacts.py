@@ -18,7 +18,18 @@ class ArtifactReadinessAction(StrEnum):
 
 
 @dataclass(frozen=True)
+class ArtifactIdentity:
+    repo_id: str
+    namespace: str
+    repo_name: str
+    model_dir_name: str
+    runtime_model_id: str
+
+
+@dataclass(frozen=True)
 class ArtifactPresence:
+    """Completeness state for TF-managed oMLX artifact directories."""
+
     studio_omlx_model_dir: bool
     node_omlx_model_dir: bool
 
@@ -26,6 +37,8 @@ class ArtifactPresence:
 @dataclass(frozen=True)
 class ArtifactReadinessPlan:
     repo_id: str
+    model_dir_name: str
+    runtime_model_id: str
     node: str
     studio_omlx_model_dir: str
     node_omlx_model_dir: str
@@ -36,6 +49,8 @@ class ArtifactReadinessPlan:
 @dataclass(frozen=True)
 class ArtifactSyncPlan:
     repo_id: str
+    model_dir_name: str
+    runtime_model_id: str
     source_path: str
     destination: str
     command: str
@@ -47,21 +62,35 @@ class ArtifactSyncPlan:
 class ArtifactDownloadPlan:
     repo_id: str
     model_dir_name: str
+    runtime_model_id: str
     destination: str
     command: str
     args: list[str]
 
 
 def omlx_model_dir_name(repo_id: str) -> str:
-    """Return the oMLX default model directory name for a model repo id.
+    """Return the TF-managed oMLX model directory name for a HF repo id.
 
-    oMLX discovers models as direct subdirectories of ``~/.omlx/models`` and
-    uses the subdirectory name as the model id. For Hugging Face repo ids, the
-    natural/default directory name is the repo name segment, not a tool-specific
-    cache layout.
+    oMLX discovers direct children of ``~/.omlx/models`` and uses the
+    subdirectory name as the runtime model id. Thunder Forge preserves the
+    Hugging Face namespace in that direct-child name to avoid collisions while
+    keeping oMLX discovery simple.
     """
+    return build_artifact_identity(repo_id).model_dir_name
+
+
+def build_artifact_identity(repo_id: str) -> ArtifactIdentity:
+    """Build the canonical TF artifact identity for a Hugging Face repo id."""
     _validate_repo_id(repo_id)
-    return repo_id.rsplit("/", maxsplit=1)[1]
+    namespace, repo_name = repo_id.split("/", maxsplit=1)
+    model_dir_name = f"hf--{namespace}--{repo_name}"
+    return ArtifactIdentity(
+        repo_id=repo_id,
+        namespace=namespace,
+        repo_name=repo_name,
+        model_dir_name=model_dir_name,
+        runtime_model_id=model_dir_name,
+    )
 
 
 def build_artifact_readiness_plan(
@@ -78,9 +107,9 @@ def build_artifact_readiness_plan(
     ``~/.omlx/models/<model-dir>``. Hugging Face cache layout is intentionally
     not part of the product flow.
     """
-    model_dir_name = omlx_model_dir_name(repo_id)
-    studio_omlx_model_dir = f"{studio_omlx_models_dir}/{model_dir_name}"
-    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{model_dir_name}"
+    identity = build_artifact_identity(repo_id)
+    studio_omlx_model_dir = f"{studio_omlx_models_dir}/{identity.model_dir_name}"
+    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{identity.model_dir_name}"
 
     actions: list[ArtifactReadinessAction] = []
     if not presence.studio_omlx_model_dir:
@@ -90,6 +119,8 @@ def build_artifact_readiness_plan(
 
     return ArtifactReadinessPlan(
         repo_id=repo_id,
+        model_dir_name=identity.model_dir_name,
+        runtime_model_id=identity.runtime_model_id,
         node=node,
         studio_omlx_model_dir=studio_omlx_model_dir,
         node_omlx_model_dir=node_omlx_model_dir,
@@ -108,10 +139,10 @@ def build_artifact_sync_plan(
 ) -> ArtifactSyncPlan:
     """Build a studio-to-node oMLX model-directory rsync plan."""
     _validate_user_host_path(node_user=node_user, node_host=node_host, node_home_dir=node_home_dir)
-    model_dir_name = omlx_model_dir_name(repo_id)
-    source_path = f"{Path(f'{studio_omlx_models_dir}/{model_dir_name}').expanduser()}/"
+    identity = build_artifact_identity(repo_id)
+    source_path = f"{Path(f'{studio_omlx_models_dir}/{identity.model_dir_name}').expanduser()}/"
     remote_omlx_models_dir = f"{node_home_dir}/.omlx/models"
-    destination = f"{node_user}@{node_host}:{remote_omlx_models_dir}/{model_dir_name}/"
+    destination = f"{node_user}@{node_host}:{remote_omlx_models_dir}/{identity.model_dir_name}/"
     mkdir_args = [
         "ssh",
         "-o",
@@ -135,6 +166,8 @@ def build_artifact_sync_plan(
     command = " ".join(shlex.quote(arg) for arg in rsync_args)
     return ArtifactSyncPlan(
         repo_id=repo_id,
+        model_dir_name=identity.model_dir_name,
+        runtime_model_id=identity.runtime_model_id,
         source_path=source_path,
         destination=destination,
         command=command,
@@ -149,8 +182,8 @@ def build_artifact_download_plan(
     studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
 ) -> ArtifactDownloadPlan:
     """Build a plan to download a model directly into studio's oMLX model directory."""
-    model_dir_name = omlx_model_dir_name(repo_id)
-    destination = f"{studio_omlx_models_dir}/{model_dir_name}"
+    identity = build_artifact_identity(repo_id)
+    destination = f"{studio_omlx_models_dir}/{identity.model_dir_name}"
     destination_arg = str(Path(destination).expanduser())
     args = [
         "uvx",
@@ -165,7 +198,8 @@ def build_artifact_download_plan(
     command = " ".join(shlex.quote(arg) for arg in args)
     return ArtifactDownloadPlan(
         repo_id=repo_id,
-        model_dir_name=model_dir_name,
+        model_dir_name=identity.model_dir_name,
+        runtime_model_id=identity.runtime_model_id,
         destination=destination,
         command=command,
         args=args,
@@ -211,9 +245,33 @@ def run_artifact_sync(plan: ArtifactSyncPlan, *, timeout: int = 7200) -> subproc
     )
 
 
-def _remote_path_exists(host: str, path: str) -> bool:
+def is_local_artifact_complete(model_dir: Path) -> bool:
+    """Return True when a local oMLX model directory looks complete enough to serve."""
+    if not model_dir.is_dir():
+        return False
+    if not (model_dir / "config.json").is_file():
+        return False
+    if any(model_dir.rglob("*.incomplete")):
+        return False
+    return any(model_dir.rglob("*.safetensors")) or any(model_dir.rglob("*.bin"))
+
+
+def _remote_artifact_complete(host: str, path: str) -> bool:
+    quoted_path = shlex.quote(path)
+    quoted_config = shlex.quote(f"{path}/config.json")
+    command = " && ".join(
+        [
+            f"test -d {quoted_path}",
+            f"test -f {quoted_config}",
+            f"test -z \"$(find {quoted_path} -name '*.incomplete' -print -quit)\"",
+            (
+                f"test -n \"$(find {quoted_path} "
+                "\\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""
+            ),
+        ]
+    )
     result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "test", "-e", path],
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, command],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -248,12 +306,12 @@ def probe_artifact_presence(
     node_host: str,
     node_home_dir: str,
 ) -> ArtifactPresence:
-    """Check oMLX model-directory presence on studio and a node."""
-    model_dir_name = omlx_model_dir_name(repo_id)
-    studio_omlx_model_dir = Path(DEFAULT_OMLX_MODELS_DIR).expanduser() / model_dir_name
-    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{model_dir_name}"
+    """Check oMLX model-directory completeness on studio and a node."""
+    identity = build_artifact_identity(repo_id)
+    studio_omlx_model_dir = Path(DEFAULT_OMLX_MODELS_DIR).expanduser() / identity.model_dir_name
+    node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{identity.model_dir_name}"
 
     return ArtifactPresence(
-        studio_omlx_model_dir=studio_omlx_model_dir.exists(),
-        node_omlx_model_dir=_remote_path_exists(node_host, node_omlx_model_dir),
+        studio_omlx_model_dir=is_local_artifact_complete(studio_omlx_model_dir),
+        node_omlx_model_dir=_remote_artifact_complete(node_host, node_omlx_model_dir),
     )

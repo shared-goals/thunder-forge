@@ -23,7 +23,7 @@ def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypat
             nodes:
               msm3:
                 host: msm3-wifi.lan
-                fabric_host: msm3-fabric
+                fabric_host: true
                 ram_gb: 128
                 user: shag
                 role: node
@@ -31,7 +31,6 @@ def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypat
                 runtime:
                   type: omlx
                   port: 8018
-            assignments: {}
         """)
     )
 
@@ -44,7 +43,7 @@ def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypat
     assert "node: msm3" in result.stdout
     assert "runtime: omlx" in result.stdout
     assert "management_host: msm3-wifi.lan" in result.stdout
-    assert "fabric_host: msm3-fabric" in result.stdout
+    assert "fabric_host: true" in result.stdout
     assert "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018" in result.stdout
     assert "--model-dir" not in result.stdout
 
@@ -59,7 +58,7 @@ def test_runtime_start_apply_starts_remote_runtime(tmp_path: Path, monkeypatch) 
             nodes:
               msm3:
                 host: msm3-wifi.lan
-                fabric_host: msm3-fabric
+                fabric_host: true
                 ram_gb: 128
                 user: shag
                 role: node
@@ -67,7 +66,6 @@ def test_runtime_start_apply_starts_remote_runtime(tmp_path: Path, monkeypatch) 
                 runtime:
                   type: omlx
                   port: 8018
-            assignments: {}
         """)
     )
 
@@ -106,7 +104,7 @@ def test_runtime_start_apply_skips_when_runtime_is_already_healthy(tmp_path: Pat
             nodes:
               msm3:
                 host: msm3-wifi.lan
-                fabric_host: msm3-fabric
+                fabric_host: true
                 ram_gb: 128
                 user: shag
                 role: node
@@ -114,7 +112,6 @@ def test_runtime_start_apply_skips_when_runtime_is_already_healthy(tmp_path: Pat
                 runtime:
                   type: omlx
                   port: 8018
-            assignments: {}
         """)
     )
 
@@ -155,14 +152,13 @@ def test_runtime_status_reports_omlx_health(tmp_path: Path, monkeypatch) -> None
             nodes:
               msm3:
                 host: msm3-wifi.lan
-                fabric_host: msm3-fabric
+                fabric_host: true
                 ram_gb: 128
                 user: shag
                 role: node
                 runtime:
                   type: omlx
                   port: 8018
-            assignments: {}
         """)
     )
 
@@ -189,7 +185,7 @@ def test_runtime_status_reports_omlx_health(tmp_path: Path, monkeypatch) -> None
     assert "node: msm3" in result.stdout
     assert "runtime: omlx" in result.stdout
     assert "management_host: msm3-wifi.lan" in result.stdout
-    assert "fabric_host: msm3-fabric" in result.stdout
+    assert "fabric_host: true" in result.stdout
     assert "base_url: http://msm3-wifi.lan:8018" in result.stdout
     assert "health: ok" in result.stdout
     assert "models: ok" in result.stdout
@@ -207,14 +203,13 @@ def test_runtime_smoke_reports_direct_chat_result(tmp_path: Path, monkeypatch) -
             nodes:
               msm3:
                 host: msm3-wifi.lan
-                fabric_host: msm3-fabric
+                fabric_host: true
                 ram_gb: 128
                 user: shag
                 role: node
                 runtime:
                   type: omlx
                   port: 8018
-            assignments: {}
         """)
     )
 
@@ -290,7 +285,6 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
                 runtime: omlx
                 node: msm3
                 model: Qwen3-1.7B-4bit
-            assignments: {}
         """)
     )
 
@@ -427,7 +421,7 @@ def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monke
             nodes:
               msm3:
                 host: msm3-wifi.lan
-                fabric_host: msm3-fabric
+                fabric_host: true
                 ram_gb: 128
                 user: shag
                 role: node
@@ -435,7 +429,6 @@ def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monke
                 runtime:
                   type: omlx
                   port: 8018
-            assignments: {}
         """
         )
     )

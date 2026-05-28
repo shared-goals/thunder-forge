@@ -38,7 +38,6 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
         "    runtime: omlx\n"
         "    node: msm3\n"
         "    model: Qwen3-1.7B-4bit\n"
-        "assignments: {}\n"
     )
 
     import thunder_forge.cluster.config as config_module

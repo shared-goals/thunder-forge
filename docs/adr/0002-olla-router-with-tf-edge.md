@@ -141,7 +141,7 @@ Cons:
 - likely becomes another source of truth;
 - duplicates Thunder Forge control-plane intent.
 
-Decision: defer. LiteLLM remains the proven fallback/baseline, not the preferred fresh MVP architecture.
+Decision: defer. The fresh TF v2 architecture should stay on Olla plus a small TF edge unless concrete requirements exceed that shape.
 
 ## Consequences
 

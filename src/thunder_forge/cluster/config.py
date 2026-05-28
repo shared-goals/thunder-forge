@@ -1,4 +1,4 @@
-"""Config parsing, memory validation, and LiteLLM config generation."""
+"""Config parsing, memory validation, and Olla config generation."""
 
 from __future__ import annotations
 
@@ -57,19 +57,6 @@ class ModelSource:
 
 
 @dataclass
-class LiteLLMParams:
-    max_output_tokens: int | None = None  # 0/None = use default (16384 when max_context set)
-    timeout: int | None = None            # per-model timeout seconds; None = use global (120s)
-    stream_timeout: int | None = None     # per-model stream timeout; None = inherit global
-    weight: int | None = None            # load-balancing weight; None = default (1)
-    tpm: int | None = None               # tokens/minute limit; None = unlimited
-    rpm: int | None = None               # requests/minute limit; None = unlimited
-    temperature: float | None = None     # proxy-level default temperature; None = model default
-    max_tokens: int | None = None        # proxy-level default max_tokens; None = model default
-    seed: int | None = None              # reproducible outputs; None = non-deterministic
-
-
-@dataclass
 class ModelInfo:
     base_model: str = ""                                # maps custom names to known models for token counting
     mode: str = ""                                      # chat, completion, embedding, image_generation
@@ -110,7 +97,6 @@ class Model:
     extra_args: list[str] | None = None
     enable_thinking: bool | None = None
     server_args: ServerArgs | None = None
-    litellm_params: LiteLLMParams | None = None
     model_info: ModelInfo | None = None
 
 
@@ -127,7 +113,7 @@ class Node:
     ram_gb: int
     user: str
     role: NodeRole | str
-    fabric_host: str | None
+    fabric_host: bool
     runtime: NodeRuntime | None
     # Resolved during pre-flight — None until populated
     platform: str | None
@@ -143,7 +129,7 @@ class Node:
         role: NodeRole | str = NodeRole.NODE,
         *,
         ip: str | None = None,
-        fabric_host: str | None = None,
+        fabric_host: bool = False,
         runtime: NodeRuntime | None = None,
         platform: str | None = None,
         shell: str | None = None,
@@ -176,13 +162,6 @@ class Node:
 
 
 @dataclass
-class Assignment:
-    model: str
-    port: int = 0
-    embedding: bool = False
-
-
-@dataclass
 class RuntimeRoute:
     model_name: str
     runtime: RuntimeType | str
@@ -191,22 +170,10 @@ class RuntimeRoute:
 
 
 @dataclass
-class ExternalEndpoint:
-    model_name: str
-    api_base: str
-    api_key_env: str = ""
-    api_key: str = ""
-    max_input_tokens: int = 0
-    max_output_tokens: int = 0
-
-
-@dataclass
 class ClusterConfig:
     models: dict[str, Model] = field(default_factory=dict)
     nodes: dict[str, Node] = field(default_factory=dict)
-    assignments: dict[str, list[Assignment]] = field(default_factory=dict)
     runtime_routes: list[RuntimeRoute] = field(default_factory=list)
-    external_endpoints: list[ExternalEndpoint] = field(default_factory=list)
 
     @property
     def compute_nodes(self) -> dict[str, Node]:
@@ -250,20 +217,6 @@ def _parse_model_source(raw: dict) -> ModelSource:
     )
 
 
-def _parse_litellm_params(raw: dict) -> LiteLLMParams:
-    return LiteLLMParams(
-        max_output_tokens=raw.get("max_output_tokens"),
-        timeout=raw.get("timeout"),
-        stream_timeout=raw.get("stream_timeout"),
-        weight=raw.get("weight"),
-        tpm=raw.get("tpm"),
-        rpm=raw.get("rpm"),
-        temperature=raw.get("temperature"),
-        max_tokens=raw.get("max_tokens"),
-        seed=raw.get("seed"),
-    )
-
-
 def _parse_model_info(raw: dict) -> ModelInfo:
     return ModelInfo(
         base_model=raw.get("base_model", ""),
@@ -304,9 +257,17 @@ def _parse_node_runtime(raw: dict | None) -> NodeRuntime | None:
     )
 
 
+def _parse_fabric_host(raw: object, *, node_name: str) -> bool:
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    msg = f"Node '{node_name}': fabric_host must be boolean true/false"
+    raise ValueError(msg)
+
+
 def _parse_model(raw: dict) -> Model:
     server_args_raw = raw.get("server_args")
-    litellm_params_raw = raw.get("litellm_params")
     model_info_raw = raw.get("model_info")
     return Model(
         source=_parse_model_source(raw["source"]),
@@ -320,7 +281,6 @@ def _parse_model(raw: dict) -> Model:
         extra_args=raw.get("extra_args"),
         enable_thinking=raw.get("enable_thinking"),
         server_args=_parse_server_args(server_args_raw) if server_args_raw is not None else None,
-        litellm_params=_parse_litellm_params(litellm_params_raw) if litellm_params_raw is not None else None,
         model_info=_parse_model_info(model_info_raw) if model_info_raw is not None else None,
     )
 
@@ -363,22 +323,11 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             ram_gb=v["ram_gb"],
             user=user,
             role=role,
-            fabric_host=v.get("fabric_host"),
+            fabric_host=_parse_fabric_host(v.get("fabric_host"), node_name=k),
             runtime=_parse_node_runtime(v.get("runtime")),
             home_dir=v.get("home_dir"),
             homebrew_prefix=v.get("homebrew_prefix"),
         )
-
-    assignments: dict[str, list[Assignment]] = {}
-    for node_name, slots in raw.get("assignments", {}).items():
-        assignments[node_name] = [
-            Assignment(
-                model=s["model"],
-                port=s.get("port", 0),
-                embedding=s.get("embedding", False),
-            )
-            for s in slots
-        ]
 
     runtime_routes = [
         RuntimeRoute(
@@ -390,24 +339,10 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
         for route in raw.get("runtime_routes", [])
     ]
 
-    external_endpoints = [
-        ExternalEndpoint(
-            model_name=ep["model_name"],
-            api_base=ep["api_base"],
-            api_key_env=ep.get("api_key_env", ""),
-            api_key=ep.get("api_key", ""),
-            max_input_tokens=ep.get("max_input_tokens", 0),
-            max_output_tokens=ep.get("max_output_tokens", 0),
-        )
-        for ep in raw.get("external_endpoints", [])
-    ]
-
     return ClusterConfig(
         models=models,
         nodes=nodes,
-        assignments=assignments,
         runtime_routes=runtime_routes,
-        external_endpoints=external_endpoints,
     )
 
 
@@ -436,198 +371,6 @@ def load_cluster_config(path: Path) -> ClusterConfig:
                 node.user = os.environ.get("USER", "unknown")
 
     return config
-
-
-OS_OVERHEAD_GB = 8
-
-
-def validate_memory(config: ClusterConfig) -> list[str]:
-    errors: list[str] = []
-    for node_name, slots in config.assignments.items():
-        node = config.nodes.get(node_name)
-        if node is None:
-            errors.append(f"{node_name}: node not found in config")
-            continue
-        parts: list[str] = []
-        total = OS_OVERHEAD_GB
-        for slot in slots:
-            model = config.models.get(slot.model)
-            if model is None:
-                errors.append(f"{node_name}: model '{slot.model}' not found in registry")
-                continue
-            weight_gb = model.ram_gb if model.ram_gb is not None else model.disk_gb
-            kv_gb = model.kv_per_32k_gb
-            slot_total = weight_gb + kv_gb
-            total += slot_total
-            parts.append(f"{slot.model}({weight_gb}+{kv_gb}kv)")
-        budget_str = " + ".join(parts) + f" + {OS_OVERHEAD_GB} OS = {total:.1f} GB / {node.ram_gb} GB"
-        if total > node.ram_gb:
-            errors.append(f"{node_name}: {budget_str} ❌ EXCEEDS")
-    return errors
-
-
-def _build_embedding_entry(model_name: str, model: Model, node_ip: str, port: int) -> dict:
-    """Build a LiteLLM model_list entry for an embedding model."""
-    entry: dict = {
-        "model_name": model_name,
-        "litellm_params": {
-            "model": f"openai/{model.source.repo}",
-            "api_base": f"http://{node_ip}:{port}/v1",
-            "api_key": "none",
-            "drop_params": True,
-            "encoding_format": "float",
-        },
-        "model_info": {
-            "mode": "embedding",
-        },
-    }
-    if model.max_context > 0:
-        entry["litellm_params"]["max_input_tokens"] = model.max_context
-    mi = model.model_info
-    if mi:
-        if mi.input_cost_per_token is not None:
-            entry["model_info"]["input_cost_per_token"] = mi.input_cost_per_token
-        if mi.output_cost_per_token is not None:
-            entry["model_info"]["output_cost_per_token"] = mi.output_cost_per_token
-    return entry
-
-
-def generate_litellm_config(config: ClusterConfig) -> str:
-    model_list: list[dict] = []
-    for node_name, slots in sorted(config.assignments.items()):
-        node = config.nodes[node_name]
-        for slot in slots:
-            model = config.models[slot.model]
-            if model.serving == ServingMode.CLI:
-                continue
-            if model.serving == ServingMode.EMBEDDING:
-                model_list.append(_build_embedding_entry(slot.model, model, node.ip, slot.port))
-                continue
-            entry: dict = {
-                "model_name": slot.model,
-                "litellm_params": {
-                    "model": f"openai/{model.source.repo}",
-                    "api_base": f"http://{node.ip}:{slot.port}/v1",
-                    "api_key": "none",
-                },
-            }
-            lp = model.litellm_params
-            if model.max_context > 0:
-                entry["litellm_params"]["max_input_tokens"] = model.max_context
-            # max_output_tokens: use explicit value, or default to 16384 when max_context is set
-            if lp and lp.max_output_tokens:
-                entry["litellm_params"]["max_output_tokens"] = lp.max_output_tokens
-            elif model.max_context > 0:
-                entry["litellm_params"]["max_output_tokens"] = 16384
-            if lp:
-                if lp.timeout:
-                    entry["litellm_params"]["timeout"] = lp.timeout
-                if lp.stream_timeout:
-                    entry["litellm_params"]["stream_timeout"] = lp.stream_timeout
-                if lp.weight:
-                    entry["litellm_params"]["weight"] = lp.weight
-                if lp.tpm:
-                    entry["litellm_params"]["tpm"] = lp.tpm
-                if lp.rpm:
-                    entry["litellm_params"]["rpm"] = lp.rpm
-                if lp.temperature is not None:
-                    entry["litellm_params"]["temperature"] = lp.temperature
-                if lp.max_tokens:
-                    entry["litellm_params"]["max_tokens"] = lp.max_tokens
-                if lp.seed is not None:
-                    entry["litellm_params"]["seed"] = lp.seed
-            mi = model.model_info
-            if mi:
-                info: dict = {}
-                if mi.base_model:
-                    info["base_model"] = mi.base_model
-                if mi.mode:
-                    info["mode"] = mi.mode
-                if mi.input_cost_per_token is not None:
-                    info["input_cost_per_token"] = mi.input_cost_per_token
-                if mi.output_cost_per_token is not None:
-                    info["output_cost_per_token"] = mi.output_cost_per_token
-                if mi.supports_vision is not None:
-                    info["supports_vision"] = mi.supports_vision
-                if mi.supports_function_calling is not None:
-                    info["supports_function_calling"] = mi.supports_function_calling
-                if mi.supports_parallel_function_calling is not None:
-                    info["supports_parallel_function_calling"] = mi.supports_parallel_function_calling
-                if mi.supports_response_schema is not None:
-                    info["supports_response_schema"] = mi.supports_response_schema
-                if info:
-                    entry["model_info"] = info
-            model_list.append(entry)
-            if slot.embedding:
-                emb_model = config.models.get("embedding")
-                emb_name = "embedding"
-                if not emb_model:
-                    for mname, mobj in config.models.items():
-                        if mobj.serving == ServingMode.EMBEDDING:
-                            emb_model = mobj
-                            emb_name = mname
-                            break
-                if emb_model:
-                    model_list.append(_build_embedding_entry(emb_name, emb_model, node.ip, slot.port))
-    for route in config.runtime_routes:
-        if route.runtime != RuntimeType.OMLX:
-            continue
-        node = config.nodes[route.node]
-        if node.runtime is None:
-            msg = f"Runtime route '{route.model_name}' references node '{route.node}' without runtime"
-            raise ValueError(msg)
-        model_list.append(
-            {
-                "model_name": route.model_name,
-                "litellm_params": {
-                    "model": f"openai/{route.model}",
-                    "api_base": f"http://{node.host}:{node.runtime.port}/v1",
-                    "api_key": "dummy",
-                },
-            }
-        )
-    for ep in config.external_endpoints:
-        entry = {
-            "model_name": ep.model_name,
-            "litellm_params": {
-                "model": f"openai/{ep.model_name}",
-                "api_base": ep.api_base,
-            },
-        }
-        if ep.api_key_env:
-            entry["litellm_params"]["api_key"] = f"os.environ/{ep.api_key_env}"
-        elif ep.api_key:
-            entry["litellm_params"]["api_key"] = ep.api_key
-        if ep.max_input_tokens:
-            entry["litellm_params"]["max_input_tokens"] = ep.max_input_tokens
-        if ep.max_output_tokens:
-            entry["litellm_params"]["max_output_tokens"] = ep.max_output_tokens
-        model_list.append(entry)
-
-    output: dict = {
-        "model_list": model_list,
-        "litellm_settings": {
-            "num_retries": 2,
-            "timeout": 120,
-            "allowed_fails": 3,
-            "cooldown_time": 30,
-            "use_chat_completions_url_for_anthropic_messages": True,
-            "callbacks": ["prometheus"],
-        },
-        "router_settings": {
-            "routing_strategy": "least-busy",
-            "model_group_retry_policy": {},
-        },
-        "general_settings": {
-            "master_key": "os.environ/LITELLM_MASTER_KEY",
-        },
-    }
-    header = (
-        "# AUTO-GENERATED by thunder-forge generate-config\n"
-        "# from configs/node-assignments.yaml\n"
-        "# Do not edit manually — edit node-assignments.yaml instead.\n\n"
-    )
-    return header + yaml.dump(output, default_flow_style=False, sort_keys=False)
 
 
 def generate_olla_config(config: ClusterConfig) -> str:
@@ -752,14 +495,6 @@ def find_repo_root() -> Path:
             return parent
     msg = "Cannot find repo root (no git repo and no configs/node-assignments.yaml found)"
     raise FileNotFoundError(msg)
-
-
-def check_config_sync(config: ClusterConfig, committed_path: Path) -> bool:
-    generated = generate_litellm_config(config)
-    if not committed_path.exists():
-        return False
-    committed = committed_path.read_text()
-    return generated == committed
 
 
 def load_config() -> tuple[ClusterConfig, Path]:

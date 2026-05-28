@@ -17,7 +17,7 @@ from thunder_forge.cluster.artifacts import (
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.edge import EdgeClient, EdgeProxyConfig, serve_edge_proxy, smoke_edge_contract
-from thunder_forge.cluster.fabric import discover_link_local_fabric_host, resolve_fabric_host
+from thunder_forge.cluster.fabric import build_transport_plan
 from thunder_forge.cluster.olla import dev_smoke_olla, smoke_olla_router
 from thunder_forge.cluster.omlx import (
     check_omlx_health,
@@ -42,15 +42,15 @@ app.add_typer(olla_app, name="olla")
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
-    """Load cluster config from node-assignments.yaml. Returns (ClusterConfig, repo_root Path)."""
+    """Load the TF cluster config. Returns (ClusterConfig, repo_root Path)."""
     from thunder_forge.cluster.config import find_repo_root, load_cluster_config
 
     repo_root = find_repo_root()
-    assignments_path = repo_root / "configs" / "node-assignments.yaml"
-    if not assignments_path.exists():
-        typer.echo(f"Error: {assignments_path} not found", err=True)
+    cluster_config_path = repo_root / "configs" / "node-assignments.yaml"
+    if not cluster_config_path.exists():
+        typer.echo(f"Error: {cluster_config_path} not found", err=True)
         raise typer.Exit(1)
-    return load_cluster_config(assignments_path), repo_root
+    return load_cluster_config(cluster_config_path), repo_root
 
 
 def _run_preflight(config: object, *, target_node: str | None = None) -> None:
@@ -89,7 +89,7 @@ def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
     typer.echo(f"runtime: {_runtime(runtime_node).type}")
     typer.echo(f"management_host: {runtime_node.host}")
     if runtime_node.fabric_host:
-        typer.echo(f"fabric_host: {runtime_node.fabric_host}")
+        typer.echo("fabric_host: true")
 
 
 @edge_app.command("smoke")
@@ -238,11 +238,13 @@ def artifact_status(
     )
 
     typer.echo(f"model: {model}")
+    typer.echo(f"model_dir_name: {plan.model_dir_name}")
+    typer.echo(f"runtime_model_id: {plan.runtime_model_id}")
     _print_runtime_node_header(node, runtime_node)
     typer.echo(f"studio_omlx_model_dir_path: {plan.studio_omlx_model_dir}")
     typer.echo(f"node_omlx_model_dir_path: {plan.node_omlx_model_dir}")
-    typer.echo(f"studio_omlx_model_dir: {'present' if presence.studio_omlx_model_dir else 'missing'}")
-    typer.echo(f"node_omlx_model_dir: {'present' if presence.node_omlx_model_dir else 'missing'}")
+    typer.echo(f"studio_omlx_model_dir: {'ready' if presence.studio_omlx_model_dir else 'missing_or_incomplete'}")
+    typer.echo(f"node_omlx_model_dir: {'ready' if presence.node_omlx_model_dir else 'missing_or_incomplete'}")
     typer.echo(f"ready: {'yes' if plan.ready else 'no'}")
     if plan.actions:
         typer.echo("next_actions:")
@@ -265,6 +267,7 @@ def artifact_download(
 
     typer.echo(f"model: {model}")
     typer.echo(f"model_dir_name: {plan.model_dir_name}")
+    typer.echo(f"runtime_model_id: {plan.runtime_model_id}")
     typer.echo(f"destination: {plan.destination}")
     typer.echo("action: download_to_studio_omlx")
     typer.echo(f"command: {plan.command}")
@@ -288,12 +291,12 @@ def artifact_sync(
     transport: str = typer.Option(
         "auto",
         "--transport",
-        help="Transport selection: auto, fabric, or management. Auto prefers configured reachable fabric.",
+        help="Transport selection: auto, fabric, or management. Auto probes fabric only when fabric_host is true.",
     ),
     management: bool = typer.Option(
         False,
         "--management",
-        help="Force management host even when fabric_host is configured.",
+        help="Force management host even when fabric_host probing is enabled.",
     ),
     timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for rsync when applying."),
 ) -> None:
@@ -302,30 +305,14 @@ def artifact_sync(
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
     requested_transport = "management" if management else transport
-    if requested_transport not in {"auto", "fabric", "management"}:
-        typer.echo("Error: --transport must be one of: auto, fabric, management", err=True)
-        raise typer.Exit(1)
-
-    transport_host = runtime_node.host
-    resolved_transport_host = runtime_node.host
-    fabric_fallback = ""
-    if requested_transport in {"auto", "fabric"} and runtime_node.fabric_host:
-        resolved_fabric_host = resolve_fabric_host(runtime_node.fabric_host)
-        if resolved_fabric_host is None:
-            resolved_fabric_host = discover_link_local_fabric_host(
-                management_host=runtime_node.host,
-                node_user=runtime_node.user,
-            )
-        if resolved_fabric_host is not None:
-            transport_host = runtime_node.fabric_host
-            resolved_transport_host = resolved_fabric_host
-        elif requested_transport == "fabric":
-            typer.echo(f"Error: fabric_host '{runtime_node.fabric_host}' is not reachable", err=True)
-            raise typer.Exit(1)
-        else:
-            fabric_fallback = f"{runtime_node.fabric_host} unresolved"
-    elif requested_transport == "fabric":
-        typer.echo(f"Error: node '{node}' has no fabric_host configured", err=True)
+    transport_plan = build_transport_plan(
+        requested_transport=requested_transport,
+        management_host=runtime_node.host,
+        node_user=runtime_node.user,
+        fabric_host=runtime_node.fabric_host,
+    )
+    if not transport_plan.ok:
+        typer.echo(f"Error: {transport_plan.error}", err=True)
         raise typer.Exit(1)
     presence = probe_artifact_presence(
         repo_id=model,
@@ -341,18 +328,20 @@ def artifact_sync(
     sync_plan = build_artifact_sync_plan(
         repo_id=model,
         node_user=runtime_node.user,
-        node_host=resolved_transport_host,
+        node_host=transport_plan.resolved_transport_host,
         node_home_dir=node_home_dir,
     )
 
     typer.echo(f"model: {model}")
+    typer.echo(f"model_dir_name: {sync_plan.model_dir_name}")
+    typer.echo(f"runtime_model_id: {sync_plan.runtime_model_id}")
     _print_runtime_node_header(node, runtime_node)
     typer.echo("source: studio")
-    typer.echo(f"transport_host: {transport_host}")
-    if resolved_transport_host != transport_host:
-        typer.echo(f"resolved_transport_host: {resolved_transport_host}")
-    if fabric_fallback:
-        typer.echo(f"fabric_fallback: {fabric_fallback}")
+    typer.echo(f"transport_host: {transport_plan.transport_host}")
+    if transport_plan.resolved_transport_host != transport_plan.transport_host:
+        typer.echo(f"resolved_transport_host: {transport_plan.resolved_transport_host}")
+    if transport_plan.fabric_fallback:
+        typer.echo(f"fabric_fallback: {transport_plan.fabric_fallback}")
     typer.echo(f"source_path: {sync_plan.source_path}")
     typer.echo(f"destination: {sync_plan.destination}")
     typer.echo("action: sync_to_node_omlx")
@@ -360,7 +349,8 @@ def artifact_sync(
 
     if ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX in readiness_plan.actions:
         typer.echo(
-            "Error: studio oMLX model directory is missing; download the model to studio oMLX models first",
+            "Error: studio oMLX model directory is missing or incomplete; "
+            "download the model to studio oMLX models first",
             err=True,
         )
         raise typer.Exit(1)
@@ -422,7 +412,7 @@ def runtime_start(
 def runtime_status(
     node: str = typer.Option(..., "--node", help="Node name to check runtime status for (e.g. msm3)."),
 ) -> None:
-    """Probe a node-level oMLX runtime directly, without LiteLLM."""
+    """Probe a node-level oMLX runtime directly."""
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
@@ -452,7 +442,7 @@ def runtime_smoke(
     prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
 ) -> None:
-    """Run a direct oMLX chat smoke test, without LiteLLM."""
+    """Run a direct oMLX chat smoke test."""
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
@@ -518,60 +508,9 @@ def runtime_install(
         raise typer.Exit(1)
 
 
-@app.command()
-def generate_config(
-    check: bool = typer.Option(
-        False, "--check", help="Compare generated config with committed file, exit 1 on mismatch."
-    ),
-) -> None:
-    """Generate litellm-config.yaml from node-assignments.yaml."""
-    from thunder_forge.cluster.config import (
-        OS_OVERHEAD_GB,
-        check_config_sync,
-        generate_litellm_config,
-        validate_memory,
-    )
-
-    config, repo_root = _load_config()
-    config_path = repo_root / "configs" / "litellm-config.yaml"
-
-    typer.echo("Validating memory budgets...")
-    errors = validate_memory(config)
-    for node_name, slots in sorted(config.assignments.items()):
-        node = config.nodes[node_name]
-        parts = []
-        total = OS_OVERHEAD_GB
-        for slot in slots:
-            model = config.models[slot.model]
-            weight = model.ram_gb if model.ram_gb is not None else model.disk_gb
-            kv = model.kv_per_32k_gb
-            total += weight + kv
-            parts.append(f"{slot.model}({weight}+{kv}kv)")
-        budget = " + ".join(parts) + f" + {OS_OVERHEAD_GB} OS = {total:.1f} GB / {node.ram_gb} GB"
-        status = "✓" if total <= node.ram_gb else "✗ EXCEEDS"
-        typer.echo(f"  {node_name}: {budget} {status}")
-
-    if errors:
-        for err in errors:
-            typer.echo(f"Error: {err}", err=True)
-        raise typer.Exit(1)
-
-    if check:
-        if check_config_sync(config, config_path):
-            typer.echo("✓ Config is in sync with assignments")
-            raise typer.Exit(0)
-        else:
-            typer.echo("✗ Config mismatch — run 'thunder-forge generate-config' to update", err=True)
-            raise typer.Exit(1)
-
-    content = generate_litellm_config(config)
-    config_path.write_text(content)
-    typer.echo(f"✓ Generated {config_path}")
-
-
 @app.command("generate-olla-config")
 def generate_olla_config_cmd() -> None:
-    """Generate olla-config.yaml from node-assignments.yaml."""
+    """Generate olla-config.yaml from the TF cluster config."""
     from thunder_forge.cluster.config import generate_olla_config
 
     config, repo_root = _load_config()
@@ -579,117 +518,3 @@ def generate_olla_config_cmd() -> None:
     content = generate_olla_config(config)
     config_path.write_text(content)
     typer.echo(f"✓ Generated {config_path}")
-
-
-@app.command()
-def ensure_models(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be downloaded without doing it."),
-    skip_preflight: bool = typer.Option(False, "--skip-preflight", help="Skip pre-flight node checks."),
-    download_timeout: int = typer.Option(
-        7200, "--download-timeout", help="Timeout in seconds for each model download."
-    ),
-) -> None:
-    """Download and sync models to assigned nodes."""
-    from thunder_forge.cluster.models import run_ensure_models
-
-    config, _ = _load_config()
-
-    if not skip_preflight:
-        _run_preflight(config)
-
-    success = run_ensure_models(config, dry_run=dry_run, download_timeout=download_timeout)
-    raise typer.Exit(0 if success else 1)
-
-
-@app.command()
-def deploy(
-    node: str | None = typer.Option(None, "--node", help="Deploy to a single node (e.g. msm1)."),
-    skip_models: bool = typer.Option(False, "--skip-models", help="Skip model download/sync step."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show deployment plan without executing."),
-    skip_preflight: bool = typer.Option(False, "--skip-preflight", help="Skip pre-flight node checks."),
-    download_timeout: int = typer.Option(
-        7200, "--download-timeout", help="Timeout in seconds for each model download."
-    ),
-) -> None:
-    """Deploy models, plists, and configs to the cluster."""
-    from thunder_forge.cluster.config import generate_litellm_config, validate_memory
-    from thunder_forge.cluster.deploy import run_deploy
-    from thunder_forge.cluster.models import run_ensure_models
-
-    config, repo_root = _load_config()
-    config_path = repo_root / "configs" / "litellm-config.yaml"
-
-    if not skip_preflight:
-        _run_preflight(config, target_node=node)
-
-    if not skip_models and not dry_run:
-        typer.echo("Ensuring models are present...")
-        if not run_ensure_models(config, target_node=node, download_timeout=download_timeout):
-            typer.echo("Model sync failed", err=True)
-            raise typer.Exit(1)
-
-    if not dry_run:
-        typer.echo("\nGenerating config...")
-        errors = validate_memory(config)
-        if errors:
-            for err in errors:
-                typer.echo(f"Error: {err}", err=True)
-            raise typer.Exit(1)
-        content = generate_litellm_config(config)
-        config_path.write_text(content)
-        typer.echo(f"  Generated {config_path}")
-
-    success = run_deploy(config, target_node=node, dry_run=dry_run)
-    raise typer.Exit(0 if success else 1)
-
-
-@app.command()
-def restart(
-    node: str | None = typer.Option(None, "--node", help="Restart services on a single node (e.g. msm1)."),
-    skip_preflight: bool = typer.Option(False, "--skip-preflight", help="Skip pre-flight node checks."),
-    skip_gateway: bool = typer.Option(False, "--skip-gateway", help="Don't restart the LiteLLM proxy."),
-) -> None:
-    """Restart inference services and the LiteLLM proxy."""
-    from thunder_forge.cluster.deploy import run_restart
-
-    config, _ = _load_config()
-
-    if not skip_preflight:
-        _run_preflight(config, target_node=node)
-
-    success = run_restart(config, target_node=node, skip_gateway=skip_gateway)
-    raise typer.Exit(0 if success else 1)
-
-
-@app.command()
-def stop(
-    node: str | None = typer.Option(None, "--node", help="Stop services on a single node (e.g. msm1)."),
-    skip_preflight: bool = typer.Option(False, "--skip-preflight", help="Skip pre-flight node checks."),
-    skip_gateway: bool = typer.Option(False, "--skip-gateway", help="Don't stop the LiteLLM proxy."),
-) -> None:
-    """Stop inference services and the LiteLLM proxy."""
-    from thunder_forge.cluster.deploy import run_stop
-
-    config, _ = _load_config()
-
-    if not skip_preflight:
-        _run_preflight(config, target_node=node)
-
-    success = run_stop(config, target_node=node, skip_gateway=skip_gateway)
-    raise typer.Exit(0 if success else 1)
-
-
-@app.command()
-def health(
-    skip_preflight: bool = typer.Option(False, "--skip-preflight", help="Skip pre-flight node checks."),
-) -> None:
-    """Check health of all cluster services."""
-    from thunder_forge.cluster.health import run_health_checks
-
-    config, _ = _load_config()
-
-    if not skip_preflight:
-        _run_preflight(config)
-
-    all_healthy = run_health_checks(config)
-    raise typer.Exit(0 if all_healthy else 1)

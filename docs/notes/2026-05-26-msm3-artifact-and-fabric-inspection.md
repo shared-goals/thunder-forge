@@ -49,11 +49,11 @@ msm3 -> 169.254.91.93 ping: ok, ~1.2–1.5 ms
 ssh 169.254.251.195: ok as shag, host key matched msm3
 ```
 
-A small safe copy over the fabric path succeeded. This proves transport viability, but durable config should use a stable alias such as `msm3-fabric`, not a transient link-local literal.
+A small safe copy over the fabric path succeeded. This proves transport viability; durable config should enable dynamic probing with `fabric_host: true` rather than storing a fabric hostname or transient link-local literal.
 
 ## Follow-up design notes
 
-- Keep `.lan` hostnames for homelab configs.
-- `fabric_host` should eventually be a durable alias/static IP, not a transient link-local literal.
-- Sync automation is a studio-to-node dry-run/apply CLI slice for oMLX model directories. The default path uses `msm3-wifi.lan`; `--use-fabric` switches to the configured `fabric_host` once that alias is durable.
+- Keep `.lan` hostnames for homelab management configs.
+- `fabric_host` is a boolean probe flag: true means probe Thunderbolt/fabric dynamically, false or absent means stay on management transport.
+- Sync automation is a studio-to-node dry-run/apply CLI slice for oMLX model directories. The default auto path uses dynamic fabric only when `fabric_host: true`; management can still be forced explicitly.
 - No node-to-studio backfill and no HF-cache-to-oMLX import should be implemented for the MVP product flow.

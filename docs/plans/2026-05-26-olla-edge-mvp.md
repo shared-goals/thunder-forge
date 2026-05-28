@@ -63,7 +63,7 @@ Gaps to cover in TF edge:
 
 **Steps:**
 
-1. Update PRD language from “LiteLLM remains the frontend/router” to “LiteLLM remains proven fallback; Olla + TF edge is the chosen MVP direction after smoke”.
+1. Update PRD language to “Olla + TF edge is the chosen MVP direction”.
 2. Add a short reference from ADR 0001 to ADR 0002.
 3. Keep historical notes intact; do not rewrite the investigation history.
 4. Run:
@@ -103,10 +103,11 @@ nodes:
       type: omlx
       base_url: http://msm3-wifi.lan:8018
 
-assignments:
-  msm3:
-    models:
-      - qwen3-dev
+runtime_routes:
+  - model_name: agent
+    runtime: omlx
+    node: msm3
+    model: hf--mlx-community--Qwen3.6-35B-A3B-4bit
 
 models:
   qwen3-dev:

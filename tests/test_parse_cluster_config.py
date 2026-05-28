@@ -20,7 +20,6 @@ def test_parse_cluster_config_basic():
             "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "role": "gateway"},
             "msm1": {"host": "msm1-wifi.lan", "ram_gb": 128, "user": "admin", "role": "node"},
         },
-        "assignments": {"msm1": [{"model": "coder", "port": 8000}]},
     }
     config = parse_cluster_config(raw)
     assert "coder" in config.models
@@ -28,7 +27,6 @@ def test_parse_cluster_config_basic():
     assert config.models["coder"].disk_gb == 44.8
     assert config.nodes["msm1"].user == "admin"
     assert config.nodes["rock"].role == "gateway"
-    assert config.assignments["msm1"][0].model == "coder"
 
 
 def test_parse_cluster_config_user_stored_as_is():
@@ -36,7 +34,6 @@ def test_parse_cluster_config_user_stored_as_is():
     raw = {
         "models": {},
         "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "role": "node"}},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     assert config.nodes["n1"].user == ""
@@ -50,28 +47,11 @@ def test_parse_cluster_config_role_migration():
             "n1": {"host": "n1.lan", "ram_gb": 64, "role": "inference"},
             "gw": {"host": "gw.lan", "ram_gb": 32, "role": "infra"},
         },
-        "assignments": {},
     }
     with pytest.warns(DeprecationWarning, match="deprecated"):
         config = parse_cluster_config(raw)
     assert config.nodes["n1"].role == "node"
     assert config.nodes["gw"].role == "gateway"
-
-
-def test_parse_cluster_config_external_endpoints():
-    """External endpoints are parsed correctly."""
-    raw = {
-        "models": {},
-        "nodes": {},
-        "assignments": {},
-        "external_endpoints": [
-            {"model_name": "qwen3-30b", "api_base": "http://example.com/v1", "api_key_env": "MY_KEY"}
-        ],
-    }
-    config = parse_cluster_config(raw)
-    assert len(config.external_endpoints) == 1
-    assert config.external_endpoints[0].model_name == "qwen3-30b"
-    assert config.external_endpoints[0].api_key_env == "MY_KEY"
 
 
 def test_parse_model_server_args_populated():
@@ -92,7 +72,6 @@ def test_parse_model_server_args_populated():
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     sa = config.models["coder"].server_args
@@ -115,7 +94,6 @@ def test_parse_model_server_args_absent():
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     assert config.models["coder"].server_args is None
@@ -132,7 +110,6 @@ def test_parse_model_server_args_partial():
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     sa = config.models["coder"].server_args

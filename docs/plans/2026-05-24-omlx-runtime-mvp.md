@@ -4,9 +4,9 @@
 
 **Goal:** Build a dev-only Thunder Forge MVP that runs one MLX artifact through oMLX on `msm3` from oMLX's default model directory, then exposes it through a small OpenAI-compatible frontend on `studio`.
 
-**Architecture:** Thunder Forge remains the control plane. oMLX is modeled as a node-level daemon on `msm3`, not as one service per model. `studio` is the dev frontend/future cache hub. `msm4` remains dedicated to direct oMLX/Hindsight and `rock` production is not touched. The first operator interface is CLI with stable JSON and dry-run/apply semantics; API, MCP, web UI, PostgreSQL, and queues are deferred until the simpler shape is insufficient. After the frontend smoke tests, Olla plus a minimal Thunder Forge edge is the preferred MVP frontend direction; LiteLLM remains the production-proven fallback/baseline.
+**Architecture:** Thunder Forge remains the control plane. oMLX is modeled as a node-level daemon on `msm3`, not as one service per model. `studio` is the dev frontend/future cache hub. `msm4` remains dedicated to direct oMLX/Hindsight and `rock` production is not touched. The first operator interface is CLI with stable JSON and dry-run/apply semantics; API, MCP, web UI, PostgreSQL, and queues are deferred until the simpler shape is insufficient. Olla plus a minimal Thunder Forge edge is the MVP frontend direction.
 
-**Tech Stack:** Python 3.12+, Typer, pytest, httpx, existing Thunder Forge SSH helpers, oMLX CLI/server, generated Olla config, minimal TF edge, optional Caddy ingress snippet, optional LiteLLM baseline route generation.
+**Tech Stack:** Python 3.12+, Typer, pytest, httpx, existing Thunder Forge SSH helpers, oMLX CLI/server, generated Olla config, minimal TF edge, optional Caddy ingress snippet.
 
 ---
 
@@ -64,7 +64,7 @@
 
 **Steps:**
 1. Read current CLI command definitions.
-2. Read config models and LiteLLM generation.
+2. Read config models and Olla generation.
 3. Read health check implementation.
 4. Read model sync/download implementation.
 5. Write brief implementation notes before changing code.
@@ -88,7 +88,7 @@ Add tests for parsing a node like:
 nodes:
   msm3:
     host: msm3-wifi.lan
-    fabric_host: msm3-fabric
+    fabric_host: true
     runtime:
       type: omlx
       port: 8018
@@ -98,7 +98,7 @@ Assertions:
 
 ```python
 assert node.host == "msm3-wifi.lan"
-assert node.fabric_host == "msm3-fabric"
+assert node.fabric_host is True
 assert node.runtime.type == "omlx"
 assert node.runtime.port == 8018
 assert node.runtime.model_dir is None  # omitted means oMLX default ~/.omlx/models
@@ -126,7 +126,7 @@ Expected: PASS.
 
 ## Task 4: Add oMLX direct health client
 
-**Objective:** Check oMLX node daemon health over HTTP, independently of LiteLLM.
+**Objective:** Check oMLX node daemon health over HTTP before routing through Olla.
 
 **Files:**
 - Create: `src/thunder_forge/cluster/omlx.py`
@@ -194,7 +194,7 @@ Expected output includes:
 node: msm3
 runtime: omlx
 management_host: msm3-wifi.lan
-fabric_host: msm3-fabric
+fabric_host: true
 base_url: http://msm3-wifi.lan:8018
 health: ok
 ```
@@ -294,15 +294,15 @@ uv run thunder-forge artifact download --model mlx-community/Qwen3-1.7B-4bit --a
 
 ```bash
 uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node msm3 --dry-run
-uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node msm3 --use-fabric --dry-run
+uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node msm3 --transport fabric --dry-run
 ```
 
 **Behavior:**
 
 - Source is always studio oMLX model directory (`~/.omlx/models/<model-dir>/`).
 - Destination is the selected node oMLX model directory (`<node_home>/.omlx/models/<model-dir>/`).
-- Default transport host is management host (`msm3-wifi.lan`).
-- `--use-fabric` uses configured `fabric_host` when present.
+- Default `auto` transport probes fabric only when `fabric_host: true`, then falls back to management (`msm3-wifi.lan`).
+- `--transport fabric` requires `fabric_host: true` and fails if no reachable link-local fabric address is discovered.
 - If the studio oMLX model directory is missing, fail with `download_to_studio_omlx` guidance rather than importing from the node.
 - Default to dry-run; `--apply` performs rsync.
 
@@ -363,19 +363,19 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 - Direct responses:
 - JSON-ish output:
 - Internal token cleanliness:
-- LiteLLM route:
-- LiteLLM chat:
+- Olla route:
+- Olla chat:
 - Decision:
 - Notes:
 ```
 
-## Task 12: Add optional generated LiteLLM baseline route after direct smoke passes
+## Task 12: Generate Olla route after direct smoke passes
 
-**Objective:** Expose the selected model through the proven/current Thunder Forge frontend baseline under a test name after direct oMLX is healthy. This validates the generated-route approach but does not decide the final TF v2 frontend.
+**Objective:** Expose the selected model through generated Olla config under a stable role alias after direct oMLX is healthy.
 
 **Files:**
 - Modify: config generation code after direct runtime path exists.
-- Modify/create tests around LiteLLM generation.
+- Modify/create tests around Olla generation.
 
 **Route name pattern:**
 
@@ -383,7 +383,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 <model-short-name>-omlx-msm3-test
 ```
 
-**Guardrail:** Do not modify production LiteLLM config or Hindsight config.
+**Guardrail:** Do not modify production Hindsight config.
 
 ## Task 13: Spike `openziti/llm-gateway` as lighter frontend/balancer alternative
 
@@ -405,7 +405,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 - The minimal path does not provide LiteLLM-style public aliasing. TF v2 MVP accepts real oMLX model ids plus naming convention and `/v1/models` discovery.
 - Per-request endpoint/node attribution is not present in observed request metrics and is a post-MVP gap unless patched.
 
-**Decision after later Olla smoke:** `openziti/llm-gateway` is a useful simplest-known-green baseline, but Olla is the preferred router/balancer candidate because it proved alias rewrite, sticky sessions, failover exclusion, and endpoint attribution. LiteLLM stays as production-proven fallback/baseline.
+**Decision after later Olla smoke:** `openziti/llm-gateway` is a useful simplest-known-green baseline, but Olla is the preferred router/balancer candidate because it proved alias rewrite, sticky sessions, failover exclusion, and endpoint attribution.
 
 ## Task 14: Generate Olla dev config and smoke command
 
@@ -507,7 +507,7 @@ uv run thunder-forge runtime install --node msm3 --apply
 }
 ```
 
-**Guardrail:** Start as a document/contract. Do not add PostgreSQL, log ingestion, or a web dashboard until the direct runtime and LiteLLM route are working and we know which data already exists in LiteLLM/oMLX logs.
+**Guardrail:** Start as a document/contract. Do not add PostgreSQL, log ingestion, or a web dashboard until the direct runtime and Olla route are working and we know which data already exists in TF edge/Olla/oMLX logs.
 
 ## Final verification
 

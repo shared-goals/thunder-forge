@@ -6,13 +6,13 @@ Draft, agreed direction. This document describes the first dev-only Thunder Forg
 
 ## Context
 
-Thunder Forge currently has a proven production implementation on `rock`, using LiteLLM plus per-model MLX services managed over SSH/launchd. That implementation remains the library of working procedures: configuration generation, SSH orchestration, launchd service management, health checks, model syncing, and LiteLLM integration.
+Thunder Forge currently has a proven production implementation on `rock`, using per-model MLX services managed over SSH/launchd. That implementation remains a library of operational techniques, but TF v2 should not keep its router/config fallback shape.
 
 For the next architecture, `shag@studio` is the development operator and `studio` is the development frontend/cache hub. Production `rock` must not be used for development work. Later, the control plane can move back to the Armbian `rock` server, while `studio` can remain the cache hub because it is Thunderbolt-connected to the `msm1`-`msm4` inference nodes.
 
 The final product expectation is broader than this MVP: Thunder Forge should become a controlled compute resource for the Shared Goals platform, `whattodo`, and `text-forge` workloads. It should make model choice, model freshness, node readiness, routing, utilization, and auditability visible to an operator without requiring a web UI for every operation.
 
-oMLX is treated as a node-level runtime daemon: one oMLX server per inference node, serving one or more local models from a model directory. Thunder Forge remains the control plane. After the frontend smoke tests, the MVP router direction is Olla plus a minimal Thunder Forge edge; LiteLLM remains the proven production baseline/fallback, not the preferred fresh TF v2 frontend.
+oMLX is treated as a node-level runtime daemon: one oMLX server per inference node, serving one or more local models from a model directory. Thunder Forge remains the control plane. The MVP router direction is Olla plus a minimal Thunder Forge edge.
 
 ## Current node split
 
@@ -23,13 +23,13 @@ oMLX is treated as a node-level runtime daemon: one oMLX server per inference no
 
 ## MVP Goal
 
-Run one MLX artifact on `msm3` through oMLX using oMLX's default model directory without overriding `--model-dir`, prove the node-runtime abstraction from `studio`, then optionally expose it through a dev LiteLLM route:
+Run one MLX artifact on `msm3` through oMLX using oMLX's default model directory without overriding `--model-dir`, prove the node-runtime abstraction from `studio`, then expose it through Olla and TF edge:
 
 ```text
-Hermes/operator -> Thunder Forge dev repo on studio -> oMLX daemon on msm3 -> optional LiteLLM dev route on studio
+Hermes/operator -> Thunder Forge dev repo on studio -> oMLX daemon on msm3 -> Olla -> TF edge
 ```
 
-The first proof does not need multi-node scheduling or a custom cache topology. It should prove that Thunder Forge can inspect or prepare a `shag`-owned model under the oMLX default model directory on `msm3`, resolve a usable model directory, start or verify oMLX, smoke-test direct access, and only then generate a LiteLLM route if the direct path is healthy.
+The first proof does not need multi-node scheduling or a custom cache topology. It should prove that Thunder Forge can inspect or prepare a `shag`-owned model under the oMLX default model directory on `msm3`, resolve a usable model directory, start or verify oMLX, smoke-test direct access, and then generate Olla routing from Thunder Forge desired state.
 
 ## Operator expectations
 
@@ -65,12 +65,12 @@ The first proof does not need multi-node scheduling or a custom cache topology. 
   - direct oMLX smoke tests pass.
 - Network identity separation:
   - `msm3-wifi.lan` is the stable management/bootstrap path via normal LAN/DNS;
-  - future Thunderbolt/fabric paths are point-to-point and must not be assumed to exist under `.lan` DNS; use explicit local aliases such as `msm3-fabric` only after the interface and host mapping are configured.
-- LiteLLM route generation for a temporary dev model name after the direct oMLX path is healthy.
+  - future Thunderbolt/fabric paths are point-to-point and must not be assumed to exist under `.lan` DNS; Thunder Forge should dynamically probe link-local fabric addresses when fabric probing is enabled.
+- Olla route generation for stable role aliases after the direct oMLX path is healthy.
 - Compatibility evidence for memory/agent-like requests:
   - clean final output, no leaked internal channel tokens;
   - stable JSON-ish short outputs;
-  - acceptable direct and LiteLLM-mediated latency;
+  - acceptable direct and Olla-mediated latency;
   - no known MLX stream/thread crashes.
 
 ### Out of scope
@@ -99,7 +99,7 @@ downloads or verifies the selected MLX artifact directly under the oMLX default 
 syncs the selected oMLX model directory to `msm3`,
 starts or verifies the oMLX daemon,
 smoke-tests direct oMLX access,
-and only then returns either a direct endpoint or a temporary LiteLLM model id for development testing.
+and only then returns either a direct endpoint or an Olla/TF-edge alias for development testing.
 ```
 
 ## Daily operations expectations
@@ -129,7 +129,7 @@ studio
 
 msm3
   stable management path: msm3-wifi.lan
-  desired future point-to-point fabric path: explicit local alias such as msm3-fabric, not configured yet
+  desired future point-to-point fabric path: dynamic link-local discovery when `fabric_host: true`
 
   omlx serve --host 0.0.0.0 --port <dev-port>
     # uses oMLX default model directory: /Users/shag/.omlx/models
@@ -181,7 +181,6 @@ A separate design sketch proposed a larger rebuild around FastAPI, PostgreSQL, S
 
 Accepted for direction:
 
-- LiteLLM remains the proven gateway/router/load-balancer fallback from the current production stack.
 - Olla plus a minimal TF edge is the chosen MVP frontend direction after smoke testing; see ADR 0002.
 - oMLX should run on each inference node as the node runtime.
 - Thunder Forge owns nodes, models, placements, reconcile, and auditability.
@@ -193,4 +192,4 @@ Deferred by KISS/DRY/YAGNI:
 - PostgreSQL/Alembic schema until file-backed desired state becomes insufficient.
 - React/shadcn UI until CLI/API summaries are not enough for operations.
 - Queue frameworks such as Arq/RQ until simple synchronous or lightweight background operations are insufficient.
-- Full LiteLLM DB-backed mutation flow until read-only deployment visibility and dry-run reconciliation are stable.
+- Database-backed router mutation flow until read-only deployment visibility and dry-run reconciliation are stable.

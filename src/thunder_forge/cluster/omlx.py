@@ -138,7 +138,7 @@ def check_omlx_health(
     timeout: float = 5.0,
     transport: httpx.BaseTransport | None = None,
 ) -> OmlxHealthResult:
-    """Probe an oMLX server directly, without going through LiteLLM."""
+    """Probe an oMLX server directly."""
     normalized_base_url = base_url.rstrip("/")
     result = OmlxHealthResult(base_url=normalized_base_url)
 
@@ -178,7 +178,7 @@ def smoke_omlx_chat(
     timeout: float = 30.0,
     transport: httpx.BaseTransport | None = None,
 ) -> OmlxSmokeResult:
-    """Run a minimal direct oMLX chat smoke test, without going through LiteLLM."""
+    """Run a minimal direct oMLX chat smoke test."""
     normalized_base_url = base_url.rstrip("/")
     result = OmlxSmokeResult(base_url=normalized_base_url, model=model)
 

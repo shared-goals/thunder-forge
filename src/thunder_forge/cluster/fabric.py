@@ -4,18 +4,98 @@ from __future__ import annotations
 
 import ipaddress
 import re
-import socket
 import subprocess
+from dataclasses import dataclass
 
 
-def resolve_fabric_host(host: str, *, timeout: int = 2) -> str | None:
-    """Resolve and lightly validate a configured fabric host alias/IP."""
-    address = _resolve_host_to_address(host)
-    if address is None or not _is_acceptable_fabric_address(address):
-        return None
-    if not _ping(address, timeout=timeout):
-        return None
-    return address
+@dataclass(frozen=True)
+class TransportPlan:
+    requested_transport: str
+    management_host: str
+    transport_host: str
+    resolved_transport_host: str
+    fabric_fallback: str = ""
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+    @property
+    def uses_fabric(self) -> bool:
+        return self.ok and self.transport_host != self.management_host
+
+
+def build_transport_plan(
+    *,
+    requested_transport: str,
+    management_host: str,
+    node_user: str,
+    fabric_host: bool = False,
+) -> TransportPlan:
+    """Select the best sync transport for a node.
+
+    ``fabric_host`` is a boolean config flag: true enables dynamic
+    Thunderbolt/link-local probing, false disables it. ``auto`` probes only when
+    enabled and falls back visibly to the management host. ``fabric`` fails
+    instead of falling back, because the caller explicitly requested fabric
+    transport.
+    """
+    if requested_transport not in {"auto", "fabric", "management"}:
+        return TransportPlan(
+            requested_transport=requested_transport,
+            management_host=management_host,
+            transport_host=management_host,
+            resolved_transport_host=management_host,
+            error="--transport must be one of: auto, fabric, management",
+        )
+
+    if requested_transport == "management":
+        return TransportPlan(
+            requested_transport=requested_transport,
+            management_host=management_host,
+            transport_host=management_host,
+            resolved_transport_host=management_host,
+        )
+
+    if not fabric_host:
+        error = "fabric probe disabled for node" if requested_transport == "fabric" else ""
+        return TransportPlan(
+            requested_transport=requested_transport,
+            management_host=management_host,
+            transport_host=management_host,
+            resolved_transport_host=management_host,
+            error=error,
+        )
+
+    resolved_fabric_host = discover_link_local_fabric_host(
+        management_host=management_host,
+        node_user=node_user,
+    )
+    if resolved_fabric_host is not None:
+        return TransportPlan(
+            requested_transport=requested_transport,
+            management_host=management_host,
+            transport_host=resolved_fabric_host,
+            resolved_transport_host=resolved_fabric_host,
+        )
+
+    if requested_transport == "fabric":
+        return TransportPlan(
+            requested_transport=requested_transport,
+            management_host=management_host,
+            transport_host=management_host,
+            resolved_transport_host=management_host,
+            error="no reachable fabric address discovered",
+        )
+
+    return TransportPlan(
+        requested_transport=requested_transport,
+        management_host=management_host,
+        transport_host=management_host,
+        resolved_transport_host=management_host,
+        fabric_fallback="dynamic probe unresolved",
+    )
 
 
 def discover_link_local_fabric_host(
@@ -55,17 +135,6 @@ def discover_link_local_fabric_host(
     return None
 
 
-def _resolve_host_to_address(host: str) -> str | None:
-    try:
-        return str(ipaddress.ip_address(host))
-    except ValueError:
-        pass
-    try:
-        return socket.gethostbyname(host)
-    except OSError:
-        return None
-
-
 def _extract_link_local_ipv4(text: str) -> list[str]:
     addresses: list[str] = []
     for match in re.finditer(r"\binet\s+(169\.254\.\d{1,3}\.\d{1,3})\b", text):
@@ -86,17 +155,6 @@ def _ssh_hostname_check(address: str, *, node_user: str, timeout: int) -> bool:
             f"{node_user}@{address}",
             "hostname",
         ],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=timeout + 1,
-    )
-    return result.returncode == 0
-
-
-def _ping(address: str, *, timeout: int) -> bool:
-    result = subprocess.run(
-        ["ping", "-c", "1", "-W", str(timeout * 1000), address],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

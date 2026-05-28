@@ -1,5 +1,5 @@
 # ── Model registry ──────────────────────────────────
-# Add new models here. They become available for assignment.
+# Add new models here. They become available to runtime_routes.
 # Source types:
 #   huggingface  — pre-converted MLX weights from any HF repo
 #   convert      — auto-convert + quantize any HF model to MLX
@@ -44,18 +44,13 @@ models:
   memory:
     source:
       type: huggingface
-      repo: "lmstudio-community/gpt-oss-20b-MLX-8bit"
+      repo: "mlx-community/gpt-oss-20b-MXFP4-Q8"
       revision: "main"
-    disk_gb: 21.0
-    kv_per_32k_gb: 8.0
+    disk_gb: 11.0
+    ram_gb: 14.0
+    kv_per_32k_gb: 6.0
     max_context: 131072
-    serving: mlx-openai-server
-    extra_args:
-      - --reasoning-parser
-      - harmony
-      - --tool-call-parser
-      - harmony
-    notes: "Hindsight LLM (retain/reflect/consolidation). Recommended by Hindsight benchmarks. Requires mlx-openai-server, not standard oMLX serve."
+    notes: "Hindsight LLM role. Standard oMLX serve; reasoning models may return reasoning_content. Canonical role alias: memory."
 
 # ── Nodes ──────────────────────────────────────────
 # Per-node host may be a DNS name or IP address. Prefer .lan FQDNs.
@@ -63,6 +58,11 @@ models:
 # then $USER (current OS user). Role is "node" (compute) or "gateway" (infra/hub).
 nodes:
   rock: { host: "rock.lan", ram_gb: 32, role: gateway }
+
+  # Current rollout state:
+  # - msm1/msm2 are TF v1 production nodes and migrate after msm3 is stable.
+  # - msm3 is the dedicated TF v2 dev node.
+  # - msm4 is direct oMLX for Hindsight today and migrates last.
 
   msm1:
     host: "msm1-wifi.lan"
@@ -84,7 +84,8 @@ nodes:
 
   msm3:
     host: "msm3-wifi.lan"
-    fabric_host: "msm3-fabric"
+    # Boolean: probe Thunderbolt/fabric dynamically from the management host.
+    fabric_host: true
     ram_gb: 128
     role: node
     user: shag
@@ -92,77 +93,62 @@ nodes:
       type: omlx
       port: 8018
 
-  # msm4: reserved — dedicated direct oMLX node for Hindsight
-  # (bypasses Olla cluster, managed separately)
+  # msm4: enable when migrating direct Hindsight oMLX into TF v2.
   # host: "msm4-wifi.lan"
   # ram_gb: 128
   # role: node
   # user: shag
+  # runtime:
+  #   type: omlx
+  #   port: 8018
 
-# ── Node assignments ────────────────────────────────
-# Memory + Coder (msm1, msm2) or Memory + Agent (msm3).
+# ── Olla runtime routes ─────────────────────────────
+# Single TF v2 source of truth for serving aliases.
+# Canonical public aliases: memory, coder, agent.
+# Use memory for the Hindsight LLM; do not add a second Hindsight memory alias.
+# Target spread: Memory + Coder (msm1, msm2) or Memory + Agent (msm3, msm4).
 # Olla LRU manages active model loading — not all models loaded simultaneously.
-# Budget: memory ~12GB + coder/agent up to ~90GB = ~102GB of 110GB usable.
-assignments:
-  msm1:
-    - model: memory
-      role: memory
-    - model: coder
-      role: coder
-
-  msm2:
-    - model: memory
-      role: memory
-    - model: coder
-      role: coder
-
-  msm3:
-    - model: memory
-      role: memory
-    - model: agent-qwen3.6
-      role: agent
-    - model: agent-qwen3.5
-      role: agent
-
-# ── Node-level runtime routes ───────────────────────
-# Optional dev routes for node runtimes such as oMLX. These expose a model
-# already served by the node runtime through the generated LiteLLM config.
+# Each node has 128GB RAM. Budget memory at ~20GB runtime RAM and coder/agent
+# at ~40-90GB runtime RAM, leaving OS/MLX/KV-cache headroom to prevent swap.
+# Stage migrations after msm3 is stable: msm1, then msm2, then msm4.
 runtime_routes:
-  # Coder (msm1, msm2)
-  - model_name: qwen3-coder-next-omlx-msm1
+  - model_name: memory
     runtime: omlx
     node: msm1
-    model: Qwen3-Coder-Next-4bit
+    model: hf--mlx-community--gpt-oss-20b-MXFP4-Q8
 
-  - model_name: qwen3-coder-next-omlx-msm2
+  - model_name: memory
     runtime: omlx
     node: msm2
-    model: Qwen3-Coder-Next-4bit
+    model: hf--mlx-community--gpt-oss-20b-MXFP4-Q8
 
-  # Agent candidates (msm3 — benchmark to select best)
-  - model_name: qwen3.6-35b-agent-omlx-msm3
+  - model_name: memory
     runtime: omlx
     node: msm3
-    model: Qwen3.6-35B-A3B-4bit
+    model: hf--mlx-community--gpt-oss-20b-MXFP4-Q8
 
-  - model_name: qwen3.5-122b-agent-omlx-msm3
+  # - model_name: memory
+  #   runtime: omlx
+  #   node: msm4
+  #   model: hf--mlx-community--gpt-oss-20b-MXFP4-Q8
+
+  - model_name: coder
+    runtime: omlx
+    node: msm1
+    model: hf--mlx-community--Qwen3-Coder-Next-4bit
+
+  - model_name: coder
+    runtime: omlx
+    node: msm2
+    model: hf--mlx-community--Qwen3-Coder-Next-4bit
+
+  - model_name: agent
     runtime: omlx
     node: msm3
-    model: Qwen3.5-122B-A10B-4bit
+    model: hf--mlx-community--Qwen3.6-35B-A3B-4bit
 
-  # Memory (separate mlx-openai-server process, not routed through Olla)
-  # Deployed via `thunder-forge deploy` with `serving: mlx-openai-server`
-  # - model_name: gpt-oss-20b-memory-omlx-msm1
-  #   runtime: mlx-openai-server
-  #   node: msm1
-  #   model: gpt-oss-20b-MLX-8bit
-  #
-  # - model_name: gpt-oss-20b-memory-omlx-msm2
-  #   runtime: mlx-openai-server
-  #   node: msm2
-  #   model: gpt-oss-20b-MLX-8bit
-  #
-  # - model_name: gpt-oss-20b-memory-omlx-msm3
-  #   runtime: mlx-openai-server
-  #   node: msm3
-  #   model: gpt-oss-20b-MLX-8bit
+  - model_name: agent-heavy
+    runtime: omlx
+    node: msm3
+    model: hf--mlx-community--Qwen3.5-122B-A10B-4bit
+

@@ -16,7 +16,7 @@ def _make_runtime_node(home_dir="/Users/shag", port=8018, model_dir=None):
     runtime = NodeRuntime(type=RuntimeType.OMLX, port=port, model_dir=model_dir)
     return Node(
         host="msm3-wifi.lan",
-        fabric_host=None,
+        fabric_host=False,
         ram_gb=128,
         user="shag",
         role="node",
@@ -62,7 +62,7 @@ def test_generate_launchd_plist_explicit_model_dir() -> None:
 def test_generate_launchd_plist_errors_without_runtime() -> None:
     node = Node(
         host="msm3-wifi.lan",
-        fabric_host=None,
+        fabric_host=False,
         ram_gb=128,
         user="shag",
         role="node",

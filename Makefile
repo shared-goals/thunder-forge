@@ -5,8 +5,8 @@ help:
 	@echo "  test        Run pytest"
 	@echo "  lint        Run ruff"
 	@echo "  check       Run tests + lint"
-	@echo "  config      Generate LiteLLM config from node-assignments"
-	@echo "  olla-config Generate Olla config from node-assignments"
+	@echo "  config      Generate Olla config from TF cluster config"
+	@echo "  olla-config Generate Olla config from TF cluster config"
 
 sync:
 	uv sync --upgrade
@@ -20,9 +20,9 @@ lint:
 check: test lint
 
 config:
-	uv run thunder-forge generate-config --apply
+	uv run thunder-forge generate-olla-config
 
 olla-config:
-	uv run thunder-forge generate-olla-config --apply
+	uv run thunder-forge generate-olla-config
 
 .DEFAULT_GOAL := help

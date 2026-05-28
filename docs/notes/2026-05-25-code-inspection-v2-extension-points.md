@@ -45,7 +45,7 @@ Reasons:
 ## Initial implementation direction
 
 - Extend `Node` minimally with:
-  - `fabric_host: str | None`
+  - `fabric_host: bool`
   - `runtime: NodeRuntime | None`
 - Add `RuntimeType` / `NodeRuntime` in `config.py`.
 - Keep `runtime.model_dir is None` as the normal oMLX default: serve command should omit `--model-dir` unless explicitly configured.

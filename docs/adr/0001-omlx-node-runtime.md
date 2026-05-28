@@ -8,7 +8,7 @@ Accepted for MVP design.
 
 The current Thunder Forge implementation on `rock` is a working production system and should be treated as a library of proven procedures, not as disposable legacy. It contains useful implementation patterns for:
 
-- LiteLLM configuration generation;
+- generated router configuration;
 - SSH-based node operations;
 - launchd service management;
 - model download/sync flows;
@@ -32,7 +32,7 @@ The long-term product target is a controlled compute resource for Shared Goals p
 The network path has two distinct roles:
 
 - `msm3-wifi.lan` is stable and suitable for management/bootstrap, but slow for large model movement. It belongs to the normal LAN/DNS world.
-- Future Thunderbolt/fabric links are point-to-point between `studio` and inference nodes, so they should not assume Keenetic `.lan` DNS. A local alias such as `msm3-fabric`/`studio-fabric-msm3` can be provided via `/etc/hosts`, mDNS, or another macOS-native host mapping after the interface is configured.
+- Future Thunderbolt/fabric links are point-to-point between `studio` and inference nodes, so they should not assume Keenetic `.lan` DNS. Thunder Forge should dynamically probe reachable link-local fabric addresses when fabric probing is enabled.
 
 ## Decision
 
@@ -83,7 +83,7 @@ Thunder Forge v2 will prefer strict, auditable operator channels in this order:
 - Makes later task-oriented model selection natural:
 
   ```text
-  task -> compatible model -> cache -> node -> runtime -> LiteLLM route
+  task -> compatible model -> cache -> node -> runtime -> Olla route -> TF edge
   ```
 
 - Allows oMLX to own local inference concerns: batching, model loading, cache behavior, Harmony handling, and supported API surfaces.
@@ -93,7 +93,7 @@ Thunder Forge v2 will prefer strict, auditable operator channels in this order:
 
 - Existing deployment code cannot be reused mechanically; it must be abstracted around runtime type.
 - Health checks need to distinguish node runtime health from individual model readiness.
-- LiteLLM route generation must allow many logical model names to point at one node-level base URL.
+- Olla route generation must allow stable role aliases to point at node-level oMLX runtime model ids.
 - Model directory sync semantics become more important than port allocation.
 - The first milestone depends on downloading models directly into the oMLX default model directory instead of relying on tool-specific cache layout.
 - Thunderbolt fabric setup and host mapping become separate prerequisites for the later cache-hub flow.
@@ -109,12 +109,11 @@ Preferred fresh shape:
 nodes:
   msm3:
     host: msm3-wifi.lan          # stable management/bootstrap path
-    fabric_host: msm3-fabric     # desired point-to-point alias, once configured outside LAN DNS
+    fabric_host: true            # enable dynamic point-to-point fabric probing
     role: inference
     runtime:
       type: omlx
       base_url: http://msm3-wifi.lan:8018
-      fabric_base_url: http://msm3-fabric:8018
       api_key_env: TF_NODE_API_KEY
 
 models:
@@ -133,10 +132,11 @@ models:
     runtime_compat:
       omlx: unknown
 
-assignments:
-  msm3:
-    models:
-      - qwen-dev
+runtime_routes:
+  - model_name: agent
+    runtime: omlx
+    node: msm3
+    model: hf--mlx-community--Qwen3.6-35B-A3B-4bit
 ```
 
 The exact field names are not final. The important architectural distinctions are: the node has both stable LAN management identity and future point-to-point fabric identity; oMLX runtime state is node-level; runtime models live under the oMLX default model directory and the normal `omlx serve` command should not pass `--model-dir` unless there is a deliberate reason to override it.
@@ -164,7 +164,7 @@ Rejected for oMLX MVP. It preserves the old shape but fights the runtime. oMLX i
 
 ### Replace Thunder Forge with oMLX directly
 
-Rejected. oMLX is a node inference runtime, not the whole cluster control plane. Thunder Forge still owns cross-node orchestration, caching policy, model placement, and LiteLLM integration.
+Rejected. oMLX is a node inference runtime, not the whole cluster control plane. Thunder Forge still owns cross-node orchestration, caching policy, model placement, and route generation.
 
 ### Use Kubernetes/LLMKube-style orchestration
 
@@ -180,10 +180,10 @@ Rejected for the MVP. `studio` is the primary source for artifact movement and t
 
 ### Decide the final frontend before measurement
 
-Accepted for MVP direction after measurement, with constraints. LiteLLM remains the proven production baseline from the current Thunder Forge stack, but it is not the preferred fresh TF v2 frontend if a smaller layer is enough. The frontend comparison is recorded in `docs/notes/2026-05-26-frontend-balancer-alternatives.md`; the `openziti/llm-gateway` spike validated a tiny OpenAI-compatible proxy with virtual API keys and Prometheus metrics, and the later Olla smoke validated a stronger router/balancer shape: alias rewriting, sticky sessions, failover exclusion, and per-response endpoint attribution.
+Accepted for MVP direction after measurement, with constraints. The frontend comparison is recorded in `docs/notes/2026-05-26-frontend-balancer-alternatives.md`; the `openziti/llm-gateway` spike validated a tiny OpenAI-compatible proxy with virtual API keys and Prometheus metrics, and the later Olla smoke validated a stronger router/balancer shape: alias rewriting, sticky sessions, failover exclusion, and per-response endpoint attribution.
 
 The selected MVP frontend direction is recorded in `docs/adr/0002-olla-router-with-tf-edge.md`: Olla owns routing/balancing, while a minimal Thunder Forge edge owns root `/v1/*`, static client API-key validation, client identity/accounting envelope, and stable session id behavior. Caddy remains the homelab external ingress and may route both external and internal traffic if uniform ingress becomes useful.
 
 ### Adopt a full FastAPI/PostgreSQL/React rebuild immediately
 
-Deferred for MVP. The proposed control-plane shape is directionally useful: nodes, models, placements, reconcile, jobs/audit, LiteLLM sync, and first-class CLI. But adding PostgreSQL, Alembic, a React/shadcn UI, and a job framework before direct oMLX smoke and dry-run reconcile work would violate KISS/YAGNI. These components should be introduced only when the simpler file-backed CLI/API architecture proves insufficient.
+Deferred for MVP. The proposed control-plane shape is directionally useful: nodes, models, placements, reconcile, jobs/audit, route sync, and first-class CLI. But adding PostgreSQL, Alembic, a React/shadcn UI, and a job framework before direct oMLX smoke and dry-run reconcile work would violate KISS/YAGNI. These components should be introduced only when the simpler file-backed CLI/API architecture proves insufficient.

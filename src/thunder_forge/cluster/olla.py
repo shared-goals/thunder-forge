@@ -169,10 +169,10 @@ def _generate_olla_config_to_file() -> Path | None:
     from thunder_forge.cluster.config import find_repo_root, generate_olla_config, load_cluster_config
 
     repo_root = find_repo_root()
-    assignments_path = repo_root / "configs" / "node-assignments.yaml"
-    if not assignments_path.exists():
+    cluster_config_path = repo_root / "configs" / "node-assignments.yaml"
+    if not cluster_config_path.exists():
         return None
-    config = load_cluster_config(assignments_path)
+    config = load_cluster_config(cluster_config_path)
     content = generate_olla_config(config)
     config_path = repo_root / "configs" / "olla-config.yaml"
     config_path.write_text(content)
@@ -219,7 +219,7 @@ def dev_smoke_olla(
     # Step 1: generate config
     config_path = _generate_olla_config_to_file()
     if config_path is None:
-        result.errors.append("Failed to generate olla-config.yaml: node-assignments.yaml not found")
+        result.errors.append("Failed to generate olla-config.yaml: TF cluster config not found")
         return result
     result.config_generated = True
     result.config_path = str(config_path)
