@@ -136,7 +136,7 @@ nodes:
     # Boolean: probe Thunderbolt/fabric dynamically from the management host.
     fabric_host: true
     ram_gb: 128
-    role: inference
+    roles: [inference]
     user: shag
     admin_user: admin
     runtime:

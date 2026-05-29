@@ -30,7 +30,7 @@ def _cluster_config(
 def test_edge_smoke_cli_reads_api_key_from_env_and_prints_summary(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
-    monkeypatch.setenv("TF_USERS", '{"client-a":"dev-secret"}')
+    monkeypatch.setenv("TF_USER_CLIENT_A", "dev-secret")
     monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
     monkeypatch.setattr(
         cli_module,
@@ -78,7 +78,7 @@ def test_edge_smoke_cli_reads_api_key_from_env_and_prints_summary(monkeypatch) -
 def test_edge_smoke_cli_fails_when_client_api_key_is_missing(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
-    monkeypatch.delenv("TF_USERS", raising=False)
+    monkeypatch.delenv("TF_USER_CLIENT_A", raising=False)
     monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
 
     result = runner.invoke(
@@ -96,14 +96,15 @@ def test_edge_smoke_cli_fails_when_client_api_key_is_missing(monkeypatch) -> Non
     )
 
     assert result.exit_code == 1
-    assert "Error: TF_USERS does not contain client 'client-a'" in result.stderr
+    assert "Error: TF_USER_CLIENT_A is not set" in result.stderr
 
 
 def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     captured: dict[str, object] = {}
-    monkeypatch.setenv("TF_USERS", '{"client-a":"secret-a","client-b":"secret-b"}')
+    monkeypatch.setenv("TF_USER_CLIENT_A", "secret-a")
+    monkeypatch.setenv("TF_USER_CLIENT_B", "secret-b")
     monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
 
     def fake_serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
@@ -133,9 +134,9 @@ def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkey
     config = captured["config"]
     assert isinstance(config, EdgeProxyConfig)
     assert config.olla_base_url == "http://127.0.0.1:40115"
-    assert config.clients_by_key["secret-a"].client_id == "client-a"
-    assert config.clients_by_key["secret-b"].client_id == "client-b"
-    assert "clients: client-a, client-b" in result.stdout
+    assert config.clients_by_key["secret-a"].client_id == "client_a"
+    assert config.clients_by_key["secret-b"].client_id == "client_b"
+    assert "clients: client_a, client_b" in result.stdout
     assert "api_key_count: 2" in result.stdout
     assert "secret-a" not in result.stdout
     assert "secret-b" not in result.stdout
@@ -145,7 +146,7 @@ def test_edge_serve_cli_uses_config_defaults(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     captured: dict[str, object] = {}
-    monkeypatch.setenv("TF_USERS", '{"client-a":"secret-a"}')
+    monkeypatch.setenv("TF_USER_CLIENT_A", "secret-a")
     monkeypatch.setattr(
         cli_module,
         "_load_config",
@@ -176,7 +177,7 @@ def test_edge_smoke_cli_uses_config_default(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     captured: dict[str, str] = {}
-    monkeypatch.setenv("TF_USERS", '{"client-a":"dev-secret"}')
+    monkeypatch.setenv("TF_USER_CLIENT_A", "dev-secret")
     monkeypatch.setattr(
         cli_module,
         "_load_config",
@@ -214,17 +215,17 @@ def test_edge_keys_cli_generates_user_hash_without_printing_secrets(tmp_path, mo
     result = runner.invoke(app, ["edge", "keys", "--client", "client-a", "--client", "client-b"])
 
     assert result.exit_code == 0
-    assert "users_env: TF_USERS" in result.stdout
+    assert "users_env: TF_USER_" in result.stdout
     assert "client: client-a" in result.stdout
     assert "client: client-b" in result.stdout
     assert "secrets_printed: no" in result.stdout
     content = env_file.read_text()
-    assert "TF_USERS='" in content
-    assert '"client-a":"' in content
-    assert '"client-b":"' in content
-    assert "TF_EDGE_ACCESS_LOG" not in content
-    user_hash = next(line.partition("=")[2] for line in content.splitlines() if line.startswith("TF_USERS="))
-    assert user_hash not in result.stdout
+    assert "TF_USER_CLIENT_A=" in content
+    assert "TF_USER_CLIENT_B=" in content
+    for line in content.splitlines():
+        if line.startswith("TF_USER_"):
+            _, _, api_key = line.partition("=")
+            assert api_key not in result.stdout
 
 
 def test_edge_usage_cli_summarizes_access_log_by_client(tmp_path, monkeypatch) -> None:

@@ -18,7 +18,7 @@ from thunder_forge.cluster.artifacts import (
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.edge import (
-    EDGE_USERS_ENV,
+    EDGE_USER_PREFIX,
     EdgeProxyConfig,
     build_edge_clients_from_env,
     edge_api_key_from_env,
@@ -284,9 +284,9 @@ def service_setup_daemon(
         help=f"Olla base URL for edge. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
     ),
     users_env: str = typer.Option(
-        EDGE_USERS_ENV,
+        EDGE_USER_PREFIX,
         "--users-env",
-        help="Environment variable containing TF edge client API-key JSON.",
+        help="Env var prefix for per-user TF_USER_<NAME> API keys (gateway setup).",
     ),
     access_log: Path | None = typer.Option(
         None,
@@ -360,9 +360,9 @@ def service_restart(
         help=f"Olla base URL for edge. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
     ),
     users_env: str = typer.Option(
-        EDGE_USERS_ENV,
+        EDGE_USER_PREFIX,
         "--users-env",
-        help="Environment variable containing TF edge client API-key JSON.",
+        help="Env var prefix for per-user TF_USER_<NAME> API keys (service restart).",
     ),
     access_log: Path | None = typer.Option(
         None,
@@ -480,9 +480,9 @@ def edge_smoke(
         help=f"TF edge base URL. Defaults to tfconfig services.edge.port or {DEFAULT_EDGE_PORT}.",
     ),
     users_env: str = typer.Option(
-        EDGE_USERS_ENV,
+        EDGE_USER_PREFIX,
         "--users-env",
-        help="Environment variable containing client API-key JSON.",
+        help="Env var prefix for per-user TF_USER_<NAME> API keys (smoke).",
     ),
     client_id: str = typer.Option(..., "--client-id", help="Client id whose API key should be used."),
     model: str = typer.Option(..., "--model", help="Model or alias to use for the chat smoke."),
@@ -494,7 +494,7 @@ def edge_smoke(
     resolved_base_url = base_url or local_base_url(config.services.edge_port)
     env_name, api_key = edge_api_key_from_env(client_id=client_id, users_env=users_env)
     if not api_key:
-        typer.echo(f"Error: {env_name} does not contain client '{client_id}'", err=True)
+        typer.echo(f"Error: {env_name} is not set", err=True)
         raise typer.Exit(1)
 
     result = smoke_edge_contract(
@@ -529,9 +529,9 @@ def edge_keys(
     ),
     env_file: Path = typer.Option(Path(".env"), "--env-file", help="Dotenv file to update."),
     users_env: str = typer.Option(
-        EDGE_USERS_ENV,
+        EDGE_USER_PREFIX,
         "--users-env",
-        help="Environment variable containing client API-key JSON.",
+        help="Env var prefix for per-user TF_USER_<NAME> API keys (keys).",
     ),
 ) -> None:
     """Generate missing MVP TF edge API keys into a local dotenv file."""
@@ -707,9 +707,9 @@ def edge_serve(
         help=f"Olla base URL. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
     ),
     users_env: str = typer.Option(
-        EDGE_USERS_ENV,
+        EDGE_USER_PREFIX,
         "--users-env",
-        help="Environment variable containing client API-key JSON.",
+        help="Env var prefix for per-user TF_USER_<NAME> API keys (serve).",
     ),
     access_log: Path | None = typer.Option(
         None,

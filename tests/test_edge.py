@@ -47,47 +47,53 @@ def test_edge_auth_maps_valid_bearer_token_to_client_id_without_exposing_secret(
     assert "dev-secret" not in repr(result)
 
 
-def test_edge_users_json_and_multi_client_loader() -> None:
+def test_edge_users_and_multi_client_loader() -> None:
     env = {
-        "TF_USERS": '{"client-a":"secret-a","client-b":"secret-b","empty":""}',
+        "TF_USER_CLIENT_A": "secret-a",
+        "TF_USER_CLIENT_B": "secret-b",
         "OTHER_KEY": "ignored",
     }
 
-    assert parse_edge_users_json(env["TF_USERS"]) == {"client-a": "secret-a", "client-b": "secret-b"}
-    assert edge_api_key_from_env(env=env, client_id="client-a") == ("TF_USERS", "secret-a")
+    assert edge_api_key_from_env(env=env, client_id="client_a") == ("TF_USER_CLIENT_A", "secret-a")
 
     clients = load_edge_clients_from_env(env=env)
 
-    assert clients["secret-a"].client_id == "client-a"
-    assert clients["secret-b"].client_id == "client-b"
+    assert clients["secret-a"].client_id == "client_a"
+    assert clients["secret-b"].client_id == "client_b"
     assert "" not in clients
+
+
+def test_edge_users_json_parses_json_blob() -> None:
+    assert parse_edge_users_json('{"client-a":"secret-a","client-b":"secret-b","empty":""}') == {
+        "client-a": "secret-a",
+        "client-b": "secret-b",
+    }
 
 
 def test_build_edge_clients_reads_only_user_prefixed_keys() -> None:
     clients = build_edge_clients_from_env(
-        env={"TF_USERS": '{"client-a":"secret-a"}', "OTHER_KEY": "ignored-secret"},
+        env={"TF_USER_CLIENT_A": "secret-a", "OTHER_KEY": "ignored-secret"},
     )
 
-    assert clients == {"secret-a": EdgeClient(client_id="client-a")}
+    assert clients == {"secret-a": EdgeClient(client_id="client_a")}
 
 
 def test_ensure_edge_api_keys_creates_missing_keys_without_overwriting_existing(tmp_path) -> None:
     env_file = tmp_path / ".env"
-    env_file.write_text("HF_TOKEN=keep-me\nTF_USERS='{" + '"client-a":"existing-a"' + "}'\n")
+    env_file.write_text("HF_TOKEN=keep-me\nTF_USER_CLIENT_A=existing-a\n")
 
-    result = ensure_edge_api_keys(env_file=env_file, clients=["client-a", "client-b"])
+    result = ensure_edge_api_keys(env_file=env_file, clients=["client_a", "client_b"])
     content = env_file.read_text()
 
     assert result.env_file == str(env_file)
     assert [(key.client_id, key.env_name, key.status) for key in result.keys] == [
-        ("client-a", "TF_USERS", "present"),
-        ("client-b", "TF_USERS", "created"),
+        ("client_a", "TF_USER_CLIENT_A", "present"),
+        ("client_b", "TF_USER_CLIENT_B", "created"),
     ]
     assert "HF_TOKEN=keep-me" in content
-    assert "TF_USERS='" in content
-    assert '"client-a":"existing-a"' in content
-    assert '"client-b":"' in content
-    assert "TF_EDGE_ACCESS_LOG" not in content
+    assert "TF_USER_CLIENT_A=existing-a" in content
+    assert "TF_USER_CLIENT_B=" in content
+    assert "TF_USERS" not in content
     assert "existing-a" not in repr(result)
 
 

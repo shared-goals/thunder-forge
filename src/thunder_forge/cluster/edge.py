@@ -38,7 +38,7 @@ from thunder_forge.cluster.services import (
 )
 
 OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
-EDGE_USERS_ENV = "TF_USERS"
+EDGE_USER_PREFIX = "TF_USER_"
 EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
 EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
 
@@ -215,16 +215,16 @@ def parse_edge_users_json(value: str) -> dict[str, str]:
     try:
         payload = json.loads(value)
     except json.JSONDecodeError as exc:
-        msg = f"{EDGE_USERS_ENV} must be a JSON object mapping client ids to API keys"
+        msg = "TF_USERS must be a JSON object mapping client ids to API keys"
         raise ValueError(msg) from exc
     if not isinstance(payload, dict):
-        msg = f"{EDGE_USERS_ENV} must be a JSON object mapping client ids to API keys"
+        msg = "TF_USERS must be a JSON object mapping client ids to API keys"
         raise ValueError(msg)
 
     users: dict[str, str] = {}
     for raw_client_id, raw_api_key in payload.items():
         if not isinstance(raw_client_id, str) or not isinstance(raw_api_key, str):
-            msg = f"{EDGE_USERS_ENV} keys and values must be strings"
+            msg = "TF_USERS keys and values must be strings"
             raise ValueError(msg)
         client_id = validate_edge_client_id(raw_client_id)
         api_key = raw_api_key.strip()
@@ -251,30 +251,47 @@ def _decode_dotenv_value(value: str) -> str:
 def load_edge_user_keys_from_env(
     *,
     env: dict[str, str] | None = None,
-    users_env: str = EDGE_USERS_ENV,
+    users_env: str = EDGE_USER_PREFIX,
 ) -> dict[str, str]:
-    """Load the TF edge client-id -> API-key hash from the environment."""
+    """Load TF edge client-id -> API-key from per-user TF_USER_<NAME> env vars."""
     source = env if env is not None else os.environ
-    return parse_edge_users_json(source.get(users_env, ""))
+    prefix = users_env
+    result: dict[str, str] = {}
+    for key, value in source.items():
+        if key.startswith(prefix) and value.strip():
+            suffix = key[len(prefix):]
+            if suffix:
+                client_id = suffix.lower()
+                try:
+                    result[validate_edge_client_id(client_id)] = value.strip()
+                except ValueError:
+                    pass
+    return result
 
 
 def edge_api_key_from_env(
     *,
     env: dict[str, str] | None = None,
     client_id: str,
-    users_env: str = EDGE_USERS_ENV,
+    users_env: str = EDGE_USER_PREFIX,
 ) -> tuple[str, str]:
-    """Return (env_name, api_key) for one configured client id from the TF_USERS hash."""
+    """Return (env_name, api_key) for one configured client id."""
+    normalized = validate_edge_client_id(client_id)
+    # Build env var name: TF_USER_<SUFFIX> where suffix uppercases and replaces - and . with _
+    env_suffix = normalized.upper().replace("-", "_").replace(".", "_")
+    env_name = f"{users_env}{env_suffix}"
+    # Effective id used as key in the users dict (lowercased suffix)
+    effective_id = env_suffix.lower()
     users = load_edge_user_keys_from_env(env=env, users_env=users_env)
-    return users_env, users.get(validate_edge_client_id(client_id), "")
+    return env_name, users.get(effective_id, "")
 
 
 def load_edge_clients_from_env(
     *,
     env: dict[str, str] | None = None,
-    users_env: str = EDGE_USERS_ENV,
+    users_env: str = EDGE_USER_PREFIX,
 ) -> dict[str, EdgeClient]:
-    """Load all TF edge clients from the TF_USERS client-id -> API-key hash."""
+    """Load all TF edge clients from TF_USER_<NAME> env vars."""
     clients: dict[str, EdgeClient] = {}
     for client_id, api_key in load_edge_user_keys_from_env(env=env, users_env=users_env).items():
         clients[api_key] = EdgeClient(client_id=client_id)
@@ -284,9 +301,9 @@ def load_edge_clients_from_env(
 def build_edge_clients_from_env(
     *,
     env: dict[str, str] | None = None,
-    users_env: str = EDGE_USERS_ENV,
+    users_env: str = EDGE_USER_PREFIX,
 ) -> dict[str, EdgeClient]:
-    """Build edge auth mapping from the configured TF_USERS hash."""
+    """Build edge auth mapping from TF_USER_<NAME> env vars."""
     return load_edge_clients_from_env(env=env, users_env=users_env)
 
 
@@ -326,37 +343,34 @@ def ensure_edge_api_keys(
     *,
     env_file: Path,
     clients: list[str] | tuple[str, ...],
-    users_env: str = EDGE_USERS_ENV,
+    users_env: str = EDGE_USER_PREFIX,
 ) -> EdgeKeySetupResult:
-    """Create missing local TF edge API keys in a single dotenv JSON hash without printing secrets."""
+    """Create missing local TF edge API keys as per-user TF_USER_<NAME> lines without printing secrets."""
     env_file.parent.mkdir(parents=True, exist_ok=True)
     if env_file.exists():
         lines = env_file.read_text().splitlines()
     else:
         lines = []
 
-    users = parse_edge_users_json(_get_env_value_from_lines(lines, users_env))
+    # Remove legacy TF_USERS JSON blob if present
+    lines = [line for line in lines if not (_m := _ENV_LINE_RE.match(line)) or _m.group("name") != "TF_USERS"]
 
     statuses: list[EdgeKeyStatus] = []
     seen_clients: set[str] = set()
     for client_id in clients:
-        normalized_client_id = validate_edge_client_id(client_id)
-        if not normalized_client_id or normalized_client_id in seen_clients:
+        normalized = validate_edge_client_id(client_id)
+        if not normalized or normalized in seen_clients:
             continue
-        seen_clients.add(normalized_client_id)
-        if normalized_client_id in users and users[normalized_client_id].strip():
+        seen_clients.add(normalized)
+        env_suffix = normalized.upper().replace("-", "_").replace(".", "_")
+        env_name = f"{users_env}{env_suffix}"
+        existing = _get_env_value_from_lines(lines, env_name)
+        if existing.strip():
             status = "present"
         else:
-            users[normalized_client_id] = secrets.token_urlsafe(32)
+            _set_or_append_env_value(lines, env_name, secrets.token_urlsafe(32), overwrite=False)
             status = "created"
-        statuses.append(EdgeKeyStatus(client_id=normalized_client_id, env_name=users_env, status=status))
-
-    _set_or_append_env_value(
-        lines,
-        users_env,
-        _quote_dotenv_value(_encode_edge_users_json(users)),
-        overwrite=True,
-    )
+        statuses.append(EdgeKeyStatus(client_id=normalized, env_name=env_name, status=status))
 
     env_file.write_text("\n".join(lines) + "\n")
     env_file.chmod(0o600)
@@ -861,7 +875,7 @@ def run_edge_service_restart(
     host: str = "127.0.0.1",
     port: int | None = None,
     olla_base_url: str | None = None,
-    users_env: str = EDGE_USERS_ENV,
+    users_env: str = EDGE_USER_PREFIX,
     access_log_path: Path = Path("logs/tf-edge-access.jsonl"),
     user: str | None = None,
     manager: str = "launchd",

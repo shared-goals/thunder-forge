@@ -90,7 +90,7 @@ def test_gateway_daemon_setup_generates_combined_sudoers(tmp_path: Path) -> None
         olla_port=40115,
         edge_port=40116,
         olla_base_url=None,
-        users_env="TF_USERS",
+        users_env="TF_USER_",
         access_log_path=Path("logs/tf-edge-access.jsonl"),
         user="shag",
         admin_user="serpo",
@@ -132,7 +132,7 @@ def test_gateway_daemon_setup_apply_verifies_with_narrow_sudoers(tmp_path: Path,
 
     result = run_gateway_daemon_setup(
         repo_root=tmp_path,
-        users_env="TF_USERS",
+        users_env="TF_USER_",
         access_log_path=Path("logs/tf-edge-access.jsonl"),
         user="shag",
         admin_user="serpo",
