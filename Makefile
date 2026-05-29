@@ -5,6 +5,7 @@ OLLA_BIN_DIR ?= .tmp/olla-bin
 OLLA_BIN ?= $(OLLA_BIN_DIR)/olla
 DAEMON_NODES ?= msm3
 DAEMON_ADMIN_USER ?=
+EDGE_CLIENT ?= serpo
 SMOKE_MODEL ?= gpt-oss-20b-MXFP4-Q8
 SMOKE_ALIAS ?= memory
 OLLA_RELEASE_BASE := https://github.com/thushan/olla/releases/download/$(OLLA_VERSION)
@@ -22,7 +23,9 @@ help:
 	@echo "  olla-restart Install Olla binary and restart local launchd service"
 	@echo "  daemon-bootstrap First-time admin bootstrap for gateway + node daemon sudoers"
 	@echo "  daemon-reinstall Reinstall/restart gateway + node daemons via narrow sudoers"
+	@echo "  daemon-smoke     Smoke all layers (runtime/Olla/edge). EDGE_CLIENT=$(EDGE_CLIENT)"
 	@echo "  full-daemon-test Reinstall daemons and run runtime/Olla/edge smoke"
+	@echo "  runtime-status   Check oMLX health on DAEMON_NODES=$(DAEMON_NODES)"
 	@echo "  config      Generate Olla config from TF cluster config"
 	@echo "  olla-config Generate Olla config from TF cluster config"
 	@echo "  edge-keys   Generate local TF edge API keys in .env"
@@ -95,10 +98,6 @@ daemon-reinstall: olla-install config
 		done
 
 daemon-smoke:
-	@if [ -z "$(EDGE_CLIENT)" ]; then \
-		echo 'Usage: make daemon-smoke EDGE_CLIENT=<client-id>'; \
-		exit 2; \
-	fi
 	@set -eu; \
 		for node in $(DAEMON_NODES); do \
 			uv run thunder-forge runtime status --node "$$node"; \
@@ -107,18 +106,19 @@ daemon-smoke:
 		uv run thunder-forge edge smoke --client-id "$(EDGE_CLIENT)" --model "$(SMOKE_ALIAS)"
 
 full-daemon-test:
-	@if [ -z "$(EDGE_CLIENT)" ]; then \
-		echo 'Usage: make full-daemon-test EDGE_CLIENT=<client-id>'; \
-		exit 2; \
-	fi
 	$(MAKE) daemon-reinstall
-	$(MAKE) daemon-smoke EDGE_CLIENT="$(EDGE_CLIENT)"
+	$(MAKE) daemon-smoke
 
 config:
 	uv run thunder-forge generate-olla-config
 
 olla-config:
 	uv run thunder-forge generate-olla-config
+
+runtime-status:
+	@for node in $(DAEMON_NODES); do \
+		uv run thunder-forge runtime status --node "$$node"; \
+	done
 
 edge-keys:
 	@if [ -z "$(EDGE_CLIENTS)" ]; then \
@@ -130,6 +130,6 @@ edge-keys:
 edge-usage:
 	uv run thunder-forge edge usage
 
-.PHONY: help sync test lint check olla-install olla-update olla-restart daemon-bootstrap daemon-reinstall daemon-smoke full-daemon-test config olla-config edge-keys edge-usage
+.PHONY: help sync test lint check olla-install olla-update olla-restart daemon-bootstrap daemon-reinstall daemon-smoke full-daemon-test runtime-status config olla-config edge-keys edge-usage
 
 .DEFAULT_GOAL := help
