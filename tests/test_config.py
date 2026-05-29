@@ -30,12 +30,12 @@ def cluster_yaml(tmp_path: Path) -> Path:
             max_context: 131072
 
         nodes:
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", roles: [gateway] }
           msm1:
             host: "msm1-wifi.lan"
             ram_gb: 128
             user: "admin"
-            role: inference
+            roles: [inference]
             admin_user: admin
             runtime: { type: omlx, port: 8018 }
             models: [coder]
@@ -78,7 +78,7 @@ def test_parse_config_admin_users() -> None:
                     "ram_gb": 128,
                     "user": "shag",
                     "admin_user": "admin",
-                    "role": "inference",
+                    "roles": ["inference"],
                 }
             },
         }
@@ -91,8 +91,8 @@ def test_parse_config_admin_users() -> None:
     assert config.nodes["msm3"].admin_user == "admin"
 
 
-def test_parse_config_rejects_role_and_roles_together() -> None:
-    with pytest.raises(ValueError, match="use either role or roles"):
+def test_parse_config_rejects_role_field() -> None:
+    with pytest.raises(ValueError, match="'role' is not supported"):
         parse_cluster_config(
             {
                 "models": {},
@@ -101,7 +101,6 @@ def test_parse_config_rejects_role_and_roles_together() -> None:
                         "host": "studio.lan",
                         "ram_gb": 128,
                         "role": "gateway",
-                        "roles": ["gateway", "cache"],
                     }
                 },
             }
@@ -123,8 +122,8 @@ def test_load_cluster_config_user_defaults(tmp_path: Path, monkeypatch: pytest.M
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          rock: { host: "rock.lan", ram_gb: 32, role: gateway }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: inference }
+          rock: { host: "rock.lan", ram_gb: 32, roles: [gateway] }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, roles: [inference] }
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
@@ -141,8 +140,8 @@ def test_load_cluster_config_rejects_legacy_roles(tmp_path: Path) -> None:
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: infra }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", roles: [infra] }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", roles: [node] }
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
@@ -170,7 +169,7 @@ def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) 
             fabric_host: true
             ram_gb: 128
             user: shag
-            role: inference
+            roles: [inference]
             home_dir: /srv/shag
             runtime:
               type: omlx
@@ -200,7 +199,7 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
             host: msm3-wifi.lan
             ram_gb: 128
             user: shag
-            role: node
+            roles: [node]
             runtime:
               type: omlx
               port: 8018
@@ -258,7 +257,7 @@ def test_parse_node_rejects_string_fabric_host(tmp_path: Path) -> None:
             fabric_host: msm3-fabric
             ram_gb: 128
             user: shag
-            role: inference
+            roles: [inference]
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
@@ -275,7 +274,7 @@ def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.M
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: inference }
+          msm1: { host: "msm1-wifi.lan", ram_gb: 128, roles: [inference] }
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
@@ -295,12 +294,12 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
             host: studio.lan
             ram_gb: 64
             user: shag
-            role: gateway
+            roles: [gateway]
           msm3:
             host: msm3-wifi.lan
             ram_gb: 128
             user: shag
-            role: inference
+            roles: [inference]
             runtime:
               type: omlx
               port: 8018
@@ -351,7 +350,7 @@ def test_generate_olla_config_uses_service_port_and_ignores_env(monkeypatch) -> 
                 "msm3": {
                     "host": "msm3-wifi.lan",
                     "ram_gb": 128,
-                    "role": "inference",
+                    "roles": ["inference"],
                     "runtime": {"type": "omlx", "port": 8018},
                     "models": ["memory"],
                 }
@@ -373,7 +372,7 @@ def test_runtime_port_defaults_to_shared_omlx_service_port() -> None:
                 "msm3": {
                     "host": "msm3-wifi.lan",
                     "ram_gb": 128,
-                    "role": "inference",
+                    "roles": ["inference"],
                     "runtime": {"type": "omlx"},
                 }
             },
@@ -406,7 +405,7 @@ def test_generate_olla_config_rejects_unknown_node_model(tmp_path: Path) -> None
             host: msm3-wifi.lan
             ram_gb: 128
             user: shag
-            role: inference
+            roles: [inference]
             runtime:
               type: omlx
               port: 8018
@@ -439,7 +438,7 @@ def test_lint_cluster_config_reports_unknown_models_and_exposure_warnings(tmp_pa
             host: msm3-wifi.lan
             ram_gb: 128
             user: shag
-            role: node
+            roles: [node]
             runtime:
               type: omlx
               port: 8018

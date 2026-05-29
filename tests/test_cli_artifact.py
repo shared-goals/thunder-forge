@@ -23,7 +23,7 @@ def _write_runtime_config(repo: Path, *, fabric_host: bool = True) -> None:
                 host: msm3-wifi.lan
 {fabric_line}                ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx

@@ -33,7 +33,7 @@ def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypat
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -68,7 +68,7 @@ def test_runtime_start_apply_starts_remote_runtime(tmp_path: Path, monkeypatch) 
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -114,7 +114,7 @@ def test_runtime_start_apply_skips_when_runtime_is_already_healthy(tmp_path: Pat
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -162,7 +162,7 @@ def test_runtime_restart_dry_run_prints_process_commands(tmp_path: Path, monkeyp
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -199,7 +199,7 @@ def test_runtime_restart_daemon_dry_run_prints_plist_and_sudo_commands(tmp_path:
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -527,7 +527,7 @@ def test_service_restart_omlx_launchd_dry_run_prints_service_plan(tmp_path: Path
                 ram_gb: 128
                 user: shag
                 admin_user: admin
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -563,7 +563,7 @@ def test_runtime_setup_daemon_dry_run_prints_admin_script(tmp_path: Path, monkey
                 ram_gb: 128
                 user: shag
                 admin_user: admin
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -602,7 +602,7 @@ def test_runtime_setup_daemon_apply_hides_admin_script(tmp_path: Path, monkeypat
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -660,7 +660,7 @@ def test_runtime_setup_daemon_via_su_requires_admin_user(tmp_path: Path, monkeyp
                 host: msm3-wifi.lan
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 runtime:
                   type: omlx
         """)
@@ -689,7 +689,7 @@ def test_runtime_restart_apply_reports_restarted(tmp_path: Path, monkeypatch) ->
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -740,7 +740,7 @@ def test_runtime_status_reports_omlx_health(tmp_path: Path, monkeypatch) -> None
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 runtime:
                   type: omlx
                   port: 8018
@@ -791,7 +791,7 @@ def test_runtime_smoke_reports_direct_chat_result(tmp_path: Path, monkeypatch) -
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 runtime:
                   type: omlx
                   port: 8018
@@ -859,12 +859,12 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
                                 host: studio.lan
                                 ram_gb: 64
                                 user: shag
-                                role: gateway
+                                roles: [gateway]
                             msm3:
                                 host: msm3-wifi.lan
                                 ram_gb: 128
                                 user: shag
-                                role: inference
+                                roles: [inference]
                                 runtime:
                                     type: omlx
                                     port: 8018
@@ -903,7 +903,7 @@ def test_generate_olla_config_cli_uses_service_port(tmp_path: Path, monkeypatch)
                                 host: msm3-wifi.lan
                                 ram_gb: 128
                                 user: shag
-                                role: inference
+                                roles: [inference]
                                 runtime:
                                     type: omlx
                                     port: 8018
@@ -1136,7 +1136,7 @@ def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monke
                 fabric_host: true
                 ram_gb: 128
                 user: shag
-                role: inference
+                roles: [inference]
                 home_dir: /Users/shag
                 runtime:
                   type: omlx

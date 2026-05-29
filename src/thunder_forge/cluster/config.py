@@ -174,7 +174,6 @@ class Node:
         ram_gb: int = 0,
         user: str = "",
         admin_user: str = "",
-        role: NodeRole | str = NodeRole.INFERENCE,
         roles: list[NodeRole | str] | None = None,
         *,
         fabric_host: bool = False,
@@ -192,7 +191,7 @@ class Node:
         self.ram_gb = ram_gb
         self.user = user
         self.admin_user = admin_user
-        self.roles = roles or [role]
+        self.roles = roles or [NodeRole.INFERENCE]
         self.fabric_host = fabric_host
         self.runtime = runtime
         self.models = models or []
@@ -342,10 +341,10 @@ def _parse_fabric_host(raw: object, *, node_name: str) -> bool:
 
 
 def _parse_node_roles(raw: dict, *, node_name: str) -> list[NodeRole]:
-    if "roles" in raw and "role" in raw:
-        msg = f"Node '{node_name}': use either role or roles, not both"
+    if "role" in raw:
+        msg = f"Node '{node_name}': 'role' is not supported; use 'roles: [...]'"
         raise ValueError(msg)
-    roles_raw: object = raw.get("roles", [raw.get("role", NodeRole.INFERENCE)])
+    roles_raw: object = raw.get("roles", [NodeRole.INFERENCE])
     if isinstance(roles_raw, str):
         roles_raw = [roles_raw]
     if not isinstance(roles_raw, list) or not roles_raw:

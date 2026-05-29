@@ -18,12 +18,12 @@ def test_parse_cluster_config_basic():
             }
         },
         "nodes": {
-            "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "role": "gateway"},
+            "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "roles": ["gateway"]},
             "msm1": {
                 "host": "msm1-wifi.lan",
                 "ram_gb": 128,
                 "user": "admin",
-                "role": "inference",
+                "roles": ["inference"],
                 "models": ["coder"],
             },
         },
@@ -59,7 +59,7 @@ def test_parse_cluster_config_user_stored_as_is():
     """User field is stored as-is — no env var resolution."""
     raw = {
         "models": {},
-        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "role": "inference"}},
+        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "roles": ["inference"]}},
     }
     config = parse_cluster_config(raw)
     assert config.nodes["n1"].user == ""
@@ -70,8 +70,8 @@ def test_parse_cluster_config_rejects_legacy_roles():
     raw = {
         "models": {},
         "nodes": {
-            "n1": {"host": "n1.lan", "ram_gb": 64, "role": "node"},
-            "gw": {"host": "gw.lan", "ram_gb": 32, "role": "infra"},
+            "n1": {"host": "n1.lan", "ram_gb": 64, "roles": ["node"]},
+            "gw": {"host": "gw.lan", "ram_gb": 32, "roles": ["infra"]},
         },
     }
     with pytest.raises(ValueError, match="not a valid"):

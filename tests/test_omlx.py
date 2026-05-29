@@ -11,7 +11,7 @@ def test_build_omlx_serve_command_omits_default_model_dir() -> None:
         host="msm3-wifi.lan",
         ram_gb=128,
         user="shag",
-        role="inference",
+        roles=["inference"],
         runtime=NodeRuntime(type="omlx", port=8018),
         home_dir="/Users/shag",
     )
@@ -27,7 +27,7 @@ def test_build_omlx_serve_command_includes_explicit_model_dir_only_when_configur
         host="msm3-wifi.lan",
         ram_gb=128,
         user="shag",
-        role="inference",
+        roles=["inference"],
         runtime=NodeRuntime(type="omlx", port=8018, model_dir="/Volumes/cache/omlx-models"),
         home_dir="/Users/shag",
     )
