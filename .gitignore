@@ -1,7 +1,10 @@
 # Secrets
 .env
 
-# Cluster config (contains local IPs, per-cluster)
+# Local cluster config (contains local hosts/users/placement)
+tfconfig.yaml
+
+# Generated configs
 configs/*.yaml
 configs/*.yaml.bak*
 

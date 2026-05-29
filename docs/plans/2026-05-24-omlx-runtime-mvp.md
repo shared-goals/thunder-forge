@@ -78,7 +78,7 @@
 **Files:**
 - Modify: `src/thunder_forge/cluster/config.py`
 - Modify/Create: `tests/test_config.py` or `tests/test_runtime_config.py`
-- Modify: `configs/node-assignments.yaml.example`
+- Modify: `tfconfig.example.yaml`
 
 **Step 1: Write failing tests**
 
@@ -415,7 +415,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 - Modify/create: frontend config generation module under `src/thunder_forge/cluster/`.
 - Modify: `src/thunder_forge/cli.py`.
 - Create/modify tests under `tests/`.
-- Update `configs/node-assignments.yaml.example` if schema fields are added.
+- Update `tfconfig.example.yaml` if schema fields are added.
 
 **Command shape draft:**
 

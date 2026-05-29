@@ -12,6 +12,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -23,14 +24,31 @@ from uuid import uuid4
 
 import httpx
 
+from thunder_forge.cluster.ports import DEFAULT_EDGE_PORT, DEFAULT_OLLA_PORT, local_base_url, resolve_port
+from thunder_forge.cluster.services import (
+    LaunchdServiceResult,
+    LaunchdServiceSpec,
+    generate_launchd_plist,
+    launch_agent_path,
+    launch_daemon_path,
+    run_local_commands,
+    system_launchd_commands,
+    user_launchd_commands,
+    write_local_file,
+)
+
 OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
 EDGE_USERS_ENV = "TF_USERS"
-DEFAULT_EDGE_ACCESS_LOG = "logs/tf-edge-access.jsonl"
-EDGE_ACCESS_LOG_ENV = "TF_EDGE_ACCESS_LOG"
+EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
+EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"
 )
+
+
+def edge_launchd_label(*, port: int = EDGE_DEFAULT_PORT) -> str:
+    return f"{EDGE_LAUNCHD_LABEL_PREFIX}-{port}"
 
 
 @dataclass(frozen=True)
@@ -111,9 +129,6 @@ class EdgeKeySetupResult:
 
     env_file: str
     keys: list[EdgeKeyStatus]
-    access_log_env_name: str
-    access_log_path: str
-    access_log_status: str
 
 
 @dataclass(frozen=True)
@@ -312,7 +327,6 @@ def ensure_edge_api_keys(
     env_file: Path,
     clients: list[str] | tuple[str, ...],
     users_env: str = EDGE_USERS_ENV,
-    access_log_path: str = DEFAULT_EDGE_ACCESS_LOG,
 ) -> EdgeKeySetupResult:
     """Create missing local TF edge API keys in a single dotenv JSON hash without printing secrets."""
     env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -344,16 +358,12 @@ def ensure_edge_api_keys(
         overwrite=True,
     )
 
-    access_log_status = _set_or_append_env_value(lines, EDGE_ACCESS_LOG_ENV, access_log_path)
     env_file.write_text("\n".join(lines) + "\n")
     env_file.chmod(0o600)
 
     return EdgeKeySetupResult(
         env_file=str(env_file),
         keys=statuses,
-        access_log_env_name=EDGE_ACCESS_LOG_ENV,
-        access_log_path=access_log_path,
-        access_log_status=access_log_status,
     )
 
 
@@ -520,17 +530,29 @@ def _header_value(headers: dict[str, str], name: str) -> str | None:
     return None
 
 
-def _extract_model(body: bytes) -> str:
+def _decode_json_object(body: bytes) -> dict[str, object] | None:
     if not body:
-        return ""
+        return None
     try:
         payload = json.loads(body.decode())
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return ""
-    if not isinstance(payload, dict):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _extract_model(body: bytes) -> str:
+    payload = _decode_json_object(body)
+    if payload is None:
         return ""
     model = payload.get("model", "")
     return model if isinstance(model, str) else ""
+
+
+def _requests_streaming_response(method: str, body: bytes) -> bool:
+    if method.upper() != "POST":
+        return False
+    payload = _decode_json_object(body)
+    return payload is not None and payload.get("stream") is True
 
 
 def _json_response(status_code: int, payload: dict[str, str]) -> EdgeProxyResponse:
@@ -560,6 +582,15 @@ def proxy_edge_request(
         olla_path = rewrite_openai_path(path)
     except ValueError:
         return _json_response(404, {"error": "not_found"})
+
+    if _requests_streaming_response(method, body):
+        return _json_response(
+            501,
+            {
+                "error": "streaming_not_implemented",
+                "message": "TF edge is a non-streaming proxy; send stream=false or omit stream.",
+            },
+        )
 
     request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
     session = ensure_olla_session_id(headers, request_id=request_id, client_id=auth.client_id)
@@ -636,6 +667,230 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
             self.wfile.write(result.body)
 
     ThreadingHTTPServer((host, port), Handler).serve_forever()
+
+
+def _thunder_forge_command(repo_root: Path) -> list[str]:
+    console_script = repo_root / ".venv" / "bin" / "thunder-forge"
+    if console_script.exists():
+        return [str(console_script)]
+    return [shutil.which("uv") or "/opt/homebrew/bin/uv", "run", "thunder-forge"]
+
+
+def _edge_service_spec(
+    *,
+    repo_root: Path,
+    host: str,
+    port: int,
+    olla_base_url: str,
+    users_env: str,
+    access_log_path: Path,
+    user: str,
+) -> LaunchdServiceSpec:
+    log_dir = repo_root / "logs"
+    resolved_access_log_path = access_log_path.expanduser()
+    if not resolved_access_log_path.is_absolute():
+        resolved_access_log_path = repo_root / resolved_access_log_path
+    program_arguments = [
+        *_thunder_forge_command(repo_root),
+        "edge",
+        "serve",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--olla-base-url",
+        olla_base_url,
+        "--users-env",
+        users_env,
+        "--access-log",
+        str(resolved_access_log_path),
+    ]
+    process_pattern = f"^.*thunder-forge edge serve .*--port {port}.*$"
+    return LaunchdServiceSpec(
+        name="edge",
+        label=edge_launchd_label(port=port),
+        program_arguments=program_arguments,
+        working_directory=str(repo_root),
+        stdout_log=str(log_dir / f"edge-{port}.stdout.log"),
+        stderr_log=str(log_dir / f"edge-{port}.stderr.log"),
+        environment={
+            "HOME": str(Path.home()),
+            "USER": user,
+            "PATH": ":".join(
+                [
+                    f"{repo_root}/.venv/bin",
+                    f"{Path.home()}/.local/bin",
+                    "/opt/homebrew/bin",
+                    "/usr/local/bin",
+                    "/usr/bin",
+                    "/bin",
+                    "/usr/sbin",
+                    "/sbin",
+                ]
+            ),
+        },
+        process_pattern=process_pattern,
+        user=user,
+    )
+
+
+def _build_edge_launchd_result(
+    *,
+    repo_root: Path,
+    host: str,
+    port: int,
+    olla_base_url: str,
+    users_env: str,
+    access_log_path: Path,
+    user: str,
+    manager: str,
+    interactive_sudo: bool = False,
+    admin_user: str = "",
+) -> tuple[LaunchdServiceResult, str]:
+    spec = _edge_service_spec(
+        repo_root=repo_root,
+        host=host,
+        port=port,
+        olla_base_url=olla_base_url,
+        users_env=users_env,
+        access_log_path=access_log_path,
+        user=user,
+    )
+    system_daemon = manager == "daemon"
+    plist_path = launch_daemon_path(spec.label) if system_daemon else launch_agent_path(spec.label)
+    staging_plist_path = str(repo_root / ".tmp" / "run" / f"{spec.label}.plist") if system_daemon else ""
+    result = LaunchdServiceResult(
+        service=spec.name,
+        label=spec.label,
+        plist_path=plist_path,
+        staging_plist_path=staging_plist_path,
+        process_pattern=spec.process_pattern,
+    )
+    result.plist_content = generate_launchd_plist(spec, system_daemon=system_daemon)
+    log_dir = _sh_quote(str(repo_root / "logs"))
+    if system_daemon:
+        result.commands = system_launchd_commands(
+            label=spec.label,
+            staging_plist_path=staging_plist_path,
+            plist_path=plist_path,
+            process_pattern=spec.process_pattern,
+            setup_command=f"mkdir -p {_sh_quote(str(repo_root / '.tmp' / 'run'))} {log_dir}",
+            interactive_sudo=interactive_sudo,
+            admin_user=admin_user,
+        )
+    else:
+        result.commands = user_launchd_commands(
+            label=spec.label,
+            plist_path=plist_path,
+            process_pattern=spec.process_pattern,
+            setup_command=f"mkdir -p ~/Library/LaunchAgents {log_dir}",
+            domain="gui/$(id -u)",
+            kickstart=True,
+        )
+    return result, local_base_url(port)
+
+
+def _sh_quote(value: str) -> str:
+    import shlex
+
+    return shlex.quote(value)
+
+
+def _wait_edge_healthy(
+    base_url: str,
+    *,
+    retries: int = 30,
+    interval: float = 1.0,
+    timeout: float = 5.0,
+) -> bool:
+    for _ in range(retries):
+        try:
+            with httpx.Client(base_url=base_url, timeout=timeout, trust_env=False) as client:
+                response = client.get("/v1/models")
+                if response.status_code == 401:
+                    return True
+        except httpx.HTTPError:
+            pass
+        time.sleep(interval)
+    return False
+
+
+def _apply_local_edge_service(
+    result: LaunchdServiceResult,
+    *,
+    base_url: str,
+    timeout: int,
+    stream: bool = False,
+) -> LaunchdServiceResult:
+    if not result.commands:
+        result.errors.append("No service commands generated")
+        return result
+    system_daemon = bool(result.staging_plist_path)
+    setup_commands = result.commands[:1] if system_daemon else result.commands[:3]
+    start_commands = result.commands[1:-1] if system_daemon else result.commands[3:-1]
+    verify_command = result.commands[-1]
+
+    ok, error = run_local_commands(setup_commands, timeout=timeout, stream=stream)
+    if not ok:
+        result.errors.append(error)
+        return result
+
+    target_plist_path = result.staging_plist_path or result.plist_path
+    write_local_file(target_plist_path, result.plist_content)
+
+    ok, error = run_local_commands(start_commands, timeout=timeout, stream=stream)
+    if not ok:
+        result.errors.append(error)
+        return result
+
+    ok, error = run_local_commands([verify_command], timeout=timeout, stream=stream)
+    result.service_label_verified = ok
+    if not ok:
+        result.errors.append(error)
+
+    result.health_ok = _wait_edge_healthy(base_url, retries=30, interval=1.0, timeout=5.0)
+    if not result.health_ok:
+        result.errors.append(f"TF edge health check failed at {base_url}")
+    result.applied = True
+    return result
+
+
+def run_edge_service_restart(
+    *,
+    repo_root: Path,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    olla_base_url: str | None = None,
+    users_env: str = EDGE_USERS_ENV,
+    access_log_path: Path = Path("logs/tf-edge-access.jsonl"),
+    user: str | None = None,
+    manager: str = "launchd",
+    apply: bool = True,
+    timeout: int = 60,
+    interactive_sudo: bool = False,
+    admin_user: str = "",
+) -> LaunchdServiceResult:
+    """Install/update and restart TF edge as a frontend launchd service."""
+    normalized_manager = manager.lower()
+    if normalized_manager not in {"launchd", "daemon"}:
+        msg = "TF edge service manager must be 'launchd' or 'daemon'"
+        raise ValueError(msg)
+    resolved_port = resolve_port(port, default=EDGE_DEFAULT_PORT)
+    result, base_url = _build_edge_launchd_result(
+        repo_root=repo_root,
+        host=host,
+        port=resolved_port,
+        olla_base_url=olla_base_url or local_base_url(DEFAULT_OLLA_PORT),
+        users_env=users_env,
+        access_log_path=access_log_path,
+        user=user or os.environ.get("USER", "shag"),
+        manager=normalized_manager,
+        interactive_sudo=interactive_sudo,
+        admin_user=admin_user,
+    )
+    if not apply:
+        return result
+    return _apply_local_edge_service(result, base_url=base_url, timeout=timeout, stream=interactive_sudo)
 
 
 def smoke_edge_contract(

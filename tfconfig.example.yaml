@@ -1,3 +1,17 @@
+# ── Service defaults ──────────────────────────────────
+# Non-secret local ports live here. Secrets stay in .env.
+services:
+  frontend:
+    # Admin account used only for frontend system-daemon sudo operations.
+    admin_user: serpo
+  olla:
+    port: 40115
+  edge:
+    port: 40116
+    access_log: logs/tf-edge-access.jsonl
+  omlx:
+    port: 8018
+
 # ── Model registry ──────────────────────────────────
 # Add new models here. Model ids are public aliases by default.
 # Source types:
@@ -70,50 +84,63 @@ models:
 
 # ── Nodes ──────────────────────────────────────────
 # Per-node host may be a DNS name or IP address. Prefer .lan FQDNs.
-# Per-node user is optional. Falls back to TF_SSH_USER env var,
-# then $USER (current OS user). Role is "node" (compute) or "gateway" (infra/hub).
+# Per-node user is optional. Falls back to GATEWAY_SSH_USER from .env,
+# then $USER (current OS user). Roles are "gateway", "cache", and "inference".
+# admin_user is optional and names the local/remote admin account used for sudo things.
 nodes:
-  rock: { host: "rock.lan", ram_gb: 32, role: gateway }
+  # Production frontend; commented for the dev setup on studio.
+  # rock:
+  #   host: "rock.lan"
+  #   ram_gb: 32
+  #   role: gateway
+  #   admin_user: <rock-admin>
+
+  studio:
+    host: "studio.lan"
+    ram_gb: 128
+    roles: [gateway, cache]
+    user: shag
+    admin_user: serpo
 
   # Current rollout state:
   # - msm1/msm2 are TF v1 production nodes and migrate after msm3 is stable.
   # - msm3 is the dedicated TF v2 dev node.
   # - msm4 is direct oMLX for Hindsight today and migrates last.
 
-  msm1:
-    host: "msm1-wifi.lan"
-    ram_gb: 128
-    role: node
-    user: shag
-    runtime:
-      type: omlx
-      port: 8018
-    models:
-      - memory
-      - coder
+  # msm1:
+  #   host: "msm1-wifi.lan"
+  #   ram_gb: 128
+  #   role: inference
+  #   user: shag
+  #   admin_user: admin
+  #   runtime:
+  #     type: omlx
+  #   models:
+  #     - memory
+  #     - coder
 
-  msm2:
-    host: "msm2-wifi.lan"
-    ram_gb: 128
-    role: node
-    user: shag
-    runtime:
-      type: omlx
-      port: 8018
-    models:
-      - memory
-      - coder
+  # msm2:
+  #   host: "msm2-wifi.lan"
+  #   ram_gb: 128
+  #   role: inference
+  #   user: shag
+  #   admin_user: admin
+  #   runtime:
+  #     type: omlx
+  #   models:
+  #     - memory
+  #     - coder
 
   msm3:
     host: "msm3-wifi.lan"
     # Boolean: probe Thunderbolt/fabric dynamically from the management host.
     fabric_host: true
     ram_gb: 128
-    role: node
+    role: inference
     user: shag
+    admin_user: admin
     runtime:
       type: omlx
-      port: 8018
     models:
       - memory
       - memory-bf16
@@ -123,12 +150,11 @@ nodes:
   # msm4: enable when migrating direct Hindsight oMLX into TF v2.
   # host: "msm4-wifi.lan"
   # ram_gb: 128
-  # role: node
+  # role: inference
   # user: shag
+  # admin_user: admin
   # runtime:
   #   type: omlx
-  #   port: 8018
   # models:
   #   - memory
   #   - agent
-

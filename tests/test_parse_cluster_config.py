@@ -23,7 +23,7 @@ def test_parse_cluster_config_basic():
                 "host": "msm1-wifi.lan",
                 "ram_gb": 128,
                 "user": "admin",
-                "role": "node",
+                "role": "inference",
                 "models": ["coder"],
             },
         },
@@ -59,25 +59,23 @@ def test_parse_cluster_config_user_stored_as_is():
     """User field is stored as-is — no env var resolution."""
     raw = {
         "models": {},
-        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "role": "node"}},
+        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "role": "inference"}},
     }
     config = parse_cluster_config(raw)
     assert config.nodes["n1"].user == ""
 
 
-def test_parse_cluster_config_role_migration():
-    """Deprecated role names are migrated."""
+def test_parse_cluster_config_rejects_legacy_roles():
+    """Deprecated role names are rejected instead of migrated."""
     raw = {
         "models": {},
         "nodes": {
-            "n1": {"host": "n1.lan", "ram_gb": 64, "role": "inference"},
+            "n1": {"host": "n1.lan", "ram_gb": 64, "role": "node"},
             "gw": {"host": "gw.lan", "ram_gb": 32, "role": "infra"},
         },
     }
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        config = parse_cluster_config(raw)
-    assert config.nodes["n1"].role == "node"
-    assert config.nodes["gw"].role == "gateway"
+    with pytest.raises(ValueError, match="not a valid"):
+        parse_cluster_config(raw)
 
 
 def test_parse_model_server_args_populated():

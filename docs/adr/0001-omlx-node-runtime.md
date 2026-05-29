@@ -23,7 +23,7 @@ The next Thunder Forge version starts in a dev environment:
 shag@studio:/Users/shag/Work/thunder-forge
 ```
 
-Production `rock` must not be used for dev work. `studio` is the dev frontend and future cache hub. `msm3` is the first TF v2 development inference node. `msm4` is dedicated to direct oMLX/Hindsight work and should not be disturbed by TF v2 experiments. Later, the control plane may move back to Armbian `rock`; `studio` may remain the model cache hub due to its Thunderbolt connection to `msm1`-`msm4`.
+Production `rock` must not be used for dev work. Thunder Forge has three operational roles: `frontend`, `cache/download`, and `inference node`. In the current dev setup, `studio` is both macOS frontend and macOS cache/download host, while `msm3` is the first TF v2 development inference node and `msm1`-`msm4` are the macOS inference-node pool. `msm4` is dedicated to direct oMLX/Hindsight work and should not be disturbed by TF v2 experiments. Later, the frontend role may move back to Armbian `rock`; `studio` should remain the cache/download host due to its Thunderbolt connection to `msm1`-`msm4`.
 
 The very first use case is narrower than full model orchestration: run oMLX against a model that lives under the oMLX default model directory (`~/.omlx/models`) on `msm3`. Product state must not include Hugging Face cache layout. `gpt-oss-20b` is currently the Hindsight model on `msm4`, not the first TF v2 dev target.
 
@@ -107,10 +107,18 @@ Preferred fresh shape:
 
 ```yaml
 nodes:
+  studio:
+    host: studio.lan
+    roles: [gateway, cache]
+    user: shag
+    admin_user: serpo
+
   msm3:
     host: msm3-wifi.lan          # stable management/bootstrap path
     fabric_host: true            # enable dynamic point-to-point fabric probing
-    role: node
+    role: inference
+    user: shag
+    admin_user: admin
     runtime:
       type: omlx
       port: 8018

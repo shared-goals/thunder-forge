@@ -80,7 +80,7 @@ Gaps to cover in TF edge:
 **Files:**
 
 - Modify: `src/thunder_forge/cluster/config.py`
-- Modify: `configs/node-assignments.yaml.example`
+- Modify: `tfconfig.example.yaml`
 - Create/modify: `tests/test_config.py` or `tests/test_olla_config.py`
 
 **Schema direction:**

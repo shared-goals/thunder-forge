@@ -8,12 +8,12 @@ Scope: local dev repo on `studio` only. No production `rock` or `msm4` runtime c
 
 - `src/thunder_forge/cli.py`
   - Flat Typer command surface: `generate-config`, `ensure-models`, `deploy`, `restart`, `stop`, `health`.
-  - Loads `configs/node-assignments.yaml` through `_load_config()`.
+  - Older inspection snapshot: this has since moved to root `tfconfig.yaml` through `_load_config()`.
   - Existing commands operate on assignment slots: mostly one launchd service per `{model, port}`.
 
 - `src/thunder_forge/cluster/config.py`
   - Dataclass-based parser with `Node`, `Model`, `Assignment`, `ClusterConfig`.
-  - `Node.host` is already the preferred field; `ip` is a deprecated compatibility alias.
+  - `Node.host` is the required host field in the current v2 schema.
   - Current node schema has no `fabric_host` and no node-level `runtime` identity.
   - LiteLLM generation is assignment/port based and should remain stable for current TF.
 

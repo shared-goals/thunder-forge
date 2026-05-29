@@ -3,7 +3,7 @@
 import httpx
 
 from thunder_forge.cluster.config import Node, NodeRuntime
-from thunder_forge.cluster.omlx import build_omlx_serve_command, check_omlx_health
+from thunder_forge.cluster.omlx import build_omlx_serve_command, check_omlx_health, smoke_omlx_chat
 
 
 def test_build_omlx_serve_command_omits_default_model_dir() -> None:
@@ -11,7 +11,7 @@ def test_build_omlx_serve_command_omits_default_model_dir() -> None:
         host="msm3-wifi.lan",
         ram_gb=128,
         user="shag",
-        role="node",
+        role="inference",
         runtime=NodeRuntime(type="omlx", port=8018),
         home_dir="/Users/shag",
     )
@@ -27,7 +27,7 @@ def test_build_omlx_serve_command_includes_explicit_model_dir_only_when_configur
         host="msm3-wifi.lan",
         ram_gb=128,
         user="shag",
-        role="node",
+        role="inference",
         runtime=NodeRuntime(type="omlx", port=8018, model_dir="/Volumes/cache/omlx-models"),
         home_dir="/Users/shag",
     )
@@ -58,6 +58,35 @@ def test_check_omlx_health_collects_models_and_optional_status() -> None:
     assert result.status_ok is True
     assert result.models == ["mlx-community/test-model"]
     assert result.errors == []
+
+
+def test_check_omlx_health_parses_model_statuses() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "Qwen3-1.7B-4bit"}]})
+        if request.url.path == "/v1/models/status":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "id": "Qwen3-1.7B-4bit",
+                            "loaded": True,
+                            "is_loading": False,
+                            "estimated_size": 123,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    result = check_omlx_health("http://msm3-wifi.lan:8018", transport=httpx.MockTransport(handler))
+
+    assert result.status_ok is True
+    assert result.model_statuses["Qwen3-1.7B-4bit"]["loaded"] is True
+    assert result.model_statuses["Qwen3-1.7B-4bit"]["is_loading"] is False
 
 
 def test_check_omlx_health_keeps_health_when_optional_status_fails() -> None:
@@ -94,3 +123,33 @@ def test_check_omlx_health_reports_failed_required_probe() -> None:
     assert result.models == []
     assert "GET /health returned 503" in result.errors
     assert "GET /v1/models failed: connection refused" in result.errors
+
+
+def test_smoke_omlx_chat_skips_chat_when_model_is_still_loading() -> None:
+    paths: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append((request.method, request.url.path))
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "Qwen3-1.7B-4bit"}]})
+        if request.url.path == "/v1/models/status":
+            return httpx.Response(
+                200,
+                json={"models": [{"id": "Qwen3-1.7B-4bit", "loaded": False, "is_loading": True}]},
+            )
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(200, json={"unexpected": True})
+        return httpx.Response(404)
+
+    result = smoke_omlx_chat(
+        "http://msm3-wifi.lan:8018",
+        model="Qwen3-1.7B-4bit",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.model_visible is True
+    assert result.chat_ok is False
+    assert "model 'Qwen3-1.7B-4bit' is still loading" in result.errors
+    assert ("POST", "/v1/chat/completions") not in paths

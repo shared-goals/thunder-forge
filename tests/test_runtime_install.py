@@ -29,7 +29,7 @@ def _make_runtime_node(home_dir="/Users/shag", port=8018, model_dir=None):
         fabric_host=False,
         ram_gb=128,
         user="shag",
-        role="node",
+        role="inference",
         shell="zsh",
         home_dir=home_dir,
         runtime=runtime,
@@ -85,7 +85,7 @@ def test_generate_launchd_plist_errors_without_runtime() -> None:
         fabric_host=False,
         ram_gb=128,
         user="shag",
-        role="node",
+        role="inference",
         shell="zsh",
         home_dir="/Users/shag",
         runtime=None,
@@ -213,7 +213,7 @@ def test_run_omlx_daemon_setup_dry_run_describes_admin_script() -> None:
     assert result.admin_user == "admin"
     assert result.ssh_user == "shag"
     assert result.via_su
-    assert result.sudoers_path == "/etc/sudoers.d/thunder-forge-omlx-8018"
+    assert result.sudoers_path == "/etc/sudoers.d/thunder-forge"
     assert result.script_path == "/tmp/thunder-forge-setup-com.thunder-forge.omlx-8018.sh"
     assert result.script_content.startswith("#!/bin/zsh")
     assert any("su - admin" in c for c in result.commands)

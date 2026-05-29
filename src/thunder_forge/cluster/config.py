@@ -11,6 +11,20 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from thunder_forge.cluster.ports import (
+    DEFAULT_EDGE_PORT,
+    DEFAULT_OLLA_PORT,
+    DEFAULT_OMLX_PORT,
+    parse_port,
+    resolve_port,
+)
+
+TF_CONFIG_FILENAME = "tfconfig.yaml"
+TF_CONFIG_EXAMPLE_FILENAME = "tfconfig.example.yaml"
+GENERATED_CONFIG_DIR = "configs"
+GENERATED_OLLA_CONFIG_FILENAME = "olla-config.yaml"
+DEFAULT_EDGE_ACCESS_LOG = "logs/tf-edge-access.jsonl"
+
 
 class ServingMode(StrEnum):
     CHAT = "chat"
@@ -26,6 +40,8 @@ class RuntimeType(StrEnum):
 class NodeRole(StrEnum):
     NODE = "node"
     GATEWAY = "gateway"
+    CACHE = "cache"
+    INFERENCE = "inference"  # legacy alias; prefer node
 
 
 def _represent_float(dumper: yaml.Dumper, value: float) -> yaml.ScalarNode:
@@ -107,6 +123,33 @@ class NodeRuntime:
     type: RuntimeType | str
     port: int
     model_dir: str | None = None
+    bind_host: str = "0.0.0.0"
+    base_path: str | None = None
+    log_level: str | None = None
+    max_concurrent_requests: int | None = None
+    paged_ssd_cache_dir: str | None = None
+    paged_ssd_cache_max_size: str | None = None
+    hot_cache_max_size: str | None = None
+    no_cache: bool = False
+    mcp_config: str | None = None
+    hf_endpoint: str | None = None
+    trusted_network: bool = False
+
+
+@dataclass(frozen=True)
+class ConfigLintIssue:
+    severity: str
+    path: str
+    message: str
+
+
+@dataclass
+class ServiceConfig:
+    edge_port: int = DEFAULT_EDGE_PORT
+    olla_port: int = DEFAULT_OLLA_PORT
+    omlx_port: int = DEFAULT_OMLX_PORT
+    edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
+    frontend_admin_user: str = ""
 
 
 @dataclass(init=False)
@@ -114,7 +157,8 @@ class Node:
     host: str
     ram_gb: int
     user: str
-    role: NodeRole | str
+    admin_user: str
+    roles: list[NodeRole | str]
     fabric_host: bool
     runtime: NodeRuntime | None
     models: list[str]
@@ -129,9 +173,10 @@ class Node:
         host: str | None = None,
         ram_gb: int = 0,
         user: str = "",
-        role: NodeRole | str = NodeRole.NODE,
+        admin_user: str = "",
+        role: NodeRole | str = NodeRole.INFERENCE,
+        roles: list[NodeRole | str] | None = None,
         *,
-        ip: str | None = None,
         fabric_host: bool = False,
         runtime: NodeRuntime | None = None,
         models: list[str] | None = None,
@@ -140,14 +185,14 @@ class Node:
         home_dir: str | None = None,
         homebrew_prefix: str | None = None,
     ) -> None:
-        resolved_host = host or ip
-        if not resolved_host:
-            msg = "Node requires host (or deprecated ip)"
+        if not host:
+            msg = "Node requires host"
             raise ValueError(msg)
-        self.host = resolved_host
+        self.host = host
         self.ram_gb = ram_gb
         self.user = user
-        self.role = role
+        self.admin_user = admin_user
+        self.roles = roles or [role]
         self.fabric_host = fabric_host
         self.runtime = runtime
         self.models = models or []
@@ -157,27 +202,26 @@ class Node:
         self.homebrew_prefix = homebrew_prefix
 
     @property
-    def ip(self) -> str:
-        """Deprecated alias for host, kept for internal/backwards compatibility."""
-        return self.host
+    def role(self) -> NodeRole | str:
+        return self.roles[0]
 
-    @ip.setter
-    def ip(self, value: str) -> None:
-        self.host = value
+    def has_role(self, role: NodeRole | str) -> bool:
+        return role in self.roles
 
 @dataclass
 class ClusterConfig:
     models: dict[str, Model] = field(default_factory=dict)
     nodes: dict[str, Node] = field(default_factory=dict)
+    services: ServiceConfig = field(default_factory=ServiceConfig)
 
     @property
     def compute_nodes(self) -> dict[str, Node]:
-        return {k: v for k, v in self.nodes.items() if v.role == NodeRole.NODE}
+        return {k: v for k, v in self.nodes.items() if v.has_role(NodeRole.INFERENCE) or v.has_role(NodeRole.NODE)}
 
     @property
     def gateway_name(self) -> str:
         for k, v in self.nodes.items():
-            if v.role == NodeRole.GATEWAY:
+            if v.has_role(NodeRole.GATEWAY):
                 return k
         msg = "No gateway node found in config"
         raise ValueError(msg)
@@ -185,19 +229,6 @@ class ClusterConfig:
     @property
     def gateway(self) -> Node:
         return self.nodes[self.gateway_name]
-
-    # --- Backwards-compatible aliases ---
-    @property
-    def inference_nodes(self) -> dict[str, Node]:
-        return self.compute_nodes
-
-    @property
-    def infra_name(self) -> str:
-        return self.gateway_name
-
-    @property
-    def rock(self) -> Node:
-        return self.gateway
 
 
 def _parse_model_source(raw: dict) -> ModelSource:
@@ -242,13 +273,62 @@ def _parse_server_args(raw: dict) -> ServerArgs:
     )
 
 
-def _parse_node_runtime(raw: dict | None) -> NodeRuntime | None:
+def _parse_service_port(raw: dict, service_name: str, default: int) -> int:
+    service_raw = raw.get(service_name, {})
+    if service_raw is None:
+        return default
+    if not isinstance(service_raw, dict):
+        msg = f"services.{service_name} must be a mapping"
+        raise ValueError(msg)
+    return parse_port(service_raw.get("port", default), name=f"services.{service_name}.port")
+
+
+def _parse_services(raw: object) -> ServiceConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        msg = "services must be a mapping"
+        raise ValueError(msg)
+    edge_raw = raw.get("edge", {}) or {}
+    if not isinstance(edge_raw, dict):
+        msg = "services.edge must be a mapping"
+        raise ValueError(msg)
+    edge_access_log = str(edge_raw.get("access_log", DEFAULT_EDGE_ACCESS_LOG)).strip()
+    if not edge_access_log:
+        msg = "services.edge.access_log must not be empty"
+        raise ValueError(msg)
+    frontend_raw = raw.get("frontend", {}) or {}
+    if not isinstance(frontend_raw, dict):
+        msg = "services.frontend must be a mapping"
+        raise ValueError(msg)
+    frontend_admin_user = str(frontend_raw.get("admin_user", "")).strip()
+    return ServiceConfig(
+        edge_port=_parse_service_port(raw, "edge", DEFAULT_EDGE_PORT),
+        olla_port=_parse_service_port(raw, "olla", DEFAULT_OLLA_PORT),
+        omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
+        edge_access_log=edge_access_log,
+        frontend_admin_user=frontend_admin_user,
+    )
+
+
+def _parse_node_runtime(raw: dict | None, *, default_port: int = DEFAULT_OMLX_PORT) -> NodeRuntime | None:
     if raw is None:
         return None
     return NodeRuntime(
         type=RuntimeType(raw["type"]),
-        port=raw["port"],
+        port=parse_port(raw.get("port", default_port), name="runtime.port"),
         model_dir=raw.get("model_dir"),
+        bind_host=raw.get("bind_host", "0.0.0.0"),
+        base_path=raw.get("base_path"),
+        log_level=raw.get("log_level"),
+        max_concurrent_requests=raw.get("max_concurrent_requests"),
+        paged_ssd_cache_dir=raw.get("paged_ssd_cache_dir"),
+        paged_ssd_cache_max_size=raw.get("paged_ssd_cache_max_size"),
+        hot_cache_max_size=raw.get("hot_cache_max_size"),
+        no_cache=raw.get("no_cache", False),
+        mcp_config=raw.get("mcp_config"),
+        hf_endpoint=raw.get("hf_endpoint"),
+        trusted_network=raw.get("trusted_network", False),
     )
 
 
@@ -259,6 +339,24 @@ def _parse_fabric_host(raw: object, *, node_name: str) -> bool:
         return raw
     msg = f"Node '{node_name}': fabric_host must be boolean true/false"
     raise ValueError(msg)
+
+
+def _parse_node_roles(raw: dict, *, node_name: str) -> list[NodeRole]:
+    if "roles" in raw and "role" in raw:
+        msg = f"Node '{node_name}': use either role or roles, not both"
+        raise ValueError(msg)
+    roles_raw: object = raw.get("roles", [raw.get("role", NodeRole.INFERENCE)])
+    if isinstance(roles_raw, str):
+        roles_raw = [roles_raw]
+    if not isinstance(roles_raw, list) or not roles_raw:
+        msg = f"Node '{node_name}': roles must be a non-empty list"
+        raise ValueError(msg)
+    roles: list[NodeRole] = []
+    for item in roles_raw:
+        role = NodeRole(str(item).strip())
+        if role not in roles:
+            roles.append(role)
+    return roles
 
 
 def _default_runtime_model_id(model_id: str, raw: dict) -> str:
@@ -294,40 +392,25 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
     No file I/O, no .env loading, no user resolution from env vars.
     The user field is stored as-is from the raw dict (empty string if unset).
     """
+    services = _parse_services(raw.get("services", {}))
     models = {k: _parse_model(k, v) for k, v in raw.get("models", {}).items()}
-
-    _ROLE_MIGRATION = {"inference": NodeRole.NODE, "infra": NodeRole.GATEWAY}
 
     nodes = {}
     for k, v in raw.get("nodes", {}).items():
-        raw_role = v.get("role", "node")
-        migrated = _ROLE_MIGRATION.get(raw_role)
-        role = migrated if migrated else NodeRole(raw_role)
-        if migrated:
-            import warnings
-
-            # stacklevel=2: when called via load_cluster_config, warning
-            # points to the caller of load_cluster_config. Direct callers
-            # of parse_cluster_config will see the warning attributed one
-            # frame too deep — acceptable since the admin UI is the primary
-            # direct caller and doesn't rely on warning attribution.
-            warnings.warn(
-                f"Node '{k}': role '{raw_role}' is deprecated, use '{role.value}' instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+        roles = _parse_node_roles(v, node_name=k)
         user = v.get("user", "")
-        host = v.get("host") or v.get("ip")
+        host = v.get("host")
         if not host:
-            msg = f"Node {k} requires host (or deprecated ip)"
+            msg = f"Node {k} requires host"
             raise ValueError(msg)
         nodes[k] = Node(
             host=host,
             ram_gb=v["ram_gb"],
             user=user,
-            role=role,
+            admin_user=str(v.get("admin_user", "")).strip(),
+            roles=roles,
             fabric_host=_parse_fabric_host(v.get("fabric_host"), node_name=k),
-            runtime=_parse_node_runtime(v.get("runtime")),
+            runtime=_parse_node_runtime(v.get("runtime"), default_port=services.omlx_port),
             models=list(v.get("models", [])),
             home_dir=v.get("home_dir"),
             homebrew_prefix=v.get("homebrew_prefix"),
@@ -336,11 +419,12 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
     return ClusterConfig(
         models=models,
         nodes=nodes,
+        services=services,
     )
 
 
 def load_cluster_config(path: Path) -> ClusterConfig:
-    """Load and parse node-assignments.yaml into a ClusterConfig.
+    """Load and parse a Thunder Forge cluster config into a ClusterConfig.
 
     Thin wrapper around parse_cluster_config that adds .env loading
     and user resolution from environment variables.
@@ -366,7 +450,8 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     return config
 
 
-def generate_olla_config(config: ClusterConfig) -> str:
+def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> str:
+    olla_port = resolve_port(port, default=config.services.olla_port)
     endpoints: list[dict[str, str | int]] = []
     aliases: dict[str, list[str]] = {}
     seen_nodes: set[str] = set()
@@ -374,6 +459,9 @@ def generate_olla_config(config: ClusterConfig) -> str:
     for node_name, node in config.nodes.items():
         if not node.models:
             continue
+        if not node.has_role(NodeRole.INFERENCE):
+            msg = f"Node '{node_name}' declares models but is not an inference node"
+            raise ValueError(msg)
         runtime = node.runtime
         if runtime is None:
             msg = f"Node '{node_name}' declares models but has no runtime"
@@ -406,7 +494,7 @@ def generate_olla_config(config: ClusterConfig) -> str:
     output: dict = {
         "server": {
             "host": "127.0.0.1",
-            "port": 40115,
+            "port": olla_port,
             "read_timeout": "20s",
             "write_timeout": "0s",
             "shutdown_timeout": "10s",
@@ -471,10 +559,84 @@ def generate_olla_config(config: ClusterConfig) -> str:
     }
     header = (
         "# AUTO-GENERATED by thunder-forge generate-olla-config\n"
-        "# from configs/node-assignments.yaml\n"
-        "# Do not edit manually — edit node-assignments.yaml instead.\n\n"
+        f"# from {TF_CONFIG_FILENAME}\n"
+        f"# Do not edit manually — edit {TF_CONFIG_FILENAME} instead.\n\n"
     )
     return header + yaml.dump(output, default_flow_style=False, sort_keys=False)
+
+
+def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
+    """Return actionable config issues without generating derived router state."""
+    issues: list[ConfigLintIssue] = []
+    runtime_model_ids: dict[str, str] = {}
+
+    for model_id, model in config.models.items():
+        if model.runtime_model_id in runtime_model_ids:
+            issues.append(
+                ConfigLintIssue(
+                    severity="warning",
+                    path=f"models.{model_id}.runtime_model_id",
+                    message=f"runtime model id also used by '{runtime_model_ids[model.runtime_model_id]}'",
+                )
+            )
+        else:
+            runtime_model_ids[model.runtime_model_id] = model_id
+
+    for node_name, node in config.nodes.items():
+        if node.models and node.runtime is None:
+            issues.append(
+                ConfigLintIssue(
+                    severity="error",
+                    path=f"nodes.{node_name}.runtime",
+                    message="node declares models but has no runtime",
+                )
+            )
+        if node.runtime is not None and node.runtime.type == RuntimeType.OMLX:
+            if node.runtime.port <= 0 or node.runtime.port > 65535:
+                issues.append(
+                    ConfigLintIssue(
+                        severity="error",
+                        path=f"nodes.{node_name}.runtime.port",
+                        message="runtime port must be between 1 and 65535",
+                    )
+                )
+            if node.runtime.bind_host == "0.0.0.0" and not node.runtime.trusted_network:
+                issues.append(
+                    ConfigLintIssue(
+                        severity="warning",
+                        path=f"nodes.{node_name}.runtime",
+                        message="oMLX runtime binds 0.0.0.0 without trusted_network: true",
+                    )
+                )
+        for model_id in node.models:
+            if model_id not in config.models:
+                issues.append(
+                    ConfigLintIssue(
+                        severity="error",
+                        path=f"nodes.{node_name}.models",
+                        message=f"unknown model '{model_id}'",
+                    )
+                )
+                continue
+            if config.models[model_id].benchmark_only:
+                issues.append(
+                    ConfigLintIssue(
+                        severity="warning",
+                        path=f"nodes.{node_name}.models",
+                        message=f"benchmark-only model '{model_id}' is assigned to node",
+                    )
+                )
+
+    return issues
+
+
+def default_cluster_config_path(repo_root: Path) -> Path:
+    """Return the local Thunder Forge cluster config path."""
+    return repo_root / TF_CONFIG_FILENAME
+
+
+def generated_olla_config_path(repo_root: Path) -> Path:
+    return repo_root / GENERATED_CONFIG_DIR / GENERATED_OLLA_CONFIG_FILENAME
 
 
 def find_repo_root() -> Path:
@@ -490,15 +652,15 @@ def find_repo_root() -> Path:
         pass
     current = Path.cwd()
     for parent in [current, *current.parents]:
-        if (parent / "configs" / "node-assignments.yaml").exists():
+        if (parent / TF_CONFIG_FILENAME).exists() or (parent / TF_CONFIG_EXAMPLE_FILENAME).exists():
             return parent
-    msg = "Cannot find repo root (no git repo and no configs/node-assignments.yaml found)"
+    msg = f"Cannot find repo root (no git repo and no {TF_CONFIG_FILENAME} found)"
     raise FileNotFoundError(msg)
 
 
 def load_config() -> tuple[ClusterConfig, Path]:
-    """Load cluster config from the default node-assignments.yaml. Returns (config, path)."""
+    """Load cluster config from the default tfconfig.yaml. Returns (config, path)."""
     root = find_repo_root()
-    config_path = root / "configs" / "node-assignments.yaml"
+    config_path = default_cluster_config_path(root)
     raw = yaml.safe_load(config_path.read_text())
     return parse_cluster_config(raw), config_path

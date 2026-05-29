@@ -6,16 +6,32 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
+from thunder_forge.cluster.config import ClusterConfig, ServiceConfig
 from thunder_forge.cluster.edge import EdgeProxyConfig, EdgeSmokeResult
 
 runner = CliRunner()
+
+
+def _cluster_config(
+    *,
+    edge_port: int = 40116,
+    olla_port: int = 40115,
+    access_log: str = "logs/tf-edge-access.jsonl",
+) -> ClusterConfig:
+    return ClusterConfig(
+        services=ServiceConfig(
+            edge_port=edge_port,
+            olla_port=olla_port,
+            edge_access_log=access_log,
+        )
+    )
 
 
 def test_edge_smoke_cli_reads_api_key_from_env_and_prints_summary(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     monkeypatch.setenv("TF_USERS", '{"client-a":"dev-secret"}')
-    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (Path.cwd(), Path.cwd() / ".env"), raising=False)
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
     monkeypatch.setattr(
         cli_module,
         "smoke_edge_contract",
@@ -63,7 +79,7 @@ def test_edge_smoke_cli_fails_when_client_api_key_is_missing(monkeypatch) -> Non
     import thunder_forge.cli as cli_module
 
     monkeypatch.delenv("TF_USERS", raising=False)
-    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (Path.cwd(), Path.cwd() / ".env"), raising=False)
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
 
     result = runner.invoke(
         app,
@@ -88,7 +104,7 @@ def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkey
 
     captured: dict[str, object] = {}
     monkeypatch.setenv("TF_USERS", '{"client-a":"secret-a","client-b":"secret-b"}')
-    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (Path.cwd(), Path.cwd() / ".env"), raising=False)
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
 
     def fake_serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
         captured["host"] = host
@@ -125,6 +141,70 @@ def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkey
     assert "secret-b" not in result.stdout
 
 
+def test_edge_serve_cli_uses_config_defaults(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("TF_USERS", '{"client-a":"secret-a"}')
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (_cluster_config(edge_port=45116, olla_port=45115), Path.cwd()),
+        raising=False,
+    )
+
+    def fake_serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
+        captured["host"] = host
+        captured["port"] = port
+        captured["config"] = config
+
+    monkeypatch.setattr(cli_module, "serve_edge_proxy", fake_serve_edge_proxy, raising=False)
+
+    result = runner.invoke(app, ["edge", "serve"])
+
+    assert result.exit_code == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 45116
+    config = captured["config"]
+    assert isinstance(config, EdgeProxyConfig)
+    assert config.olla_base_url == "http://127.0.0.1:45115"
+    assert "serving_edge: http://127.0.0.1:45116" in result.stdout
+    assert "olla_base_url: http://127.0.0.1:45115" in result.stdout
+
+
+def test_edge_smoke_cli_uses_config_default(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    captured: dict[str, str] = {}
+    monkeypatch.setenv("TF_USERS", '{"client-a":"dev-secret"}')
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (_cluster_config(edge_port=45116), Path.cwd()),
+        raising=False,
+    )
+
+    def fake_smoke_edge_contract(*, base_url, api_key, model, prompt, timeout):
+        captured["base_url"] = base_url
+        return EdgeSmokeResult(
+            base_url=base_url,
+            model=model,
+            missing_auth_401=True,
+            invalid_auth_401=True,
+            models_ok=True,
+            chat_ok=True,
+            session_ok=True,
+        )
+
+    monkeypatch.setattr(cli_module, "smoke_edge_contract", fake_smoke_edge_contract, raising=False)
+
+    result = runner.invoke(app, ["edge", "smoke", "--client-id", "client-a", "--model", "memory"])
+
+    assert result.exit_code == 0
+    assert captured["base_url"] == "http://127.0.0.1:45116"
+    assert "base_url: http://127.0.0.1:45116" in result.stdout
+
+
 def test_edge_keys_cli_generates_user_hash_without_printing_secrets(tmp_path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
@@ -142,7 +222,7 @@ def test_edge_keys_cli_generates_user_hash_without_printing_secrets(tmp_path, mo
     assert "TF_USERS='" in content
     assert '"client-a":"' in content
     assert '"client-b":"' in content
-    assert "TF_EDGE_ACCESS_LOG=logs/tf-edge-access.jsonl" in content
+    assert "TF_EDGE_ACCESS_LOG" not in content
     user_hash = next(line.partition("=")[2] for line in content.splitlines() if line.startswith("TF_USERS="))
     assert user_hash not in result.stdout
 
@@ -164,7 +244,7 @@ def test_edge_usage_cli_summarizes_access_log_by_client(tmp_path, monkeypatch) -
         )
         + "\n"
     )
-    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (tmp_path, tmp_path / ".env"), raising=False)
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), tmp_path), raising=False)
 
     result = runner.invoke(app, ["edge", "usage", "--access-log", str(log_path)])
 

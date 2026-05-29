@@ -14,22 +14,23 @@ from thunder_forge.cluster.artifacts import (
     probe_artifact_presence,
     run_artifact_download,
     run_artifact_sync,
+    studio_omlx_models_dir_from_env,
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
 from thunder_forge.cluster.edge import (
-    DEFAULT_EDGE_ACCESS_LOG,
-    EDGE_ACCESS_LOG_ENV,
     EDGE_USERS_ENV,
     EdgeProxyConfig,
     build_edge_clients_from_env,
     edge_api_key_from_env,
     ensure_edge_api_keys,
+    run_edge_service_restart,
     serve_edge_proxy,
     smoke_edge_contract,
     summarize_edge_usage,
 )
 from thunder_forge.cluster.fabric import build_transport_plan
-from thunder_forge.cluster.olla import dev_smoke_olla, smoke_olla_router
+from thunder_forge.cluster.gateway import GatewayDaemonSetupResult, run_gateway_daemon_setup
+from thunder_forge.cluster.olla import dev_smoke_olla, run_olla_service_restart, smoke_olla_router
 from thunder_forge.cluster.omlx import (
     check_omlx_health,
     run_omlx_daemon_restart,
@@ -39,6 +40,12 @@ from thunder_forge.cluster.omlx import (
     run_omlx_runtime_restart,
     run_omlx_runtime_start,
     smoke_omlx_chat,
+)
+from thunder_forge.cluster.ports import (
+    DEFAULT_EDGE_PORT,
+    DEFAULT_OLLA_PORT,
+    local_base_url,
+    resolve_port,
 )
 
 app = typer.Typer(
@@ -50,22 +57,26 @@ runtime_app = typer.Typer(help="Manage node-level runtimes such as oMLX.", no_ar
 artifact_app = typer.Typer(help="Inspect model artifact readiness for oMLX nodes.", no_args_is_help=True)
 edge_app = typer.Typer(help="Smoke-test and operate the minimal TF edge.", no_args_is_help=True)
 olla_app = typer.Typer(help="Smoke-test the generated Olla router layer.", no_args_is_help=True)
+config_app = typer.Typer(help="Inspect and validate Thunder Forge configuration.", no_args_is_help=True)
+service_app = typer.Typer(help="Install and restart managed Thunder Forge services.", no_args_is_help=True)
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(artifact_app, name="artifact")
 app.add_typer(edge_app, name="edge")
 app.add_typer(olla_app, name="olla")
+app.add_typer(config_app, name="config")
+app.add_typer(service_app, name="service")
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
     """Load the TF cluster config. Returns (ClusterConfig, repo_root Path)."""
-    from thunder_forge.cluster.config import find_repo_root, load_cluster_config
+    import thunder_forge.cluster.config as _cfg
 
-    repo_root = find_repo_root()
-    cluster_config_path = repo_root / "configs" / "node-assignments.yaml"
+    repo_root = _cfg.find_repo_root()
+    cluster_config_path = _cfg.default_cluster_config_path(repo_root)
     if not cluster_config_path.exists():
         typer.echo(f"Error: {cluster_config_path} not found", err=True)
         raise typer.Exit(1)
-    return load_cluster_config(cluster_config_path), repo_root
+    return _cfg.load_cluster_config(cluster_config_path), repo_root
 
 
 def _repo_root() -> Path:
@@ -90,12 +101,8 @@ def _repo_relative_path(repo_root: Path, path: Path) -> Path:
     return expanded if expanded.is_absolute() else repo_root / expanded
 
 
-def _edge_access_log_path(repo_root: Path, access_log: Path | None) -> Path:
-    configured = (
-        str(access_log)
-        if access_log is not None
-        else os.environ.get(EDGE_ACCESS_LOG_ENV, DEFAULT_EDGE_ACCESS_LOG)
-    )
+def _edge_access_log_path(repo_root: Path, config: ClusterConfig, access_log: Path | None) -> Path:
+    configured = str(access_log) if access_log is not None else config.services.edge_access_log
     return _repo_relative_path(repo_root, Path(configured))
 
 
@@ -147,9 +154,331 @@ def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
         typer.echo("fabric_host: true")
 
 
+@config_app.command("lint")
+def config_lint() -> None:
+    """Validate Thunder Forge desired state before generating runtime/router config."""
+    from thunder_forge.cluster.config import lint_cluster_config
+
+    config, _ = _load_config()
+    issues = lint_cluster_config(config)
+    if not issues:
+        typer.echo("config: ok")
+        return
+
+    typer.echo("config: issues found")
+    for issue in issues:
+        typer.echo(f"{issue.severity}: {issue.path}: {issue.message}")
+    if any(issue.severity == "error" for issue in issues):
+        raise typer.Exit(1)
+
+
+def _print_launchd_service_result(result, *, manager: str, dry_run: bool) -> None:
+    typer.echo(f"service: {result.service}")
+    typer.echo(f"manager: {manager}")
+    typer.echo(f"plist_path: {result.plist_path}")
+    if result.staging_plist_path:
+        typer.echo(f"staging_plist_path: {result.staging_plist_path}")
+    typer.echo(f"label: {result.label}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    if result.plist_content:
+        typer.echo("plist:")
+        for line in result.plist_content.splitlines():
+            typer.echo(f"  {line}")
+    if result.commands:
+        typer.echo("commands:")
+        for cmd in result.commands:
+            typer.echo(f"  - {cmd}")
+    if result.applied:
+        typer.echo(f"service_label_verified: {'yes' if result.service_label_verified else 'no'}")
+        typer.echo(f"health_ok: {'yes' if result.health_ok else 'no'}")
+        if result.ok:
+            typer.echo("status: restarted")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+
+
+def _service_result_failed(result) -> bool:
+    return bool(result.errors) or (result.applied and not result.ok)
+
+
+def _gateway_operator_user(config: ClusterConfig, user: str) -> str:
+    if user:
+        return user
+    try:
+        return config.gateway.user or os.environ.get("USER", "shag")
+    except ValueError:
+        return os.environ.get("USER", "shag")
+
+
+def _print_gateway_daemon_setup_result(result: GatewayDaemonSetupResult, *, dry_run: bool) -> None:
+    typer.echo("scope: gateway")
+    typer.echo("manager: daemon")
+    typer.echo(f"operator_user: {result.user}")
+    typer.echo(f"admin_user: {result.admin_user or '(direct sudo)'}")
+    typer.echo(f"sudoers_path: {result.sudoers_path}")
+    typer.echo(f"script_path: {result.script_path}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    if result.services:
+        typer.echo("services:")
+        for service in result.services:
+            typer.echo(f"  - {service.service}: {service.label}")
+            typer.echo(f"    plist_path: {service.plist_path}")
+            typer.echo(f"    staging_plist_path: {service.staging_plist_path}")
+    if dry_run and result.script_content:
+        typer.echo("script:")
+        for line in result.script_content.splitlines():
+            typer.echo(f"  {line}")
+    if result.commands:
+        typer.echo("commands:")
+        for cmd in result.commands:
+            typer.echo(f"  - {cmd}")
+    if result.applied:
+        typer.echo(f"sudoers_verified: {'yes' if result.sudoers_verified else 'no'}")
+        typer.echo(f"service_labels_verified: {'yes' if result.service_labels_verified else 'no'}")
+        typer.echo(f"health_ok: {'yes' if result.health_ok else 'no'}")
+        if result.ok:
+            typer.echo("status: daemon setup complete")
+    for error in result.errors:
+        typer.echo(f"Error: {error}", err=True)
+
+
+@service_app.command("setup-daemon")
+def service_setup_daemon(
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print gateway setup script and commands without executing by default.",
+    ),
+    timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for setup commands."),
+    user: str = typer.Option(
+        "",
+        "--user",
+        help="Operator/runtime user to grant narrow sudoers rights. Defaults to the configured gateway user.",
+    ),
+    admin_user: str = typer.Option(
+        "",
+        "--admin-user",
+        help="Admin account that can run sudo on the gateway. Defaults to services.frontend.admin_user.",
+    ),
+    script_path: str = typer.Option(
+        "",
+        "--script-path",
+        help="Local path for the generated setup script. Defaults to .tmp/run/thunder-forge-gateway-daemon-setup.sh.",
+    ),
+    binary: Path = typer.Option(Path(".tmp/olla-bin/olla"), "--binary", help="Olla binary path."),
+    config_path: Path = typer.Option(Path("configs/olla-config.yaml"), "--config", help="Olla config path."),
+    edge_host: str = typer.Option("127.0.0.1", "--host", help="Host/interface for TF edge."),
+    olla_port: int | None = typer.Option(
+        None,
+        "--olla-port",
+        help="Olla port. Defaults to tfconfig services.olla.port.",
+    ),
+    edge_port: int | None = typer.Option(
+        None,
+        "--edge-port",
+        help="Edge port. Defaults to tfconfig services.edge.port.",
+    ),
+    olla_base_url: str | None = typer.Option(
+        None,
+        "--olla-base-url",
+        help=f"Olla base URL for edge. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
+    ),
+    users_env: str = typer.Option(
+        EDGE_USERS_ENV,
+        "--users-env",
+        help="Environment variable containing TF edge client API-key JSON.",
+    ),
+    access_log: Path | None = typer.Option(
+        None,
+        "--access-log",
+        help="TF edge JSONL access log path. Defaults to tfconfig services.edge.access_log.",
+    ),
+    allow_sudo_prompt: bool = typer.Option(
+        False,
+        "--allow-sudo-prompt",
+        help="Allow gateway setup to prompt through sudo/su. Use from a real terminal.",
+    ),
+) -> None:
+    """Set up gateway Olla/Edge system daemons and narrow sudoers for future repairs."""
+    config, repo_root = _load_config()
+    resolved_admin_user = admin_user or config.services.frontend_admin_user
+    if not dry_run and resolved_admin_user and not allow_sudo_prompt:
+        typer.echo(
+            "Error: gateway setup through an admin user requires --allow-sudo-prompt from a real terminal",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    result = run_gateway_daemon_setup(
+        repo_root=repo_root,
+        binary=binary,
+        config_path=config_path,
+        edge_host=edge_host,
+        olla_port=resolve_port(olla_port, default=config.services.olla_port),
+        edge_port=resolve_port(edge_port, default=config.services.edge_port),
+        olla_base_url=olla_base_url or local_base_url(config.services.olla_port),
+        users_env=users_env,
+        access_log_path=_edge_access_log_path(repo_root, config, access_log),
+        user=_gateway_operator_user(config, user),
+        admin_user=resolved_admin_user,
+        interactive_sudo=allow_sudo_prompt,
+        script_path=script_path or None,
+        apply=not dry_run,
+        timeout=timeout,
+    )
+    _print_gateway_daemon_setup_result(result, dry_run=dry_run)
+    if bool(result.errors) or (result.applied and not result.ok):
+        raise typer.Exit(1)
+
+
+@service_app.command("restart")
+def service_restart(
+    service: str = typer.Option(..., "--service", help="Service to restart: olla, edge, or omlx."),
+    node: str = typer.Option("", "--node", help="Node name for node-scoped services such as omlx."),
+    manager: str = typer.Option(
+        "launchd",
+        "--manager",
+        help="Service manager. Olla/edge: launchd or daemon. oMLX: process, daemon, or launchd.",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print plist and commands without executing by default.",
+    ),
+    timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds for service commands."),
+    binary: Path = typer.Option(Path(".tmp/olla-bin/olla"), "--binary", help="Olla binary path."),
+    config_path: Path = typer.Option(Path("configs/olla-config.yaml"), "--config", help="Olla config path."),
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help="Service port. Defaults to the matching tfconfig services.*.port value.",
+    ),
+    host: str = typer.Option("127.0.0.1", "--host", help="Host/interface for frontend services such as edge."),
+    olla_base_url: str | None = typer.Option(
+        None,
+        "--olla-base-url",
+        help=f"Olla base URL for edge. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
+    ),
+    users_env: str = typer.Option(
+        EDGE_USERS_ENV,
+        "--users-env",
+        help="Environment variable containing TF edge client API-key JSON.",
+    ),
+    access_log: Path | None = typer.Option(
+        None,
+        "--access-log",
+        help="TF edge JSONL access log path. Defaults to tfconfig services.edge.access_log.",
+    ),
+    allow_sudo_prompt: bool = typer.Option(
+        False,
+        "--allow-sudo-prompt",
+        help="Allow frontend system-daemon install commands to prompt for sudo instead of requiring sudo -n.",
+    ),
+) -> None:
+    """Restart a managed Thunder Forge service through its configured service manager."""
+    normalized_service = service.lower()
+    normalized_manager = manager.lower()
+
+    if normalized_service == "olla":
+        config, repo_root = _load_config()
+        resolved_port = resolve_port(port, default=config.services.olla_port)
+        result = run_olla_service_restart(
+            repo_root=repo_root,
+            binary=binary,
+            config_path=config_path,
+            port=resolved_port,
+            manager=normalized_manager,
+            apply=not dry_run,
+            timeout=timeout,
+            interactive_sudo=allow_sudo_prompt,
+            admin_user=config.services.frontend_admin_user if allow_sudo_prompt else "",
+        )
+        _print_launchd_service_result(result, manager=normalized_manager, dry_run=dry_run)
+        if _service_result_failed(result):
+            raise typer.Exit(1)
+        return
+
+    if normalized_service == "edge":
+        config, repo_root = _load_config()
+        resolved_port = resolve_port(port, default=config.services.edge_port)
+        resolved_olla_base_url = olla_base_url or local_base_url(config.services.olla_port)
+        access_log_path = _edge_access_log_path(repo_root, config, access_log)
+        result = run_edge_service_restart(
+            repo_root=repo_root,
+            host=host,
+            port=resolved_port,
+            olla_base_url=resolved_olla_base_url,
+            users_env=users_env,
+            access_log_path=access_log_path,
+            manager=normalized_manager,
+            apply=not dry_run,
+            timeout=timeout,
+            interactive_sudo=allow_sudo_prompt,
+            admin_user=config.services.frontend_admin_user if allow_sudo_prompt else "",
+        )
+        _print_launchd_service_result(result, manager=normalized_manager, dry_run=dry_run)
+        if _service_result_failed(result):
+            raise typer.Exit(1)
+        return
+
+    if normalized_service != "omlx":
+        typer.echo("Error: --service must be 'olla', 'edge', or 'omlx'", err=True)
+        raise typer.Exit(1)
+    if not node:
+        typer.echo("Error: --service omlx requires --node", err=True)
+        raise typer.Exit(1)
+
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, node)
+    if runtime_node.home_dir is None:
+        runtime_node.home_dir = f"/Users/{runtime_node.user}"
+    _print_runtime_node_header(node, runtime_node)
+
+    if normalized_manager == "process":
+        process_result = run_omlx_process_restart(runtime_node, apply=not dry_run, timeout=timeout)
+        typer.echo("service: omlx")
+        typer.echo(f"manager: {normalized_manager}")
+        typer.echo(f"command: {process_result.command}")
+        typer.echo(f"pid_path: {process_result.pid_path}")
+        typer.echo(f"stdout_log: {process_result.stdout_log}")
+        typer.echo(f"stderr_log: {process_result.stderr_log}")
+        typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+        if process_result.commands:
+            typer.echo("commands:")
+            for cmd in process_result.commands:
+                typer.echo(f"  - {cmd}")
+        if process_result.applied:
+            if process_result.pid:
+                typer.echo(f"pid: {process_result.pid}")
+            typer.echo(f"health_ok: {'yes' if process_result.health_ok else 'no'}")
+            if process_result.ok:
+                typer.echo("status: restarted")
+        for error in process_result.errors:
+            typer.echo(f"Error: {error}", err=True)
+        if process_result.errors or (process_result.applied and not process_result.ok):
+            raise typer.Exit(1)
+        return
+
+    if normalized_manager == "daemon":
+        result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+    elif normalized_manager == "launchd":
+        result = run_omlx_runtime_restart(runtime_node, apply=not dry_run, timeout=timeout)
+    else:
+        typer.echo("Error: omlx --manager must be 'process', 'daemon', or 'launchd'", err=True)
+        raise typer.Exit(1)
+    result.service = "omlx"
+    _print_launchd_service_result(result, manager=normalized_manager, dry_run=dry_run)
+    if _service_result_failed(result):
+        raise typer.Exit(1)
+
+
 @edge_app.command("smoke")
 def edge_smoke(
-    base_url: str = typer.Option(..., "--base-url", help="TF edge base URL, for example http://127.0.0.1:40116."),
+    base_url: str | None = typer.Option(
+        None,
+        "--base-url",
+        help=f"TF edge base URL. Defaults to tfconfig services.edge.port or {DEFAULT_EDGE_PORT}.",
+    ),
     users_env: str = typer.Option(
         EDGE_USERS_ENV,
         "--users-env",
@@ -161,13 +490,20 @@ def edge_smoke(
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
 ) -> None:
     """Run a black-box smoke test against a running TF edge."""
-    _load_repo_dotenv()
+    config, _ = _load_config()
+    resolved_base_url = base_url or local_base_url(config.services.edge_port)
     env_name, api_key = edge_api_key_from_env(client_id=client_id, users_env=users_env)
     if not api_key:
         typer.echo(f"Error: {env_name} does not contain client '{client_id}'", err=True)
         raise typer.Exit(1)
 
-    result = smoke_edge_contract(base_url=base_url, api_key=api_key, model=model, prompt=prompt, timeout=timeout)
+    result = smoke_edge_contract(
+        base_url=resolved_base_url,
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        timeout=timeout,
+    )
     typer.echo(f"base_url: {result.base_url}")
     typer.echo(f"model: {result.model}")
     typer.echo(f"missing_auth_401: {'yes' if result.missing_auth_401 else 'no'}")
@@ -197,11 +533,6 @@ def edge_keys(
         "--users-env",
         help="Environment variable containing client API-key JSON.",
     ),
-    access_log: str = typer.Option(
-        DEFAULT_EDGE_ACCESS_LOG,
-        "--access-log",
-        help="Default JSONL access log path to store in .env.",
-    ),
 ) -> None:
     """Generate missing MVP TF edge API keys into a local dotenv file."""
     if not clients:
@@ -213,16 +544,12 @@ def edge_keys(
         env_file=env_path,
         clients=clients,
         users_env=users_env,
-        access_log_path=access_log,
     )
     typer.echo(f"env_file: {result.env_file}")
     typer.echo(f"users_env: {users_env}")
     for key in result.keys:
         typer.echo(f"client: {key.client_id}")
         typer.echo(f"status: {key.status}")
-    typer.echo(f"access_log_env: {result.access_log_env_name}")
-    typer.echo(f"access_log: {result.access_log_path}")
-    typer.echo(f"access_log_status: {result.access_log_status}")
     typer.echo("secrets_printed: no")
 
 
@@ -231,12 +558,12 @@ def edge_usage(
     access_log: Path | None = typer.Option(
         None,
         "--access-log",
-        help="JSONL access log path. Defaults to .env TF_EDGE_ACCESS_LOG.",
+        help="JSONL access log path. Defaults to tfconfig services.edge.access_log.",
     ),
 ) -> None:
     """Summarize TF edge JSONL request accounting by client id."""
-    repo_root, _ = _load_repo_dotenv()
-    log_path = _edge_access_log_path(repo_root, access_log)
+    config, repo_root = _load_config()
+    log_path = _edge_access_log_path(repo_root, config, access_log)
     summary = summarize_edge_usage(log_path)
     typer.echo(f"access_log: {summary.access_log_path}")
     typer.echo(f"requests_total: {summary.requests_total}")
@@ -263,14 +590,34 @@ def edge_usage(
 
 @olla_app.command("smoke")
 def olla_smoke(
-    base_url: str = typer.Option(..., "--base-url", help="Olla base URL, for example http://127.0.0.1:40115."),
+    base_url: str | None = typer.Option(
+        None,
+        "--base-url",
+        help=f"Olla base URL. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
+    ),
     model: str = typer.Option(..., "--model", help="Backend runtime model id to verify."),
     alias: str = typer.Option(..., "--alias", help="Public alias routed by Olla to the backend model."),
+    expected_endpoint: str | None = typer.Option(
+        None,
+        "--expected-endpoint",
+        help="Require this Olla endpoint to be healthy in /internal/status/endpoints.",
+    ),
     prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
 ) -> None:
     """Run a black-box smoke test against a running Olla router."""
-    result = smoke_olla_router(base_url=base_url, model=model, alias=alias, prompt=prompt, timeout=timeout)
+    config, _ = _load_config()
+    resolved_base_url = base_url or local_base_url(
+        resolve_port(None, default=config.services.olla_port)
+    )
+    result = smoke_olla_router(
+        base_url=resolved_base_url,
+        model=model,
+        alias=alias,
+        expected_endpoint=expected_endpoint,
+        prompt=prompt,
+        timeout=timeout,
+    )
     typer.echo(f"base_url: {result.base_url}")
     typer.echo(f"model: {result.model}")
     typer.echo(f"alias: {result.alias}")
@@ -295,11 +642,31 @@ def olla_dev_smoke(
     binary: str = typer.Option(..., "--binary", help="Path to the Olla binary."),
     model: str = typer.Option(..., "--model", help="Backend runtime model id to verify."),
     alias: str = typer.Option(..., "--alias", help="Public alias routed by Olla to the backend model."),
+    expected_endpoint: str | None = typer.Option(
+        None,
+        "--expected-endpoint",
+        help="Require this Olla endpoint to be healthy in /internal/status/endpoints.",
+    ),
     prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds for smoke checks."),
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help=f"Olla service port. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
+    ),
 ) -> None:
     """Generate Olla config, spawn Olla, smoke, teardown. Single-command dev workflow."""
-    result = dev_smoke_olla(binary=binary, model=model, alias=alias, prompt=prompt, smoke_timeout=timeout)
+    config, _ = _load_config()
+    resolved_port = resolve_port(port, default=config.services.olla_port)
+    result = dev_smoke_olla(
+        binary=binary,
+        model=model,
+        alias=alias,
+        expected_endpoint=expected_endpoint,
+        prompt=prompt,
+        smoke_timeout=timeout,
+        port=resolved_port,
+    )
     typer.echo(f"config_generated: {'yes' if result.config_generated else 'no'}")
     if result.config_path:
         typer.echo(f"config_path: {result.config_path}")
@@ -329,8 +696,16 @@ def olla_dev_smoke(
 @edge_app.command("serve")
 def edge_serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Host/interface for the TF edge listener."),
-    port: int = typer.Option(40116, "--port", help="Port for the TF edge listener."),
-    olla_base_url: str = typer.Option(..., "--olla-base-url", help="Olla base URL, e.g. http://127.0.0.1:40115."),
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help=f"Port for the TF edge listener. Defaults to tfconfig services.edge.port or {DEFAULT_EDGE_PORT}.",
+    ),
+    olla_base_url: str | None = typer.Option(
+        None,
+        "--olla-base-url",
+        help=f"Olla base URL. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
+    ),
     users_env: str = typer.Option(
         EDGE_USERS_ENV,
         "--users-env",
@@ -339,11 +714,13 @@ def edge_serve(
     access_log: Path | None = typer.Option(
         None,
         "--access-log",
-        help="JSONL access log path. Defaults to .env TF_EDGE_ACCESS_LOG.",
+        help="JSONL access log path. Defaults to tfconfig services.edge.access_log.",
     ),
 ) -> None:
     """Run the minimal non-streaming TF edge proxy."""
-    repo_root, _ = _load_repo_dotenv()
+    config, repo_root = _load_config()
+    resolved_port = resolve_port(port, default=config.services.edge_port)
+    resolved_olla_base_url = olla_base_url or local_base_url(config.services.olla_port)
     clients_by_key = build_edge_clients_from_env(
         users_env=users_env,
     )
@@ -354,7 +731,7 @@ def edge_serve(
         )
         raise typer.Exit(1)
 
-    access_log_path = _edge_access_log_path(repo_root, access_log)
+    access_log_path = _edge_access_log_path(repo_root, config, access_log)
 
     def log_sink(line: str) -> None:
         access_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -364,16 +741,16 @@ def edge_serve(
     client_ids = sorted({client.client_id for client in clients_by_key.values()})
 
     config = EdgeProxyConfig(
-        olla_base_url=olla_base_url,
+        olla_base_url=resolved_olla_base_url,
         clients_by_key=clients_by_key,
         access_log_sink=log_sink,
     )
-    typer.echo(f"serving_edge: http://{host}:{port}")
-    typer.echo(f"olla_base_url: {olla_base_url}")
+    typer.echo(f"serving_edge: http://{host}:{resolved_port}")
+    typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")
     typer.echo(f"api_key_count: {len(clients_by_key)}")
     typer.echo(f"access_log: {access_log_path}")
-    serve_edge_proxy(host=host, port=port, config=config)
+    serve_edge_proxy(host=host, port=resolved_port, config=config)
 
 
 @artifact_app.command("status")
@@ -385,16 +762,19 @@ def artifact_status(
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
+    studio_omlx_models_dir = studio_omlx_models_dir_from_env()
     presence = probe_artifact_presence(
         repo_id=model,
         node_host=runtime_node.host,
         node_home_dir=node_home_dir,
+        studio_omlx_models_dir=studio_omlx_models_dir,
     )
     plan = build_artifact_readiness_plan(
         repo_id=model,
         node=node,
         node_home_dir=node_home_dir,
         presence=presence,
+        studio_omlx_models_dir=studio_omlx_models_dir,
     )
 
     typer.echo(f"model: {model}")
@@ -423,7 +803,11 @@ def artifact_download(
     timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for model download when applying."),
 ) -> None:
     """Download a model directly into studio's oMLX model directory."""
-    plan = build_artifact_download_plan(repo_id=model)
+    _load_repo_dotenv()
+    plan = build_artifact_download_plan(
+        repo_id=model,
+        studio_omlx_models_dir=studio_omlx_models_dir_from_env(),
+    )
 
     typer.echo(f"model: {model}")
     typer.echo(f"model_dir_name: {plan.model_dir_name}")
@@ -491,6 +875,7 @@ def artifact_sync(
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
+    studio_omlx_models_dir = studio_omlx_models_dir_from_env()
     requested_transport = "management" if management else transport
     transport_plan = build_transport_plan(
         requested_transport=requested_transport,
@@ -505,18 +890,21 @@ def artifact_sync(
         repo_id=model,
         node_host=runtime_node.host,
         node_home_dir=node_home_dir,
+        studio_omlx_models_dir=studio_omlx_models_dir,
     )
     readiness_plan = build_artifact_readiness_plan(
         repo_id=model,
         node=node,
         node_home_dir=node_home_dir,
         presence=presence,
+        studio_omlx_models_dir=studio_omlx_models_dir,
     )
     sync_plan = build_artifact_sync_plan(
         repo_id=model,
         node_user=runtime_node.user,
         node_host=transport_plan.resolved_transport_host,
         node_home_dir=node_home_dir,
+        studio_omlx_models_dir=studio_omlx_models_dir,
         ssh_host_key_alias=runtime_node.host if transport_plan.uses_fabric else None,
     )
 
@@ -602,7 +990,7 @@ def runtime_setup_daemon(
     admin_user: str = typer.Option(
         "",
         "--admin-user",
-        help="Admin account that can run sudo on the node. Defaults to the configured node user.",
+        help="Admin account that can run sudo on the node. Defaults to nodes.<node>.admin_user, then the node user.",
     ),
     via_su: bool = typer.Option(
         False,
@@ -622,18 +1010,31 @@ def runtime_setup_daemon(
     timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for remote setup when applying."),
 ) -> None:
     """Set up a node for sudo-backed system oMLX daemon management."""
-    if via_su and not admin_user:
-        typer.echo("Error: --via-su requires --admin-user", err=True)
-        raise typer.Exit(1)
-
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     if runtime_node.home_dir is None:
         runtime_node.home_dir = f"/Users/{runtime_node.user}"
+    resolved_admin_user = admin_user or runtime_node.admin_user
+    if via_su and not resolved_admin_user:
+        typer.echo("Error: --via-su requires --admin-user or nodes.<node>.admin_user", err=True)
+        raise typer.Exit(1)
+
+    if not dry_run:
+        typer.echo(f"Bootstrapping oMLX daemon on {node} with admin_user: {resolved_admin_user or runtime_node.user}")
+        if via_su:
+            typer.echo(
+                "SSH will connect as the node operator user, then su to the admin user. "
+                "The next raw 'Password:' prompt is the admin user's local node password."
+            )
+        else:
+            typer.echo(
+                "SSH will connect as the admin user directly. "
+                "If sudo needs a password, Thunder Forge will use a labeled sudo prompt."
+            )
 
     result = run_omlx_daemon_setup(
         runtime_node,
-        admin_user=admin_user or None,
+        admin_user=resolved_admin_user or None,
         via_su=via_su,
         script_path=script_path or None,
         apply=not dry_run,
@@ -876,12 +1277,18 @@ def runtime_install(
 
 
 @app.command("generate-olla-config")
-def generate_olla_config_cmd() -> None:
+def generate_olla_config_cmd(
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help=f"Olla service port. Defaults to tfconfig services.olla.port or {DEFAULT_OLLA_PORT}.",
+    ),
+) -> None:
     """Generate olla-config.yaml from the TF cluster config."""
     from thunder_forge.cluster.config import generate_olla_config
 
     config, repo_root = _load_config()
     config_path = repo_root / "configs" / "olla-config.yaml"
-    content = generate_olla_config(config)
+    content = generate_olla_config(config, port=port)
     config_path.write_text(content)
     typer.echo(f"✓ Generated {config_path}")

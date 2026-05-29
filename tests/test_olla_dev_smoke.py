@@ -17,7 +17,7 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
     repo = tmp_path
     config_dir = repo / "configs"
     config_dir.mkdir()
-    (config_dir / "node-assignments.yaml").write_text(
+    (repo / "tfconfig.yaml").write_text(
         "models:\n"
         "  qwen3-1.7b-omlx-msm3-test:\n"
         "    source: { repo: mlx-community/Qwen3-1.7B-4bit }\n"
@@ -32,7 +32,7 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
         "    host: msm3-wifi.lan\n"
         "    ram_gb: 128\n"
         "    user: shag\n"
-        "    role: node\n"
+        "    role: inference\n"
         "    runtime:\n"
         "      type: omlx\n"
         "      port: 8018\n"

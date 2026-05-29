@@ -87,6 +87,7 @@ def test_ensure_edge_api_keys_creates_missing_keys_without_overwriting_existing(
     assert "TF_USERS='" in content
     assert '"client-a":"existing-a"' in content
     assert '"client-b":"' in content
+    assert "TF_EDGE_ACCESS_LOG" not in content
     assert "existing-a" not in repr(result)
 
 
@@ -175,6 +176,45 @@ def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_oll
     assert requests == []
     assert missing.body == b'{"error":"unauthorized"}'
     assert invalid.body == b'{"error":"unauthorized"}'
+
+
+def test_proxy_edge_request_rejects_streaming_chat_without_calling_olla_or_logging_secrets() -> None:
+    forwarded: list[httpx.Request] = []
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append(request)
+        return httpx.Response(200, json={"unexpected": True})
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps(
+            {
+                "model": "qwen3-1.7b-omlx-msm3-test",
+                "messages": [{"role": "user", "content": "do not log me"}],
+                "stream": True,
+            }
+        ).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 501
+    assert json.loads(result.body) == {
+        "error": "streaming_not_implemented",
+        "message": "TF edge is a non-streaming proxy; send stream=false or omit stream.",
+    }
+    assert forwarded == []
+    assert all("dev-secret" not in entry for entry in logs)
+    assert all("do not log me" not in entry for entry in logs)
 
 
 def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secret() -> None:

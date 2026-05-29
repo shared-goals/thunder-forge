@@ -6,7 +6,7 @@ from textwrap import dedent
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
-from thunder_forge.cluster.artifacts import ArtifactPresence
+from thunder_forge.cluster.artifacts import STUDIO_OMLX_MODELS_DIR_ENV, ArtifactPresence
 
 runner = CliRunner()
 
@@ -15,7 +15,7 @@ def _write_runtime_config(repo: Path, *, fabric_host: bool = True) -> None:
     config_dir = repo / "configs"
     config_dir.mkdir()
     fabric_line = "                fabric_host: true\n" if fabric_host else ""
-    (config_dir / "node-assignments.yaml").write_text(
+    (repo / "tfconfig.yaml").write_text(
         dedent(f"""\
             models: {{}}
             nodes:
@@ -23,7 +23,7 @@ def _write_runtime_config(repo: Path, *, fabric_host: bool = True) -> None:
                 host: msm3-wifi.lan
 {fabric_line}                ram_gb: 128
                 user: shag
-                role: node
+                role: inference
                 home_dir: /Users/shag
                 runtime:
                   type: omlx
@@ -43,7 +43,7 @@ def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -109,6 +109,32 @@ def test_artifact_download_dry_run_prints_direct_omlx_download_plan(tmp_path: Pa
     assert ".cache/huggingface" not in result.stdout
 
 
+def test_artifact_download_dry_run_uses_studio_omlx_dir_env(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config(repo)
+    studio_omlx_models_dir = str(tmp_path / "studio" / ".omlx" / "models")
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setenv(STUDIO_OMLX_MODELS_DIR_ENV, studio_omlx_models_dir)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "download",
+            "--model",
+            "mlx-community/Qwen3-1.7B-4bit",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert f"destination: {studio_omlx_models_dir}/mlx-community/Qwen3-1.7B-4bit" in result.stdout
+    assert f"--model-dir {studio_omlx_models_dir}" in result.stdout
+
+
 def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo, fabric_host=False)
@@ -120,7 +146,7 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -153,6 +179,42 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
     assert ".cache/huggingface" not in result.stdout
 
 
+def test_artifact_sync_dry_run_uses_studio_omlx_dir_env(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config(repo, fabric_host=False)
+    studio_omlx_models_dir = str(tmp_path / "studio" / ".omlx" / "models")
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setenv(STUDIO_OMLX_MODELS_DIR_ENV, studio_omlx_models_dir)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
+            studio_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "BAAI/bge-small-en-v1.5",
+            "--node",
+            "msm3",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert f"source_path: {studio_omlx_models_dir}/BAAI/bge-small-en-v1.5/" in result.stdout
+
+
 def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo)
@@ -165,7 +227,7 @@ def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Pat
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -211,7 +273,7 @@ def test_artifact_sync_falls_back_to_management_host_when_fabric_is_unresolved(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -252,7 +314,7 @@ def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -293,7 +355,7 @@ def test_artifact_sync_without_fabric_host_uses_management_even_when_probe_would
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -337,7 +399,7 @@ def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -428,7 +490,7 @@ def test_artifact_sync_apply_propagates_runner_failure(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir: ArtifactPresence(
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
             studio_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),

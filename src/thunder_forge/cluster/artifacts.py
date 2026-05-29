@@ -7,7 +7,7 @@ import secrets
 import shlex
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -15,6 +15,15 @@ from pathlib import Path
 import httpx
 
 DEFAULT_OMLX_MODELS_DIR = "~/.omlx/models"
+STUDIO_OMLX_MODELS_DIR_ENV = "TF_STUDIO_OMLX_MODELS_DIR"
+
+
+def studio_omlx_models_dir_from_env(env: Mapping[str, str] | None = None) -> str:
+    """Return the studio-side oMLX models directory used by artifact commands."""
+    import os
+
+    source = os.environ if env is None else env
+    return source.get(STUDIO_OMLX_MODELS_DIR_ENV) or DEFAULT_OMLX_MODELS_DIR
 
 
 class ArtifactReadinessAction(StrEnum):
@@ -143,7 +152,7 @@ def build_artifact_sync_plan(
     if ssh_host_key_alias is not None:
         _validate_host(ssh_host_key_alias, name="ssh_host_key_alias")
     identity = build_artifact_identity(repo_id)
-    source_path = f"{Path(f'{studio_omlx_models_dir}/{identity.model_dir_name}').expanduser()}/"
+    source_path = f"{_expanded_studio_omlx_models_dir(studio_omlx_models_dir) / identity.model_dir_name}/"
     remote_omlx_models_dir = f"{node_home_dir}/.omlx/models"
     remote_model_parent_dir = f"{remote_omlx_models_dir}/{identity.namespace}"
     destination = f"{node_user}@{node_host}:{remote_omlx_models_dir}/{identity.model_dir_name}/"
@@ -193,8 +202,8 @@ def build_artifact_download_plan(
 ) -> ArtifactDownloadPlan:
     """Build a plan to download a model through oMLX into studio's model directory."""
     identity = build_artifact_identity(repo_id)
-    destination = f"{studio_omlx_models_dir}/{identity.model_dir_name}"
-    models_dir_arg = str(Path(studio_omlx_models_dir).expanduser())
+    destination = _studio_omlx_model_dir(studio_omlx_models_dir, identity.model_dir_name)
+    models_dir_arg = str(_expanded_studio_omlx_models_dir(studio_omlx_models_dir))
     base_url = "http://127.0.0.1:8020"
     args = [
         "omlx",
@@ -221,6 +230,14 @@ def build_artifact_download_plan(
         args=args,
         base_url=base_url,
     )
+
+
+def _studio_omlx_model_dir(studio_omlx_models_dir: str, model_dir_name: str) -> str:
+    return f"{studio_omlx_models_dir.rstrip('/')}/{model_dir_name}"
+
+
+def _expanded_studio_omlx_models_dir(studio_omlx_models_dir: str) -> Path:
+    return Path(studio_omlx_models_dir).expanduser()
 
 
 def _env_without_socks_proxy() -> dict[str, str]:
@@ -503,10 +520,12 @@ def probe_artifact_presence(
     repo_id: str,
     node_host: str,
     node_home_dir: str,
+    studio_omlx_models_dir: str | None = None,
 ) -> ArtifactPresence:
     """Check oMLX model-directory completeness on studio and a node."""
     identity = build_artifact_identity(repo_id)
-    studio_omlx_model_dir = Path(DEFAULT_OMLX_MODELS_DIR).expanduser() / identity.model_dir_name
+    studio_models_dir = studio_omlx_models_dir or studio_omlx_models_dir_from_env()
+    studio_omlx_model_dir = Path(studio_models_dir).expanduser() / identity.model_dir_name
     node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{identity.model_dir_name}"
 
     return ArtifactPresence(

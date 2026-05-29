@@ -26,12 +26,20 @@ uv run thunder-forge runtime status --node msm3
 uv run thunder-forge runtime restart --node msm3 --apply
 uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply
 uv run thunder-forge runtime restart --node msm3 --manager daemon --apply
+uv run thunder-forge service restart --service omlx --node msm3 --manager daemon --apply
 uv run thunder-forge runtime smoke --node msm3 --model <model>
-uv run thunder-forge olla dev-smoke --binary <path> --model <model> --alias <alias>
+make olla-install
+make olla-restart
+make daemon-bootstrap DAEMON_NODES="msm3"
+make daemon-reinstall DAEMON_NODES="msm3"
+make full-daemon-test EDGE_CLIENT=<client-id>
+uv run thunder-forge service restart --service olla --binary .tmp/olla-bin/olla --config configs/olla-config.yaml --apply
+uv run thunder-forge service restart --service edge --apply
+uv run thunder-forge olla dev-smoke --binary .tmp/olla-bin/olla --model <model> --alias <alias>
 uv run thunder-forge edge keys --client <client-id>
 uv run thunder-forge generate-olla-config
-uv run thunder-forge edge serve --olla-base-url http://127.0.0.1:40115
-uv run thunder-forge edge smoke --base-url http://127.0.0.1:40116 --client-id <client-id> --model memory
+uv run thunder-forge edge serve
+uv run thunder-forge edge smoke --client-id <client-id> --model memory
 uv run thunder-forge edge usage
 uv run pytest --tb=short -q
 uv run ruff check .
@@ -41,24 +49,44 @@ Use implemented Thunder Forge commands or Make targets for normal production wor
 
 TF edge MVP API keys live in one ignored `.env` JSON hash named `TF_USERS`, mapping client ids to API keys. Generate local clients with `make edge-keys EDGE_CLIENTS="client-a client-b"` or `uv run thunder-forge edge keys --client <client-id>`. Do not print key values. Edge JSONL accounting records include `client_id`, model, status, latency, and Olla endpoint but no API keys; summarize with `make edge-usage` or `uv run thunder-forge edge usage`.
 
+Keep `.env` secrets-only. Non-secret local configuration lives in root `tfconfig.yaml` (ignored), mirrored by tracked `tfconfig.example.yaml`. Generated runtime configs live under ignored `configs/`. Service defaults live under `services:`: `services.olla.port` (`40115`), `services.edge.port` (`40116`), `services.omlx.port` (`8018`), `services.edge.access_log` (`logs/tf-edge-access.jsonl`), and optional `services.frontend.admin_user` (`serpo` on `studio`). Config node roles are `gateway`, `cache`, and `inference`; use `roles: [gateway, cache]` for `studio` and `role: inference` for oMLX-serving nodes. Explicit CLI `--port` flags and explicit `nodes.<node>.runtime.port` config values win over shared defaults.
+
 Runtime restart managers:
 
 - `process` is the default no-GUI/no-sudo SSH path. It manages a user-owned detached `omlx serve` process and is good for dev recovery, but it is not reboot durable.
 - `daemon` is the preferred production path after node setup grants narrow `sudo -n` rights for `/usr/bin/install` and `/bin/launchctl`. It installs `/Library/LaunchDaemons/com.thunder-forge.omlx-<port>.plist`, runs oMLX as the configured node user via `UserName`, and manages `system/com.thunder-forge.omlx-<port>` through launchd.
 - `launchd` is the user LaunchAgent path; use it only when the remote user launchd domain is known to accept SSH-managed services.
 
-Use `runtime setup-daemon --node <node> --admin-user <admin>` for the one-time production setup. It generates a node-side admin script, validates sudoers with `visudo -cf`, installs the system LaunchDaemon, and installs the narrow sudoers include used by future `runtime restart --manager daemon` calls. Add `--via-su` when SSH should connect as the node user and then run `su - <admin> -c 'sudo /bin/zsh <script>'` on the node.
+Use `service setup-daemon --apply --allow-sudo-prompt` for one-time gateway setup. It installs frontend Olla/Edge system LaunchDaemons through `services.frontend.admin_user`, validates sudoers with `visudo -cf`, and writes `/etc/sudoers.d/thunder-forge` with only the exact install/launchctl rights needed by future no-prompt gateway repairs. Use `runtime setup-daemon --node <node>` for one-time inference node setup; it defaults to configured `nodes.<node>.admin_user` over direct admin SSH, generates a node-side admin script, validates sudoers with `visudo -cf`, installs the system LaunchDaemon, and writes the same `/etc/sudoers.d/thunder-forge` path on that node. Add `--via-su` only when direct admin SSH is not available and SSH must connect as the node user before running `su - <admin> -c 'sudo /bin/zsh <script>'` on the node.
+
+Use `service restart` as the unified operator command when managing full TF services. `service restart --service olla --apply` and `service restart --service edge --apply` manage frontend LaunchAgents locally as the current user; `--manager daemon` reinstalls/restarts reboot-durable system LaunchDaemons through preinstalled narrow sudoers and should not prompt. `service restart --service omlx --node <node> --manager daemon --apply` delegates to the durable oMLX node daemon path and also expects existing narrow sudoers. `make daemon-bootstrap` is the first-install/admin path for gateway + nodes; `make daemon-reinstall` is the repeatable reinstall/restart path and should be no-prompt once bootstrap has run. Run password-prompting system-daemon setup from a real terminal, not through VS Code guarded execution.
 
 ## Current Topology
 
+Thunder Forge v2 has three operational roles.
+
+- `frontend`: Caddy ingress, TF edge, Olla, routing config, auth/accounting, and external API surface.
+- `cache/download`: artifact preparation under `~/.omlx/models/<owner>/<repo>` plus sync to inference nodes; this can be a script/CLI workflow, not a daemon.
+- `inference node`: oMLX node-level daemon serving the local model set.
+
+Current dev role placement:
+
+- `studio` (macOS): `frontend` and `cache/download`.
+- `msm1`-`msm4` (macOS): inference nodes, with `msm3` as current TF v2 dev node.
+- `rock`: production infra; do not touch for TF v2 dev.
+
+Intended production split:
+
+- `rock` (Armbian): `frontend`.
+- `studio` (macOS): `cache/download`, using oMLX/HF tooling and syncing through Thunderbolt fabric when available, Wi-Fi fallback otherwise.
+- `msm1`-`msm4` (macOS): inference nodes.
+
 Thunder Forge v2 migration is staged.
 
-- `studio`: dev control plane and cache hub; downloads, syncs, and can run TF edge.
 - `msm1`: current TF v1 production node.
 - `msm2`: current TF v1 production node.
 - `msm3`: dedicated TF v2 dev node.
 - `msm4`: direct oMLX node for Hindsight today.
-- `rock`: production infra; do not touch for TF v2 dev.
 
 Production migration order after `msm3` tests and real use cases are stable:
 
