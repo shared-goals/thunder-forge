@@ -205,9 +205,9 @@ def _gateway_operator_user(config: ClusterConfig, user: str) -> str:
     if user:
         return user
     try:
-        return config.gateway.user or os.environ.get("USER", "shag")
+        return config.gateway.user or os.environ.get("USER", "")
     except ValueError:
-        return os.environ.get("USER", "shag")
+        return os.environ.get("USER", "")
 
 
 def _print_gateway_daemon_setup_result(result: GatewayDaemonSetupResult, *, dry_run: bool) -> None:

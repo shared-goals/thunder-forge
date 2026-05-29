@@ -5,18 +5,30 @@ OLLA_BIN_DIR ?= .tmp/olla-bin
 OLLA_BIN ?= $(OLLA_BIN_DIR)/olla
 DAEMON_NODES ?= msm3
 DAEMON_ADMIN_USER ?=
-NODE ?=
-TF_USER ?= serpo
+TF_USER ?= admin
 SMOKE_MODEL ?= gpt-oss-20b-MXFP4-Q8
 SMOKE_ALIAS ?= memory
 OLLA_RELEASE_BASE := https://github.com/thushan/olla/releases/download/$(OLLA_VERSION)
 OLLA_ASSET := olla_$(OLLA_VERSION)_$(OLLA_OS)_$(OLLA_ARCH).zip
 
-# Scope to NODE=<name> for a single node, or all DAEMON_NODES when unset
+# Known targets — used to extract positional node name from command line
+_KNOWN_TARGETS := help sync test lint check olla-install olla-update olla-restart \
+    daemon-bootstrap daemon-reinstall daemon-smoke runtime-status config
+
+# Positional node arg: make <target> <node>  e.g.  make daemon-smoke msm3
+NODE ?= $(filter-out $(_KNOWN_TARGETS), $(MAKECMDGOALS))
+
+# Absorb positional node-name goals so Make doesn't error on unknown targets
+ifneq ($(filter-out $(_KNOWN_TARGETS), $(MAKECMDGOALS)),)
+$(filter-out $(_KNOWN_TARGETS), $(MAKECMDGOALS)):
+	@:
+endif
+
+# Scope to NODE when set, else all DAEMON_NODES
 _NODES = $(if $(NODE),$(NODE),$(DAEMON_NODES))
 
 help:
-	@echo "Usage: make <target> [NODE=<name>] [TF_USER=$(TF_USER)]"
+	@echo "Usage: make <target> [<node>] [TF_USER=$(TF_USER)]"
 	@echo ""
 	@echo "  sync             Update uv environment"
 	@echo "  test             Run pytest"

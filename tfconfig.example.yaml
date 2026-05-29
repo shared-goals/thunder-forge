@@ -3,7 +3,7 @@
 services:
   frontend:
     # Admin account used only for frontend system-daemon sudo operations.
-    admin_user: serpo
+    admin_user: admin
   olla:
     port: 40115
   edge:
@@ -99,8 +99,8 @@ nodes:
     host: "studio.lan"
     ram_gb: 128
     roles: [gateway, cache]
-    user: shag
-    admin_user: serpo
+    user: user1
+    admin_user: admin
 
   # Current rollout state:
   # - msm1/msm2 are TF v1 production nodes and migrate after msm3 is stable.
@@ -111,7 +111,7 @@ nodes:
   #   host: "msm1-wifi.lan"
   #   ram_gb: 128
   #   roles: [inference]
-  #   user: shag
+  #   user: user1
   #   admin_user: admin
   #   runtime:
   #     type: omlx
@@ -123,7 +123,7 @@ nodes:
   #   host: "msm2-wifi.lan"
   #   ram_gb: 128
   #   roles: [inference]
-  #   user: shag
+  #   user: user1
   #   admin_user: admin
   #   runtime:
   #     type: omlx
@@ -137,7 +137,7 @@ nodes:
     fabric_host: true
     ram_gb: 128
     roles: [inference]
-    user: shag
+    user: user1
     admin_user: admin
     runtime:
       type: omlx
@@ -151,7 +151,7 @@ nodes:
   # host: "msm4-wifi.lan"
   # ram_gb: 128
   # roles: [inference]
-  # user: shag
+  # user: user1
   # admin_user: admin
   # runtime:
   #   type: omlx
