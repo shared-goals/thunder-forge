@@ -94,8 +94,8 @@ daemon-bootstrap:
 					echo "Bootstrapping oMLX daemon on $$n (su to $(DAEMON_ADMIN_USER)); expect password prompts"; \
 					uv run thunder-forge runtime setup-daemon --node "$$n" --admin-user "$(DAEMON_ADMIN_USER)" --via-su --apply; \
 				else \
-					echo "Bootstrapping oMLX daemon on $$n (su to configured node admin_user); expect password prompts"; \
-					uv run thunder-forge runtime setup-daemon --node "$$n" --via-su --apply; \
+					echo "Bootstrapping oMLX daemon on $$n (sudo as shag); expect shag sudo password prompt"; \
+					uv run thunder-forge runtime setup-daemon --node "$$n" --ssh-admin --apply; \
 				fi; \
 			done; \
 		fi
