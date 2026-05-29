@@ -5,31 +5,31 @@ OLLA_BIN_DIR ?= .tmp/olla-bin
 OLLA_BIN ?= $(OLLA_BIN_DIR)/olla
 DAEMON_NODES ?= msm3
 DAEMON_ADMIN_USER ?=
-EDGE_CLIENT ?= serpo
+NODE ?=
+TF_USER ?= serpo
 SMOKE_MODEL ?= gpt-oss-20b-MXFP4-Q8
 SMOKE_ALIAS ?= memory
 OLLA_RELEASE_BASE := https://github.com/thushan/olla/releases/download/$(OLLA_VERSION)
 OLLA_ASSET := olla_$(OLLA_VERSION)_$(OLLA_OS)_$(OLLA_ARCH).zip
 
+# Scope to NODE=<name> for a single node, or all DAEMON_NODES when unset
+_NODES = $(if $(NODE),$(NODE),$(DAEMON_NODES))
+
 help:
-	@echo "Usage: make <target>"
+	@echo "Usage: make <target> [NODE=<name>] [TF_USER=$(TF_USER)]"
 	@echo ""
-	@echo "  sync        Update uv environment"
-	@echo "  test        Run pytest"
-	@echo "  lint        Run ruff"
-	@echo "  check       Run tests + lint"
-	@echo "  olla-install Install pinned Olla release into $(OLLA_BIN)"
-	@echo "  olla-update  Alias for olla-install"
-	@echo "  olla-restart Install Olla binary and restart local launchd service"
+	@echo "  sync             Update uv environment"
+	@echo "  test             Run pytest"
+	@echo "  lint             Run ruff"
+	@echo "  check            Run tests + lint"
+	@echo "  olla-install     Install pinned Olla release into $(OLLA_BIN)"
+	@echo "  olla-update      Alias for olla-install"
+	@echo "  olla-restart     Install Olla binary and restart local launchd service"
 	@echo "  daemon-bootstrap First-time admin bootstrap for gateway + node daemon sudoers"
 	@echo "  daemon-reinstall Reinstall/restart gateway + node daemons via narrow sudoers"
-	@echo "  daemon-smoke     Smoke all layers (runtime/Olla/edge). EDGE_CLIENT=$(EDGE_CLIENT)"
-	@echo "  full-daemon-test Reinstall daemons and run runtime/Olla/edge smoke"
-	@echo "  runtime-status   Check oMLX health on DAEMON_NODES=$(DAEMON_NODES)"
-	@echo "  config      Generate Olla config from TF cluster config"
-	@echo "  olla-config Generate Olla config from TF cluster config"
-	@echo "  edge-keys   Generate local TF edge API keys in .env"
-	@echo "  edge-usage  Summarize TF edge access log by client"
+	@echo "  daemon-smoke     Smoke all layers (runtime/Olla/edge). TF_USER=$(TF_USER)"
+	@echo "  runtime-status   Check oMLX health. NODE=$(if $(NODE),$(NODE),$(DAEMON_NODES))"
+	@echo "  config           Generate Olla config from TF cluster config"
 
 sync:
 	uv sync --upgrade
@@ -77,7 +77,7 @@ daemon-bootstrap: olla-install config
 	@set -eu; \
 		echo "Bootstrapping gateway daemons through services.frontend.admin_user when configured"; \
 		uv run thunder-forge service setup-daemon --binary "$(OLLA_BIN)" --config configs/olla-config.yaml --timeout 300 --allow-sudo-prompt --apply; \
-		for node in $(DAEMON_NODES); do \
+		for node in $(_NODES); do \
 			if [ -n "$(DAEMON_ADMIN_USER)" ]; then \
 				echo "Bootstrapping oMLX daemon on $$node (su to admin user $(DAEMON_ADMIN_USER)); expect two labeled password prompts: su then sudo"; \
 				uv run thunder-forge runtime setup-daemon --node "$$node" --admin-user "$(DAEMON_ADMIN_USER)" --via-su --apply; \
@@ -92,44 +92,27 @@ daemon-reinstall: olla-install config
 		echo "Reinstalling/restarting frontend system daemons using preinstalled narrow sudoers; no password prompt expected"; \
 		uv run thunder-forge service restart --service olla --manager daemon --binary "$(OLLA_BIN)" --config configs/olla-config.yaml --timeout 300 --apply; \
 		uv run thunder-forge service restart --service edge --manager daemon --timeout 300 --apply; \
-		for node in $(DAEMON_NODES); do \
+		for node in $(_NODES); do \
 			echo "Reinstalling/restarting existing oMLX system daemon on $$node using preinstalled narrow sudoers; no password prompt expected"; \
 			uv run thunder-forge service restart --service omlx --node "$$node" --manager daemon --apply; \
 		done
 
 daemon-smoke:
 	@set -eu; \
-		for node in $(DAEMON_NODES); do \
+		for node in $(_NODES); do \
 			uv run thunder-forge runtime status --node "$$node"; \
 		done; \
 		uv run thunder-forge olla smoke --model "$(SMOKE_MODEL)" --alias "$(SMOKE_ALIAS)"; \
-		uv run thunder-forge edge smoke --client-id "$(EDGE_CLIENT)" --model "$(SMOKE_ALIAS)"
-
-full-daemon-test:
-	$(MAKE) daemon-reinstall
-	$(MAKE) daemon-smoke
+		uv run thunder-forge edge smoke --client-id "$(TF_USER)" --model "$(SMOKE_ALIAS)"
 
 config:
 	uv run thunder-forge generate-olla-config
 
-olla-config:
-	uv run thunder-forge generate-olla-config
-
 runtime-status:
-	@for node in $(DAEMON_NODES); do \
+	@for node in $(_NODES); do \
 		uv run thunder-forge runtime status --node "$$node"; \
 	done
 
-edge-keys:
-	@if [ -z "$(EDGE_CLIENTS)" ]; then \
-		echo 'Usage: make edge-keys EDGE_CLIENTS="client-a client-b"'; \
-		exit 2; \
-	fi
-	uv run thunder-forge edge keys $(foreach client,$(EDGE_CLIENTS),--client $(client))
-
-edge-usage:
-	uv run thunder-forge edge usage
-
-.PHONY: help sync test lint check olla-install olla-update olla-restart daemon-bootstrap daemon-reinstall daemon-smoke full-daemon-test runtime-status config olla-config edge-keys edge-usage
+.PHONY: help sync test lint check olla-install olla-update olla-restart daemon-bootstrap daemon-reinstall daemon-smoke runtime-status config
 
 .DEFAULT_GOAL := help
