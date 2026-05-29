@@ -87,6 +87,8 @@ class ServerArgs:
 @dataclass
 class Model:
     source: ModelSource
+    runtime_model_id: str = ""
+    benchmark_only: bool = False
     disk_gb: float = 0.0
     kv_per_32k_gb: float = 0.0
     ram_gb: float | None = None
@@ -115,6 +117,7 @@ class Node:
     role: NodeRole | str
     fabric_host: bool
     runtime: NodeRuntime | None
+    models: list[str]
     # Resolved during pre-flight — None until populated
     platform: str | None
     shell: str | None
@@ -131,6 +134,7 @@ class Node:
         ip: str | None = None,
         fabric_host: bool = False,
         runtime: NodeRuntime | None = None,
+        models: list[str] | None = None,
         platform: str | None = None,
         shell: str | None = None,
         home_dir: str | None = None,
@@ -146,6 +150,7 @@ class Node:
         self.role = role
         self.fabric_host = fabric_host
         self.runtime = runtime
+        self.models = models or []
         self.platform = platform
         self.shell = shell
         self.home_dir = home_dir
@@ -160,20 +165,10 @@ class Node:
     def ip(self, value: str) -> None:
         self.host = value
 
-
-@dataclass
-class RuntimeRoute:
-    model_name: str
-    runtime: RuntimeType | str
-    node: str
-    model: str
-
-
 @dataclass
 class ClusterConfig:
     models: dict[str, Model] = field(default_factory=dict)
     nodes: dict[str, Node] = field(default_factory=dict)
-    runtime_routes: list[RuntimeRoute] = field(default_factory=list)
 
     @property
     def compute_nodes(self) -> dict[str, Node]:
@@ -207,7 +202,7 @@ class ClusterConfig:
 
 def _parse_model_source(raw: dict) -> ModelSource:
     return ModelSource(
-        type=raw["type"],
+        type=raw.get("type", "huggingface"),
         repo=raw.get("repo", ""),
         revision=raw.get("revision", "main"),
         quantize=raw.get("quantize", ""),
@@ -266,11 +261,19 @@ def _parse_fabric_host(raw: object, *, node_name: str) -> bool:
     raise ValueError(msg)
 
 
-def _parse_model(raw: dict) -> Model:
+def _default_runtime_model_id(model_id: str, raw: dict) -> str:
+    source = raw.get("source", {})
+    repo = source.get("repo", "") if isinstance(source, dict) else ""
+    return repo.rsplit("/", 1)[-1] if repo else model_id
+
+
+def _parse_model(model_id: str, raw: dict) -> Model:
     server_args_raw = raw.get("server_args")
     model_info_raw = raw.get("model_info")
     return Model(
         source=_parse_model_source(raw["source"]),
+        runtime_model_id=raw.get("runtime_model_id", _default_runtime_model_id(model_id, raw)),
+        benchmark_only=raw.get("benchmark_only", False),
         disk_gb=raw.get("disk_gb", 0.0),
         kv_per_32k_gb=raw.get("kv_per_32k_gb", 0.0),
         ram_gb=raw.get("ram_gb"),
@@ -291,7 +294,7 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
     No file I/O, no .env loading, no user resolution from env vars.
     The user field is stored as-is from the raw dict (empty string if unset).
     """
-    models = {k: _parse_model(v) for k, v in raw.get("models", {}).items()}
+    models = {k: _parse_model(k, v) for k, v in raw.get("models", {}).items()}
 
     _ROLE_MIGRATION = {"inference": NodeRole.NODE, "infra": NodeRole.GATEWAY}
 
@@ -325,24 +328,14 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             role=role,
             fabric_host=_parse_fabric_host(v.get("fabric_host"), node_name=k),
             runtime=_parse_node_runtime(v.get("runtime")),
+            models=list(v.get("models", [])),
             home_dir=v.get("home_dir"),
             homebrew_prefix=v.get("homebrew_prefix"),
         )
 
-    runtime_routes = [
-        RuntimeRoute(
-            model_name=route["model_name"],
-            runtime=RuntimeType(route["runtime"]),
-            node=route["node"],
-            model=route["model"],
-        )
-        for route in raw.get("runtime_routes", [])
-    ]
-
     return ClusterConfig(
         models=models,
         nodes=nodes,
-        runtime_routes=runtime_routes,
     )
 
 
@@ -378,19 +371,20 @@ def generate_olla_config(config: ClusterConfig) -> str:
     aliases: dict[str, list[str]] = {}
     seen_nodes: set[str] = set()
 
-    for route in config.runtime_routes:
-        if route.runtime != RuntimeType.OMLX:
+    for node_name, node in config.nodes.items():
+        if not node.models:
             continue
-        node = config.nodes[route.node]
         runtime = node.runtime
         if runtime is None:
-            msg = f"Runtime route '{route.model_name}' references node '{route.node}' without runtime"
+            msg = f"Node '{node_name}' declares models but has no runtime"
             raise ValueError(msg)
-        if route.node not in seen_nodes:
+        if runtime.type != RuntimeType.OMLX:
+            continue
+        if node_name not in seen_nodes:
             endpoints.append(
                 {
                     "url": f"http://{node.host}:{runtime.port}",
-                    "name": f"{route.node}-omlx-live",
+                    "name": f"{node_name}-omlx-live",
                     "type": "openai-compatible",
                     "priority": 100,
                     "model_url": "/v1/models",
@@ -399,10 +393,15 @@ def generate_olla_config(config: ClusterConfig) -> str:
                     "check_timeout": "2s",
                 }
             )
-            seen_nodes.add(route.node)
-        aliases.setdefault(route.model_name, [])
-        if route.model not in aliases[route.model_name]:
-            aliases[route.model_name].append(route.model)
+            seen_nodes.add(node_name)
+        for model_id in node.models:
+            if model_id not in config.models:
+                msg = f"Node '{node_name}' references unknown model '{model_id}'"
+                raise ValueError(msg)
+            runtime_model_id = config.models[model_id].runtime_model_id
+            aliases.setdefault(model_id, [])
+            if runtime_model_id not in aliases[model_id]:
+                aliases[model_id].append(runtime_model_id)
 
     output: dict = {
         "server": {

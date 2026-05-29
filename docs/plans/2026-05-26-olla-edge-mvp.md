@@ -101,22 +101,16 @@ nodes:
     host: msm3-wifi.lan
     runtime:
       type: omlx
-      base_url: http://msm3-wifi.lan:8018
-
-runtime_routes:
-  - model_name: agent
-    runtime: omlx
-    node: msm3
-    model: Qwen3.6-35B-A3B-4bit
+      port: 8018
+    models:
+      - qwen3-dev
 
 models:
   qwen3-dev:
     runtime_model_id: Qwen3-1.7B-4bit
-    public_aliases:
-      - qwen3-1.7b-omlx-msm3-test
 ```
 
-Exact names may change if current config models already have better fields. Preserve the distinction: TF model id, backend runtime model id, public aliases, and node runtime endpoint.
+Exact names may change if current config models already have better fields. Preserve the distinction: TF model id/public alias, backend runtime model id, node placement, and node runtime endpoint.
 
 **Tests:**
 

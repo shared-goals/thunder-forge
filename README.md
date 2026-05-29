@@ -84,7 +84,7 @@ Edit `configs/node-assignments.yaml.example`, copy to `configs/node-assignments.
 cp configs/node-assignments.yaml.example configs/node-assignments.yaml
 ```
 
-For TF v2, `runtime_routes` is the operational routing surface. It maps stable public aliases such as `memory`, `coder`, and `agent` to oMLX runtime model ids on nodes. Temporary comparison aliases such as `memory-bf16` may be used for benchmarks, but they are not canonical role names. Do not add a second per-node route layer; Olla config generation reads `runtime_routes` directly.
+For TF v2, `models.<id>` is the public alias and Thunder Forge model identity. Each model declares `runtime_model_id`, the id exposed by oMLX. Nodes declare which model ids they can serve with `nodes.<node>.models`, and Olla config generation derives endpoints and aliases from that placement. Temporary comparison aliases such as `memory-bf16` may be used for benchmarks, but they are not canonical role names.
 
 ## Topology and Rollout
 

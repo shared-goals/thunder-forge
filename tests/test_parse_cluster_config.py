@@ -11,6 +11,7 @@ def test_parse_cluster_config_basic():
         "models": {
             "coder": {
                 "source": {"type": "huggingface", "repo": "mlx-community/Qwen3-Coder-Next-4bit", "revision": "main"},
+                "runtime_model_id": "Qwen3-Coder-Next-4bit",
                 "disk_gb": 44.8,
                 "kv_per_32k_gb": 8,
                 "max_context": 131072,
@@ -18,15 +19,40 @@ def test_parse_cluster_config_basic():
         },
         "nodes": {
             "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "role": "gateway"},
-            "msm1": {"host": "msm1-wifi.lan", "ram_gb": 128, "user": "admin", "role": "node"},
+            "msm1": {
+                "host": "msm1-wifi.lan",
+                "ram_gb": 128,
+                "user": "admin",
+                "role": "node",
+                "models": ["coder"],
+            },
         },
     }
     config = parse_cluster_config(raw)
     assert "coder" in config.models
     assert config.models["coder"].source.type == "huggingface"
+    assert config.models["coder"].runtime_model_id == "Qwen3-Coder-Next-4bit"
     assert config.models["coder"].disk_gb == 44.8
     assert config.nodes["msm1"].user == "admin"
+    assert config.nodes["msm1"].models == ["coder"]
     assert config.nodes["rock"].role == "gateway"
+
+
+def test_parse_cluster_config_defaults_source_type_and_runtime_model_id():
+    raw = {
+        "models": {
+            "memory": {
+                "source": {"repo": "mlx-community/gpt-oss-20b-MXFP4-Q8"},
+                "benchmark_only": True,
+            }
+        },
+        "nodes": {},
+    }
+    config = parse_cluster_config(raw)
+    model = config.models["memory"]
+    assert model.source.type == "huggingface"
+    assert model.runtime_model_id == "gpt-oss-20b-MXFP4-Q8"
+    assert model.benchmark_only is True
 
 
 def test_parse_cluster_config_user_stored_as_is():

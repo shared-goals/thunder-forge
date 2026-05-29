@@ -76,7 +76,7 @@ Use exactly these role names unless the config explicitly says otherwise:
 - `coder`: coding, code review, and long dev sessions.
 - `agent`: tool calling, structured output, self-correction, and long-context autonomous work.
 
-Temporary benchmark aliases such as `memory-bf16` may exist in `runtime_routes`, but they are not canonical roles and should stay clearly marked as comparison routes.
+Temporary benchmark aliases such as `memory-bf16` may exist in `models` and `nodes.<node>.models`, but they are not canonical roles and should stay clearly marked as comparison routes.
 
 ## Target Role Spread
 
@@ -121,16 +121,16 @@ Example:
 
 Studio's `~/.omlx/models` is the cache hub for downloads and node sync. Do not use the old `hf--<namespace>--<repo>` direct-child layout in new TF code.
 
-oMLX discovers nested `<namespace>/<repo-name>` directories and exposes the repo directory name as the runtime model id, for example `gpt-oss-20b-MXFP4-Q8`. Requests that include a provider prefix can still resolve because oMLX strips the prefix if needed, but TF `runtime_routes` should use the visible runtime id.
+oMLX discovers nested `<namespace>/<repo-name>` directories and exposes the repo directory name as the runtime model id, for example `gpt-oss-20b-MXFP4-Q8`. Requests that include a provider prefix can still resolve because oMLX strips the prefix if needed, but TF `models.<id>.runtime_model_id` should use the visible runtime id.
 
 Separate these concepts in code and docs:
 
 - HF `repo_id`
 - oMLX artifact directory path under `~/.omlx/models`
 - runtime model id seen by oMLX/Olla (`repo-name` for nested layout)
-- public role alias seen by clients
+- public model alias seen by clients (`models.<id>`)
 
-For TF v2, use `runtime_routes` as the single operational route layer. Do not add a separate `assignments` section for Olla routing; that shape came from the older per-model-service stack.
+For TF v2, model placement lives on each node as `nodes.<node>.models`. Do not add a separate `assignments`, `runtime_routes`, or role-group layer for Olla routing; those shapes came from older per-model-service stacks and obscure the node-level oMLX runtime model.
 
 ## Sync And Transport
 
@@ -178,6 +178,69 @@ Cross-check against:
 - Hindsight memory/retain leaderboards for `memory`.
 - SWE-bench Verified, LiveCodeBench, and HumanEval-style evidence for `coder`.
 - BFCL, structured-output evidence, Arena/LiveBench, and tool-calling reports for `agent`.
+
+## Benchmark-Driven Selection
+
+For each role, rank candidate models by the primary benchmark for that role. Secondary benchmarks break ties.
+
+```text
+role     primary benchmark          secondary benchmark        why
+------   ------------------------   ------------------------   -----------------------
+agent    MMLU + tool_use/reasoning  BFCL V4, SWE-bench         general knowledge + structured output + coding
+coder    SWE-bench Verified         LiveCodeBench, HumanEval   real-world code, real repos, real issues
+memory   Hindsight retain leaderboard (separate benchmark)    task-specific for fact extraction & consolidation
+```
+
+### Benchmark meaning
+
+**MMLU (Massive Multitask Language Understanding)** — general knowledge across 57 subjects (math, law, medicine, CS, philosophy, history) from high-school to expert level. Multiple choice, scale 0–100. Scores below 75 are weak for agent/memory roles where structured reasoning and fact extraction are critical. Scores 85+ are SOTA.
+
+**SWE-bench Verified** — real-world coding. The model receives a GitHub issue from production open-source repos (Django, scikit-learn, sympy, Flask), must navigate the codebase, find the bug, and write a valid patch. Not synthetic. Scores below 50% are entry-level coding assistants; 70%+ is SOTA open-source agentic coding.
+
+### GPU/hardware filter
+
+Use `https://whatmodelscanirun.com/` with filters matching the cluster hardware to produce a ranked candidate list per role:
+
+```text
+# Apple M4 Max 128GB (our nodes)
+https://whatmodelscanirun.com/?gpu=m4-max&mem=3&feat=tool_use%2Creasoning
+
+# Alternative filter for coding emphasis
+https://whatmodelscanirun.com/?gpu=m4-max&mem=3&feat=tool_use
+```
+
+The site returns a ranked table with MMLU, quantization, context window, and tok/s per model. Use this as the **initial candidate shortlist** before applying hard constraints (MLX format, no-swap RAM budget, oMLX compatibility smoke).
+
+### Candidate shortlist (whatmodelscanirun.com, M4 Max + tool_use + reasoning, May 2026)
+
+Top tier (MMLU >80, both features supported):
+
+| Model | MMLU | Speed | Context | Role candidate |
+|---|---|---|---|---|
+| Qwen3.6 27B | 86.2 | ~31 tok/s | 256K | memory (upgrade path), agent-dense |
+| Gemma 4 31B | 85.2 | ~28 tok/s | 256K | agent-dense (+ vision) |
+| Qwen3.6 35B A3B (MoE) | 85.2 | ~187 tok/s | 256K | agent (current) |
+| Qwen3 32B | 85.0 | ~26 tok/s | 128K | agent-dense |
+| Step 3.5 Flash 197B | 84.0 | ~5 tok/s | 52K | reject (too slow) |
+| QwQ 32B | 83.0 | ~26 tok/s | 128K | reject (narrow — reasoning only) |
+
+Strong but missing features (use when feature is not needed):
+
+| Model | MMLU | Speed | Missing |
+|---|---|---|---|
+| Qwen3 Next 80B | 90 | ~131-194 tok/s | reasoning |
+| Qwen3.5 122B A10B | 85 | ~114-188 tok/s | tool_use, reasoning |
+| Qwen 2.5 72B | 86.1 | 7-11 tok/s | reasoning |
+
+Weak for structured output (reject for agent/memory unless proven otherwise):
+
+- GPT-OSS 20B: MMLU 75, no native tool_use or reasoning — current `memory` model, known JSON parse failures during Hindsight consolidation.
+
+### Memory role — separate benchmark layer
+
+`memory` uses **Hindsight's own leaderboards** as the primary signal (see `hindsight-internals` skill, references on model benchmarking). MMLU is the secondary cross-check because Hindsight consolidation is a specific structured-fact-extraction task.
+
+Known finding (May 2026): current `memory` model (GPT-OSS 20B, MMLU 75) produces systematic JSON parse errors during consolidation (~40% of consolidation batches fail). This is a model capability issue, not a quantization artifact — candidate replacements must have MMLU ≥ 85 AND native tool_use.
 
 ## RAM Budget Method
 

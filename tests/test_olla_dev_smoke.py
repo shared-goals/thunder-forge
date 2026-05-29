@@ -18,7 +18,10 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
     config_dir = repo / "configs"
     config_dir.mkdir()
     (config_dir / "node-assignments.yaml").write_text(
-        "models: {}\n"
+        "models:\n"
+        "  qwen3-1.7b-omlx-msm3-test:\n"
+        "    source: { repo: mlx-community/Qwen3-1.7B-4bit }\n"
+        "    runtime_model_id: Qwen3-1.7B-4bit\n"
         "nodes:\n"
         "  studio:\n"
         "    host: studio.lan\n"
@@ -33,11 +36,8 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
         "    runtime:\n"
         "      type: omlx\n"
         "      port: 8018\n"
-        "runtime_routes:\n"
-        "  - model_name: qwen3-1.7b-omlx-msm3-test\n"
-        "    runtime: omlx\n"
-        "    node: msm3\n"
-        "    model: Qwen3-1.7B-4bit\n"
+        "    models:\n"
+        "      - qwen3-1.7b-omlx-msm3-test\n"
     )
 
     import thunder_forge.cluster.config as config_module

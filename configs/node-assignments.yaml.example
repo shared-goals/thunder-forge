@@ -1,5 +1,5 @@
 # ── Model registry ──────────────────────────────────
-# Add new models here. They become available to runtime_routes.
+# Add new models here. Model ids are public aliases by default.
 # Source types:
 #   huggingface  — pre-converted MLX weights from any HF repo
 #   convert      — auto-convert + quantize any HF model to MLX
@@ -8,44 +8,38 @@
 models:
   coder:
     source:
-      type: huggingface
       repo: "mlx-community/Qwen3-Coder-Next-4bit"
-      revision: "main"
+    runtime_model_id: Qwen3-Coder-Next-4bit
     disk_gb: 44.8
     kv_per_32k_gb: 0.75
     active_params: "3B of 80B"
     max_context: 262144
     notes: "SOTA agentic coding. Tool calling, error recovery, 262K context."
 
-  agent-qwen3.6:
+  agent:
     source:
-      type: huggingface
       repo: "mlx-community/Qwen3.6-35B-A3B-4bit"
-      revision: "main"
+    runtime_model_id: Qwen3.6-35B-A3B-4bit
     disk_gb: 20.5
     kv_per_32k_gb: 0.5
     active_params: "3B of 35B"
     max_context: 262144
     notes: "Fast agent. 73.4% SWE-bench. Thinking mode by default."
 
-  agent-qwen3.5:
+  agent-heavy:
     source:
-      type: huggingface
       repo: "mlx-community/Qwen3.5-122B-A10B-4bit"
-      revision: "main"
+    runtime_model_id: Qwen3.5-122B-A10B-4bit
     disk_gb: 65.0
     kv_per_32k_gb: 1.2
     active_params: "10B of 122B"
     max_context: 131072
     notes: "Heavy agent. 122B MoE with VLM support. Thinking mode."
 
-
-
   memory:
     source:
-      type: huggingface
       repo: "mlx-community/gpt-oss-20b-MXFP4-Q8"
-      revision: "main"
+    runtime_model_id: gpt-oss-20b-MXFP4-Q8
     disk_gb: 11.0
     ram_gb: 14.0
     kv_per_32k_gb: 6.0
@@ -54,14 +48,25 @@ models:
 
   memory-bf16:
     source:
-      type: huggingface
       repo: "mlx-community/gpt-oss-20b-mxfp4-bf16"
-      revision: "main"
+    runtime_model_id: gpt-oss-20b-mxfp4-bf16
+    benchmark_only: true
     disk_gb: 13.0
     ram_gb: 16.0
     kv_per_32k_gb: 6.0
     max_context: 131072
     notes: "Temporary comparison route for the memory role. Keep canonical memory on Q8 until BF16 is benchmarked."
+
+# ── Model placement ─────────────────────────────────
+# Single TF v2 source of truth for serving aliases and node placement.
+# Model registry keys are public aliases; runtime_model_id is the oMLX model id.
+# Canonical public aliases: memory, coder, agent.
+# Use memory for the Hindsight LLM; do not add a second Hindsight memory alias.
+# Target spread: Memory + Coder (msm1, msm2) or Memory + Agent (msm3, msm4).
+# Olla LRU manages active model loading — not all models loaded simultaneously.
+# Each node has 128GB RAM. Budget memory at ~20GB runtime RAM and coder/agent
+# at ~40-90GB runtime RAM, leaving OS/MLX/KV-cache headroom to prevent swap.
+# Stage migrations after msm3 is stable: msm1, then msm2, then msm4.
 
 # ── Nodes ──────────────────────────────────────────
 # Per-node host may be a DNS name or IP address. Prefer .lan FQDNs.
@@ -83,6 +88,9 @@ nodes:
     runtime:
       type: omlx
       port: 8018
+    models:
+      - memory
+      - coder
 
   msm2:
     host: "msm2-wifi.lan"
@@ -92,6 +100,9 @@ nodes:
     runtime:
       type: omlx
       port: 8018
+    models:
+      - memory
+      - coder
 
   msm3:
     host: "msm3-wifi.lan"
@@ -103,6 +114,11 @@ nodes:
     runtime:
       type: omlx
       port: 8018
+    models:
+      - memory
+      - memory-bf16
+      - agent
+      - agent-heavy
 
   # msm4: enable when migrating direct Hindsight oMLX into TF v2.
   # host: "msm4-wifi.lan"
@@ -112,60 +128,7 @@ nodes:
   # runtime:
   #   type: omlx
   #   port: 8018
-
-# ── Olla runtime routes ─────────────────────────────
-# Single TF v2 source of truth for serving aliases.
-# Canonical public aliases: memory, coder, agent.
-# Use memory for the Hindsight LLM; do not add a second Hindsight memory alias.
-# Target spread: Memory + Coder (msm1, msm2) or Memory + Agent (msm3, msm4).
-# Olla LRU manages active model loading — not all models loaded simultaneously.
-# Each node has 128GB RAM. Budget memory at ~20GB runtime RAM and coder/agent
-# at ~40-90GB runtime RAM, leaving OS/MLX/KV-cache headroom to prevent swap.
-# Stage migrations after msm3 is stable: msm1, then msm2, then msm4.
-runtime_routes:
-  - model_name: memory
-    runtime: omlx
-    node: msm1
-    model: gpt-oss-20b-MXFP4-Q8
-
-  - model_name: memory
-    runtime: omlx
-    node: msm2
-    model: gpt-oss-20b-MXFP4-Q8
-
-  - model_name: memory
-    runtime: omlx
-    node: msm3
-    model: gpt-oss-20b-MXFP4-Q8
-
-  # Temporary BF16 comparison alias on the dev node; not a production memory replica.
-  - model_name: memory-bf16
-    runtime: omlx
-    node: msm3
-    model: gpt-oss-20b-mxfp4-bf16
-
-  # - model_name: memory
-  #   runtime: omlx
-  #   node: msm4
-  #   model: gpt-oss-20b-MXFP4-Q8
-
-  - model_name: coder
-    runtime: omlx
-    node: msm1
-    model: Qwen3-Coder-Next-4bit
-
-  - model_name: coder
-    runtime: omlx
-    node: msm2
-    model: Qwen3-Coder-Next-4bit
-
-  - model_name: agent
-    runtime: omlx
-    node: msm3
-    model: Qwen3.6-35B-A3B-4bit
-
-  - model_name: agent-heavy
-    runtime: omlx
-    node: msm3
-    model: Qwen3.5-122B-A10B-4bit
+  # models:
+  #   - memory
+  #   - agent
 

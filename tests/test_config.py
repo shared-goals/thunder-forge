@@ -20,31 +20,38 @@ def cluster_yaml(tmp_path: Path) -> Path:
         models:
           coder:
             source:
-              type: huggingface
               repo: "mlx-community/Qwen3-Coder-Next-4bit"
-              revision: "main"
+            runtime_model_id: Qwen3-Coder-Next-4bit
             disk_gb: 44.8
             kv_per_32k_gb: 8
             max_context: 131072
 
         nodes:
           rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
+          msm1:
+            host: "msm1-wifi.lan"
+            ram_gb: 128
+            user: "admin"
+            role: node
+            runtime: { type: omlx, port: 8018 }
+            models: [coder]
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    return p
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
+    return path
 
 
 def test_load_cluster_config(cluster_yaml: Path) -> None:
     config = load_cluster_config(cluster_yaml)
     assert "coder" in config.models
     assert config.models["coder"].source.type == "huggingface"
+    assert config.models["coder"].runtime_model_id == "Qwen3-Coder-Next-4bit"
     assert config.models["coder"].disk_gb == 44.8
     assert "msm1" in config.nodes
     assert config.nodes["msm1"].host == "msm1-wifi.lan"
     assert config.nodes["msm1"].ip == "msm1-wifi.lan"
     assert config.nodes["msm1"].role == "node"
+    assert config.nodes["msm1"].models == ["coder"]
     assert "rock" in config.nodes
     assert config.nodes["rock"].role == "gateway"
 
@@ -67,9 +74,9 @@ def test_load_cluster_config_user_defaults(tmp_path: Path, monkeypatch: pytest.M
           rock: { host: "rock.lan", ram_gb: 32, role: gateway }
           msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
+    config = load_cluster_config(path)
     assert config.nodes["msm1"].user == "testuser"
     assert config.nodes["rock"].user == "testuser"
 
@@ -85,16 +92,16 @@ def test_load_cluster_config_role_migration(tmp_path: Path) -> None:
           rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: infra }
           msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: inference }
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
     with pytest.warns(DeprecationWarning, match="deprecated"):
-        config = load_cluster_config(p)
+        config = load_cluster_config(path)
     assert config.nodes["msm1"].role == "node"
     assert config.nodes["rock"].role == "gateway"
 
 
 def test_node_resolved_fields_default_to_none(cluster_yaml: Path) -> None:
-    """Resolved fields are None after initial load — populated later by pre-flight."""
+    """Resolved fields are None after initial load - populated later by pre-flight."""
     config = load_cluster_config(cluster_yaml)
     for node in config.nodes.values():
         assert node.platform is None
@@ -119,10 +126,10 @@ def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) 
               type: omlx
               port: 8018
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
 
-    config = load_cluster_config(p)
+    config = load_cluster_config(path)
     node = config.nodes["msm3"]
 
     assert node.host == "msm3-wifi.lan"
@@ -132,6 +139,7 @@ def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) 
     assert node.runtime.type == "omlx"
     assert node.runtime.port == 8018
     assert node.runtime.model_dir is None
+    assert node.models == []
 
 
 def test_parse_node_rejects_string_fabric_host(tmp_path: Path) -> None:
@@ -145,11 +153,11 @@ def test_parse_node_rejects_string_fabric_host(tmp_path: Path) -> None:
             user: shag
             role: node
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
 
     with pytest.raises(ValueError, match="fabric_host must be boolean"):
-        load_cluster_config(p)
+        load_cluster_config(path)
 
 
 def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,16 +170,19 @@ def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.M
         nodes:
           msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
     monkeypatch.setenv("GATEWAY_SSH_USER", "deploy_bot")
-    config = load_cluster_config(p)
+    config = load_cluster_config(path)
     assert config.nodes["msm1"].user == "deploy_bot"
 
 
-def test_generate_olla_config_runtime_route_with_alias_and_failover_probe(tmp_path: Path) -> None:
+def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path: Path) -> None:
     content = dedent("""\
-        models: {}
+        models:
+          qwen3-1.7b-omlx-msm3-test:
+            source: { repo: mlx-community/Qwen3-1.7B-4bit }
+            runtime_model_id: Qwen3-1.7B-4bit
         nodes:
           studio:
             host: studio.lan
@@ -186,15 +197,12 @@ def test_generate_olla_config_runtime_route_with_alias_and_failover_probe(tmp_pa
             runtime:
               type: omlx
               port: 8018
-        runtime_routes:
-          - model_name: qwen3-1.7b-omlx-msm3-test
-            runtime: omlx
-            node: msm3
-            model: Qwen3-1.7B-4bit
+            models:
+              - qwen3-1.7b-omlx-msm3-test
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
+    config = load_cluster_config(path)
 
     result = generate_olla_config(config)
     parsed = yaml_lib.safe_load(result)
@@ -220,6 +228,29 @@ def test_generate_olla_config_runtime_route_with_alias_and_failover_probe(tmp_pa
     assert parsed["model_aliases"] == {
         "qwen3-1.7b-omlx-msm3-test": ["Qwen3-1.7B-4bit"],
     }
+
+
+def test_generate_olla_config_rejects_unknown_node_model(tmp_path: Path) -> None:
+    content = dedent("""\
+        models: {}
+        nodes:
+          msm3:
+            host: msm3-wifi.lan
+            ram_gb: 128
+            user: shag
+            role: node
+            runtime:
+              type: omlx
+              port: 8018
+            models:
+              - missing-model
+    """)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
+    config = load_cluster_config(path)
+
+    with pytest.raises(ValueError, match="unknown model 'missing-model'"):
+        generate_olla_config(config)
 
 
 def test_load_cluster_config_loads_dotenv(cluster_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,16 +296,16 @@ def test_parse_model_info() -> None:
         "nodes": {},
     }
     config = parse_cluster_config(raw)
-    mi = config.models["coder"].model_info
-    assert mi is not None
-    assert mi.base_model == "meta-llama/Llama-3-70b"
-    assert mi.mode == "chat"
-    assert mi.input_cost_per_token == 0.000001
-    assert mi.output_cost_per_token == 0.000002
-    assert mi.supports_vision is True
-    assert mi.supports_function_calling is True
-    assert mi.supports_parallel_function_calling is False
-    assert mi.supports_response_schema is True
+    model_info = config.models["coder"].model_info
+    assert model_info is not None
+    assert model_info.base_model == "meta-llama/Llama-3-70b"
+    assert model_info.mode == "chat"
+    assert model_info.input_cost_per_token == 0.000001
+    assert model_info.output_cost_per_token == 0.000002
+    assert model_info.supports_vision is True
+    assert model_info.supports_function_calling is True
+    assert model_info.supports_parallel_function_calling is False
+    assert model_info.supports_response_schema is True
 
 
 def test_parse_model_info_absent() -> None:
@@ -290,5 +321,3 @@ def test_parse_model_info_absent() -> None:
     }
     config = parse_cluster_config(raw)
     assert config.models["coder"].model_info is None
-
-

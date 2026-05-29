@@ -502,27 +502,27 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
     assignments = config_dir / "node-assignments.yaml"
     assignments.write_text(
         dedent("""\
-            models: {}
-            nodes:
-              studio:
-                host: studio.lan
-                ram_gb: 64
-                user: shag
-                role: gateway
-              msm3:
-                host: msm3-wifi.lan
-                ram_gb: 128
-                user: shag
-                role: node
-                runtime:
-                  type: omlx
-                  port: 8018
-            runtime_routes:
-              - model_name: qwen3-1.7b-omlx-msm3-test
-                runtime: omlx
-                node: msm3
-                model: Qwen3-1.7B-4bit
-        """)
+                        models:
+                            qwen3-1.7b-omlx-msm3-test:
+                                source: { repo: mlx-community/Qwen3-1.7B-4bit }
+                                runtime_model_id: Qwen3-1.7B-4bit
+                        nodes:
+                            studio:
+                                host: studio.lan
+                                ram_gb: 64
+                                user: shag
+                                role: gateway
+                            msm3:
+                                host: msm3-wifi.lan
+                                ram_gb: 128
+                                user: shag
+                                role: node
+                                runtime:
+                                    type: omlx
+                                    port: 8018
+                                models:
+                                    - qwen3-1.7b-omlx-msm3-test
+                """)
     )
 
     import thunder_forge.cluster.config as config_module
