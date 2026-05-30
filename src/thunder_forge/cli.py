@@ -16,7 +16,8 @@ from thunder_forge.cluster.artifacts import (
     run_artifact_sync,
     studio_omlx_models_dir_from_env,
 )
-from thunder_forge.cluster.config import ClusterConfig, Node, NodeRuntime
+from thunder_forge.cluster.bootstrap import ensure_cache_hub_dir, ensure_olla_binary, write_generated_olla_config
+from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime
 from thunder_forge.cluster.edge import (
     EDGE_USER_PREFIX,
     EdgeProxyConfig,
@@ -59,12 +60,19 @@ edge_app = typer.Typer(help="Smoke-test and operate the minimal TF edge.", no_ar
 olla_app = typer.Typer(help="Smoke-test the generated Olla router layer.", no_args_is_help=True)
 config_app = typer.Typer(help="Inspect and validate Thunder Forge configuration.", no_args_is_help=True)
 service_app = typer.Typer(help="Install and restart managed Thunder Forge services.", no_args_is_help=True)
+cluster_app = typer.Typer(help="Prepare the gateway, cache hub, and inference nodes.", no_args_is_help=True)
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(artifact_app, name="artifact")
 app.add_typer(edge_app, name="edge")
 app.add_typer(olla_app, name="olla")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
+app.add_typer(cluster_app, name="cluster")
+
+DEFAULT_OLLA_VERSION = "v0.0.27"
+DEFAULT_OLLA_OS = "macos"
+DEFAULT_OLLA_ARCH = "arm64"
+DEFAULT_OLLA_BIN_DIR = Path(".tmp/olla-bin")
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
@@ -242,6 +250,391 @@ def _print_gateway_daemon_setup_result(result: GatewayDaemonSetupResult, *, dry_
         typer.echo(f"Error: {error}", err=True)
 
 
+def _node_names_with_role(config: ClusterConfig, role: NodeRole) -> list[str]:
+    return [name for name, node in config.nodes.items() if node.has_role(role)]
+
+
+def _resolve_prepare_targets(config: ClusterConfig, target: str | None) -> tuple[list[str], list[str], list[str]]:
+    if target:
+        if target not in config.nodes:
+            typer.echo(f"Error: node '{target}' not found", err=True)
+            raise typer.Exit(1)
+        node = config.nodes[target]
+        gateway_names = [target] if node.has_role(NodeRole.GATEWAY) else []
+        cache_names = [target] if node.has_role(NodeRole.CACHE) else []
+        inference_names = [target] if node.has_role(NodeRole.INFERENCE) or node.has_role(NodeRole.NODE) else []
+        if not gateway_names and not cache_names and not inference_names:
+            typer.echo(f"Error: node '{target}' has no prepare role", err=True)
+            raise typer.Exit(1)
+        return gateway_names, cache_names, inference_names
+
+    gateway_names = _node_names_with_role(config, NodeRole.GATEWAY)[:1]
+    cache_names = _node_names_with_role(config, NodeRole.CACHE)
+    inference_names = list(config.compute_nodes.keys())
+    return gateway_names, cache_names, inference_names
+
+
+def _print_prepare_plan(
+    *,
+    target: str | None,
+    dry_run: bool,
+    gateway_names: list[str],
+    cache_names: list[str],
+    inference_names: list[str],
+    config: ClusterConfig,
+) -> None:
+    typer.echo("Thunder Forge cluster prepare")
+    typer.echo(f"target: {target or 'all'}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    typer.echo("plan:")
+    if gateway_names:
+        for name in gateway_names:
+            node = config.nodes[name]
+            typer.echo(f"  gateway: {name} ({node.host}) -> Olla + TF edge")
+    else:
+        typer.echo("  gateway: skipped")
+    if cache_names:
+        for name in cache_names:
+            node = config.nodes[name]
+            typer.echo(f"  cache: {name} ({node.host}) -> oMLX model hub")
+    else:
+        typer.echo("  cache: skipped")
+    if inference_names:
+        typer.echo(f"  inference: {', '.join(inference_names)} -> oMLX LaunchDaemon")
+    else:
+        typer.echo("  inference: skipped")
+
+
+def _progress(message: str) -> None:
+    typer.echo(f"  {message}")
+
+
+def _fail_on_setup_errors(errors: list[str]) -> None:
+    for error in errors:
+        typer.echo(f"Error: {error}", err=True)
+    if errors:
+        raise typer.Exit(1)
+
+
+@cluster_app.command("prepare")
+def cluster_prepare(
+    target: str | None = typer.Argument(
+        None,
+        help="Optional node name. Omit for gateway + cache + all inference nodes.",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print the prepare plan without changing hosts by default.",
+    ),
+    admin_user: str = typer.Option(
+        "",
+        "--admin-user",
+        help="Override the inference admin account used for remote su/sudo bootstrap.",
+    ),
+    timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for daemon setup commands."),
+    olla_version: str = typer.Option(DEFAULT_OLLA_VERSION, "--olla-version", help="Pinned Olla release version."),
+    olla_os: str = typer.Option(DEFAULT_OLLA_OS, "--olla-os", help="Olla release OS segment."),
+    olla_arch: str = typer.Option(DEFAULT_OLLA_ARCH, "--olla-arch", help="Olla release architecture segment."),
+    olla_bin_dir: Path = typer.Option(DEFAULT_OLLA_BIN_DIR, "--olla-bin-dir", help="Local Olla binary directory."),
+) -> None:
+    """Prepare the gateway, cache/download hub, and inference daemons as one cluster."""
+    config, repo_root = _load_config()
+    gateway_names, cache_names, inference_names = _resolve_prepare_targets(config, target)
+    _print_prepare_plan(
+        target=target,
+        dry_run=dry_run,
+        gateway_names=gateway_names,
+        cache_names=cache_names,
+        inference_names=inference_names,
+        config=config,
+    )
+
+    if dry_run:
+        if gateway_names:
+            preview_olla_path = olla_bin_dir / "olla"
+            typer.echo(f"would: ensure Olla {olla_version} at {preview_olla_path}")
+            typer.echo("would: generate configs/olla-config.yaml")
+        if cache_names:
+            typer.echo(f"would: ensure cache hub {studio_omlx_models_dir_from_env()}")
+        for name in inference_names:
+            node = config.nodes[name]
+            resolved_admin_user = admin_user or node.admin_user
+            escalation = f"su={resolved_admin_user}" if resolved_admin_user else f"sudo={node.user}"
+            typer.echo(f"would: bootstrap {name} ssh={node.user}@{node.host} {escalation}")
+        return
+
+    binary_path = _repo_relative_path(repo_root, olla_bin_dir) / "olla"
+    if gateway_names:
+        typer.echo("")
+        typer.echo("== Gateway Tooling ==")
+        olla_result = ensure_olla_binary(
+            version=olla_version,
+            os_name=olla_os,
+            arch=olla_arch,
+            bin_dir=_repo_relative_path(repo_root, olla_bin_dir),
+            progress=_progress,
+        )
+        binary_path = olla_result.binary_path
+        config_path = write_generated_olla_config(config, repo_root=repo_root)
+        typer.echo(f"  config: generated {config_path}")
+
+    for gateway_name in gateway_names:
+        gateway_node = config.nodes[gateway_name]
+        typer.echo("")
+        typer.echo(f"== Gateway: {gateway_name} ({gateway_node.host}) ==")
+        gateway_admin_user = config.services.frontend_admin_user or gateway_node.admin_user or "(direct sudo)"
+        typer.echo(
+            "  auth: "
+            f"operator={_gateway_operator_user(config, '')} admin={gateway_admin_user} "
+            "reason=install Olla + TF edge LaunchDaemons"
+        )
+        result = run_gateway_daemon_setup(
+            repo_root=repo_root,
+            binary=binary_path,
+            config_path=repo_root / "configs" / "olla-config.yaml",
+            edge_host="127.0.0.1",
+            olla_port=resolve_port(None, default=config.services.olla_port),
+            edge_port=resolve_port(None, default=config.services.edge_port),
+            olla_base_url=local_base_url(config.services.olla_port),
+            users_env=EDGE_USER_PREFIX,
+            access_log_path=_edge_access_log_path(repo_root, config, None),
+            user=_gateway_operator_user(config, ""),
+            admin_user=config.services.frontend_admin_user or gateway_node.admin_user,
+            interactive_sudo=True,
+            apply=True,
+            timeout=timeout,
+            progress=_progress,
+        )
+        _fail_on_setup_errors(result.errors)
+        if not result.ok:
+            typer.echo("Error: gateway setup did not verify cleanly", err=True)
+            raise typer.Exit(1)
+        typer.echo("  status: gateway ready")
+
+    for cache_name in cache_names:
+        cache_node = config.nodes[cache_name]
+        typer.echo("")
+        typer.echo(f"== Cache Hub: {cache_name} ({cache_node.host}) ==")
+        ensure_cache_hub_dir(progress=_progress)
+        typer.echo("  status: cache hub ready")
+
+    for node_name in inference_names:
+        runtime_node = _get_runtime_node(config, node_name)
+        if runtime_node.home_dir is None:
+            runtime_node.home_dir = f"/Users/{runtime_node.user}"
+        resolved_admin_user = admin_user or runtime_node.admin_user
+        via_su = bool(resolved_admin_user)
+        typer.echo("")
+        typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
+        if via_su:
+            typer.echo(
+                "  auth: "
+                f"ssh={runtime_node.user}@{runtime_node.host} method=su admin={resolved_admin_user} "
+                "reason=install oMLX LaunchDaemon"
+            )
+        else:
+            typer.echo(
+                "  auth: "
+                f"ssh={runtime_node.user}@{runtime_node.host} method=sudo user={runtime_node.user} "
+                "reason=install oMLX LaunchDaemon"
+            )
+        result = run_omlx_daemon_setup(
+            runtime_node,
+            admin_user=resolved_admin_user or None,
+            via_su=via_su,
+            apply=True,
+            timeout=timeout,
+            progress=_progress,
+        )
+        _fail_on_setup_errors(result.errors)
+        if not result.ok:
+            typer.echo("Error: inference setup did not verify cleanly", err=True)
+            raise typer.Exit(1)
+        typer.echo("  status: inference ready")
+
+    typer.echo("")
+    typer.echo("status: cluster prepare complete")
+
+
+@cluster_app.command("restart")
+def cluster_restart(
+    target: str | None = typer.Argument(
+        None,
+        help="Optional node name. Omit for gateway + all inference nodes.",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print the restart plan without changing hosts by default.",
+    ),
+    timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for daemon restart commands."),
+    binary: Path = typer.Option(DEFAULT_OLLA_BIN_DIR / "olla", "--binary", help="Local Olla binary path."),
+) -> None:
+    """Restart gateway and inference daemons through the configured managers."""
+    config, repo_root = _load_config()
+    gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
+    typer.echo("Thunder Forge cluster restart")
+    typer.echo(f"target: {target or 'all'}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+
+    if gateway_names:
+        typer.echo("")
+        typer.echo("== Gateway ==")
+        if dry_run:
+            typer.echo("  would: generate configs/olla-config.yaml")
+        else:
+            write_generated_olla_config(config, repo_root=repo_root)
+            typer.echo("  config: generated configs/olla-config.yaml")
+
+        olla_result = run_olla_service_restart(
+            repo_root=repo_root,
+            binary=binary,
+            config_path=repo_root / "configs" / "olla-config.yaml",
+            port=resolve_port(None, default=config.services.olla_port),
+            manager="daemon",
+            apply=not dry_run,
+            timeout=timeout,
+            user=_gateway_operator_user(config, ""),
+        )
+        typer.echo(f"  olla: {olla_result.label}")
+        if not dry_run and _service_result_failed(olla_result):
+            _fail_on_setup_errors(olla_result.errors or ["Olla restart did not verify cleanly"])
+
+        edge_result = run_edge_service_restart(
+            repo_root=repo_root,
+            port=resolve_port(None, default=config.services.edge_port),
+            manager="daemon",
+            apply=not dry_run,
+            timeout=timeout,
+            users_env=EDGE_USER_PREFIX,
+            access_log_path=_edge_access_log_path(repo_root, config, None),
+            user=_gateway_operator_user(config, ""),
+        )
+        typer.echo(f"  edge: {edge_result.label}")
+        if not dry_run and _service_result_failed(edge_result):
+            _fail_on_setup_errors(edge_result.errors or ["TF edge restart did not verify cleanly"])
+
+    for node_name in inference_names:
+        runtime_node = _get_runtime_node(config, node_name)
+        if runtime_node.home_dir is None:
+            runtime_node.home_dir = f"/Users/{runtime_node.user}"
+        typer.echo("")
+        typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
+        result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+        typer.echo(f"  omlx: {result.label}")
+        if not dry_run and _service_result_failed(result):
+            _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
+
+    if not gateway_names and not inference_names:
+        typer.echo("status: nothing to restart")
+        return
+    typer.echo("")
+    typer.echo("status: cluster restart complete" if not dry_run else "status: dry-run complete")
+
+
+@cluster_app.command("status")
+def cluster_status(
+    target: str | None = typer.Argument(
+        None,
+        help="Optional inference node name. Omit for all inference nodes.",
+    ),
+) -> None:
+    """Check direct oMLX health for selected inference nodes."""
+    config, _ = _load_config()
+    _gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
+    typer.echo("Thunder Forge cluster status")
+    typer.echo(f"target: {target or 'all'}")
+    if not inference_names:
+        typer.echo("status: no inference nodes selected")
+        return
+
+    failed = False
+    for node_name in inference_names:
+        runtime_node = _get_runtime_node(config, node_name)
+        base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
+        result = check_omlx_health(base_url)
+        health_status = "ok" if result.health_ok else "fail"
+        models_status = "ok" if result.models_ok else "fail"
+        typer.echo(f"{node_name}: health={health_status} models={models_status}")
+        if result.models:
+            typer.echo(f"  served_models: {', '.join(result.models)}")
+        for error in result.errors:
+            typer.echo(f"Error: {node_name}: {error}", err=True)
+        failed = failed or not (result.health_ok and result.models_ok)
+
+    if failed:
+        raise typer.Exit(1)
+
+
+@cluster_app.command("smoke")
+def cluster_smoke(
+    target: str | None = typer.Argument(
+        None,
+        help="Optional node name. Omit for all inference nodes plus gateway smoke.",
+    ),
+    model: str = typer.Option(..., "--model", help="Backend runtime model id to verify."),
+    alias: str = typer.Option(..., "--alias", help="Public alias routed by Olla to the backend model."),
+    client_id: str = typer.Option(..., "--client-id", help="TF edge client id whose API key should be used."),
+    timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
+) -> None:
+    """Smoke inference node health, Olla routing, and TF edge auth/proxy."""
+    config, _ = _load_config()
+    _gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
+    typer.echo("Thunder Forge cluster smoke")
+    typer.echo(f"target: {target or 'all'}")
+
+    failed = False
+    for node_name in inference_names:
+        runtime_node = _get_runtime_node(config, node_name)
+        base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
+        health = check_omlx_health(base_url)
+        health_status = "ok" if health.health_ok else "fail"
+        models_status = "ok" if health.models_ok else "fail"
+        typer.echo(f"runtime {node_name}: health={health_status} models={models_status}")
+        failed = failed or not (health.health_ok and health.models_ok)
+
+    olla_result = smoke_olla_router(
+        base_url=local_base_url(config.services.olla_port),
+        model=model,
+        alias=alias,
+        timeout=timeout,
+    )
+    typer.echo(
+        "olla: "
+        f"health={'ok' if olla_result.health_ok else 'fail'} "
+        f"chat={'ok' if olla_result.chat_ok else 'fail'} "
+        f"alias={'ok' if olla_result.alias_ok else 'fail'}"
+    )
+    failed = failed or not olla_result.ok
+
+    env_name, api_key = edge_api_key_from_env(client_id=client_id, users_env=EDGE_USER_PREFIX)
+    if not api_key:
+        typer.echo(f"Error: {env_name} is not set", err=True)
+        raise typer.Exit(1)
+    edge_result = smoke_edge_contract(
+        base_url=local_base_url(config.services.edge_port),
+        api_key=api_key,
+        model=alias,
+        prompt="Reply with one short word: pong.",
+        timeout=timeout,
+    )
+    typer.echo(
+        "edge: "
+        f"auth={'ok' if edge_result.missing_auth_401 and edge_result.invalid_auth_401 else 'fail'} "
+        f"chat={'ok' if edge_result.chat_ok else 'fail'} "
+        f"session={'ok' if edge_result.session_ok else 'fail'}"
+    )
+    failed = failed or not edge_result.ok
+
+    for result in [olla_result, edge_result]:
+        for error in result.errors:
+            typer.echo(f"Error: {error}", err=True)
+    if failed:
+        raise typer.Exit(1)
+    typer.echo("status: cluster smoke complete")
+
+
 @service_app.command("setup-daemon")
 def service_setup_daemon(
     dry_run: bool = typer.Option(
@@ -309,23 +702,26 @@ def service_setup_daemon(
         )
         raise typer.Exit(1)
 
-    result = run_gateway_daemon_setup(
-        repo_root=repo_root,
-        binary=binary,
-        config_path=config_path,
-        edge_host=edge_host,
-        olla_port=resolve_port(olla_port, default=config.services.olla_port),
-        edge_port=resolve_port(edge_port, default=config.services.edge_port),
-        olla_base_url=olla_base_url or local_base_url(config.services.olla_port),
-        users_env=users_env,
-        access_log_path=_edge_access_log_path(repo_root, config, access_log),
-        user=_gateway_operator_user(config, user),
-        admin_user=resolved_admin_user,
-        interactive_sudo=allow_sudo_prompt,
-        script_path=script_path or None,
-        apply=not dry_run,
-        timeout=timeout,
-    )
+    setup_kwargs = {
+        "repo_root": repo_root,
+        "binary": binary,
+        "config_path": config_path,
+        "edge_host": edge_host,
+        "olla_port": resolve_port(olla_port, default=config.services.olla_port),
+        "edge_port": resolve_port(edge_port, default=config.services.edge_port),
+        "olla_base_url": olla_base_url or local_base_url(config.services.olla_port),
+        "users_env": users_env,
+        "access_log_path": _edge_access_log_path(repo_root, config, access_log),
+        "user": _gateway_operator_user(config, user),
+        "admin_user": resolved_admin_user,
+        "interactive_sudo": allow_sudo_prompt,
+        "script_path": script_path or None,
+        "apply": not dry_run,
+        "timeout": timeout,
+    }
+    if not dry_run:
+        setup_kwargs["progress"] = typer.echo
+    result = run_gateway_daemon_setup(**setup_kwargs)
     _print_gateway_daemon_setup_result(result, dry_run=dry_run)
     if bool(result.errors) or (result.applied and not result.ok):
         raise typer.Exit(1)
@@ -994,7 +1390,7 @@ def runtime_setup_daemon(
     ),
     via_su: bool = typer.Option(
         False,
-        "--via-su/--ssh-admin",
+        "--via-su/--direct-sudo",
         help="SSH as the node user, then run the setup script through su - ADMIN_USER.",
     ),
     script_path: str = typer.Option(
@@ -1022,15 +1418,13 @@ def runtime_setup_daemon(
     if not dry_run:
         if via_su:
             typer.echo(
-                f"[{runtime_node.host}] Bootstrap: SSH as {runtime_node.user}, "
-                f"then su to {resolved_admin_user}. "
-                f"su will ask for {resolved_admin_user}'s macOS login password."
+                f"[{runtime_node.host}] auth: ssh={runtime_node.user}@{runtime_node.host} "
+                f"method=su admin={resolved_admin_user} reason=install oMLX LaunchDaemon"
             )
         else:
             typer.echo(
-                f"[{runtime_node.host}] Bootstrap: SSH as {runtime_node.user}, "
-                f"then sudo. "
-                f"sudo will prompt for {runtime_node.user}'s local password."
+                f"[{runtime_node.host}] auth: ssh={runtime_node.user}@{runtime_node.host} "
+                f"method=sudo user={runtime_node.user} reason=install oMLX LaunchDaemon"
             )
 
     result = run_omlx_daemon_setup(
@@ -1287,10 +1681,6 @@ def generate_olla_config_cmd(
     ),
 ) -> None:
     """Generate olla-config.yaml from the TF cluster config."""
-    from thunder_forge.cluster.config import generate_olla_config
-
     config, repo_root = _load_config()
-    config_path = repo_root / "configs" / "olla-config.yaml"
-    content = generate_olla_config(config, port=port)
-    config_path.write_text(content)
-    typer.echo(f"✓ Generated {config_path}")
+    config_path = write_generated_olla_config(config, repo_root=repo_root, port=port)
+    typer.echo(f"generated: {config_path}")

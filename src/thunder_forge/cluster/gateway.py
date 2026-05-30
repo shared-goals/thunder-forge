@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shlex
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from thunder_forge.cluster.services import (
     generate_daemon_sudoers_file,
     launchd_daemon_sudoers_command_set,
     run_local_commands,
+    system_launchd_bootstrap_script,
+    system_launchd_stop_wait_script,
     write_local_file,
 )
 
@@ -83,19 +86,19 @@ def _gateway_setup_run_command(
     host_tag = f"[{host}] " if host else ""
     quoted_script = shlex.quote(script_path)
     if admin_user:
-        sudo_prompt = f"[%h] Password for {admin_user} — Thunder Forge gateway daemons: "
+        sudo_prompt = f"[%h] password: user={admin_user} reason=install Thunder Forge gateway daemons: "
         sudo_command = (
             f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} /bin/zsh {quoted_script}"
             if interactive_sudo
             else f"/usr/bin/sudo -n /bin/zsh {quoted_script}"
         )
-        notice = f"{host_tag}su: {admin_user}'s macOS login password needed to install Thunder Forge gateway daemons."
+        notice = f"{host_tag}password prompt: method=su user={admin_user} reason=install Thunder Forge gateway daemons"
         return [
             f"printf '%s\\n' {shlex.quote(notice)}",
             f"/usr/bin/su - {shlex.quote(admin_user)} -c {shlex.quote(sudo_command)}",
         ]
 
-    sudo_prompt = "[%h] Password for %p — Thunder Forge gateway daemons: "
+    sudo_prompt = "[%h] password: user=%p reason=install Thunder Forge gateway daemons: "
     sudo_command = (
         f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} /bin/zsh {quoted_script}"
         if interactive_sudo
@@ -103,7 +106,7 @@ def _gateway_setup_run_command(
     )
     if not interactive_sudo:
         return [sudo_command]
-    notice = f"{host_tag}sudo: local macOS admin password needed to set up Thunder Forge gateway daemons."
+    notice = f"{host_tag}password prompt: method=sudo user=%p reason=install Thunder Forge gateway daemons"
     return [f"printf '%s\\n' {shlex.quote(notice)}", sudo_command]
 
 
@@ -135,24 +138,22 @@ def generate_gateway_daemon_setup_script(
 THUNDER_FORGE_PLIST_{index}
 """.rstrip()
         )
+        stop_wait_script = system_launchd_stop_wait_script(uid_var="OPERATOR_UID")
+        bootstrap_script = system_launchd_bootstrap_script()
         service_blocks.append(
             f"""LABEL={shlex.quote(service.label)}
-STAGING_PLIST_PATH={shlex.quote(service.staging_plist_path)}
-PLIST_PATH={shlex.quote(service.plist_path)}
-PROCESS_PATTERN={shlex.quote(process_pattern)}
+    STAGING_PLIST_PATH={shlex.quote(service.staging_plist_path)}
+    PLIST_PATH={shlex.quote(service.plist_path)}
+    PROCESS_PATTERN={shlex.quote(process_pattern)}
 
-run_root /usr/bin/install -o \"$OPERATOR_USER\" -g staff -m 644 \"${tmp_var}\" \"$STAGING_PLIST_PATH\"
-run_root /usr/bin/install -o root -g wheel -m 644 \"${tmp_var}\" \"$PLIST_PATH\"
-run_root /bin/launchctl bootout \"user/$OPERATOR_UID/$LABEL\" 2>/dev/null || true
-run_root /bin/launchctl bootout \"gui/$OPERATOR_UID/$LABEL\" 2>/dev/null || true
-run_root /bin/launchctl bootout \"system/$LABEL\" 2>/dev/null || true
-if [[ -n \"$PROCESS_PATTERN\" ]]; then
-    run_root /usr/bin/pkill -f \"$PROCESS_PATTERN\" 2>/dev/null || true
-fi
-run_root /bin/launchctl bootstrap system \"$PLIST_PATH\"
-run_root /bin/launchctl kickstart -k \"system/$LABEL\"
-run_root /bin/launchctl print \"system/$LABEL\" >/dev/null
-echo \"label: $LABEL\"
+    echo "launchd: stopping $LABEL"
+    {stop_wait_script}
+    echo "launchd: installing $LABEL"
+    run_root /usr/bin/install -o "$OPERATOR_USER" -g staff -m 644 "${tmp_var}" "$STAGING_PLIST_PATH"
+    run_root /usr/bin/install -o root -g wheel -m 644 "${tmp_var}" "$PLIST_PATH"
+    echo "launchd: starting $LABEL"
+    {bootstrap_script}
+    echo "service: $LABEL ready"
 """.rstrip()
         )
 
@@ -305,6 +306,7 @@ def run_gateway_daemon_setup(
     script_path: str | None = None,
     apply: bool = True,
     timeout: int = 300,
+    progress: Callable[[str], None] | None = None,
 ) -> GatewayDaemonSetupResult:
     result, olla_health_url, edge_health_url = build_gateway_daemon_setup_result(
         repo_root=repo_root,
@@ -340,16 +342,17 @@ def run_gateway_daemon_setup(
     if not ok:
         result.errors.append(error)
 
-    print("waiting for gateway services to become healthy...")
-    olla_ok = _wait_olla_healthy(olla_health_url, retries=30, interval=1.0, timeout=5.0)
+    olla_ok = _wait_olla_healthy(olla_health_url, retries=30, interval=1.0, timeout=5.0, progress=progress)
     if not olla_ok:
         result.errors.append(f"Olla health check failed at {olla_health_url}")
     else:
-        print(f"health: olla ok ({olla_health_url})")
-    edge_ok = _wait_edge_healthy(edge_health_url, retries=30, interval=1.0, timeout=5.0)
+        if progress:
+            progress(f"health: olla ok ({olla_health_url})")
+    edge_ok = _wait_edge_healthy(edge_health_url, retries=30, interval=1.0, timeout=5.0, progress=progress)
     if not edge_ok:
         result.errors.append(f"TF edge health check failed at {edge_health_url}")
     else:
-        print(f"health: edge ok ({edge_health_url})")
+        if progress:
+            progress(f"health: edge ok ({edge_health_url})")
     result.health_ok = olla_ok and edge_ok
     return result

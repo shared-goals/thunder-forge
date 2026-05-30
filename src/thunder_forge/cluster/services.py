@@ -71,6 +71,123 @@ def launch_daemon_path(label: str) -> str:
     return f"/Library/LaunchDaemons/{label}.plist"
 
 
+def system_launchd_stop_wait_script(
+    *,
+    label_var: str = "LABEL",
+    uid_var: str = "OPERATOR_UID",
+    process_pattern_var: str = "PROCESS_PATTERN",
+    run_root: str = "run_root",
+    wait_seconds: int = 10,
+) -> str:
+    label_ref = f"${{{label_var}}}"
+    uid_ref = f"${{{uid_var}}}"
+    pattern_ref = f"${{{process_pattern_var}}}"
+    return f"""{run_root} /bin/launchctl bootout "user/{uid_ref}/{label_ref}" 2>/dev/null || true
+{run_root} /bin/launchctl bootout "gui/{uid_ref}/{label_ref}" 2>/dev/null || true
+{run_root} /bin/launchctl bootout "system/{label_ref}" 2>/dev/null || true
+if [[ -n "{pattern_ref}" ]]; then
+    {run_root} /usr/bin/pkill -TERM -f "{pattern_ref}" 2>/dev/null || true
+    _tf_wait_seconds=0
+    while /usr/bin/pgrep -f "{pattern_ref}" >/dev/null 2>&1; do
+        if [[ $_tf_wait_seconds -ge {wait_seconds} ]]; then
+            echo "process still running after {wait_seconds}s; sending SIGKILL" >&2
+            {run_root} /usr/bin/pkill -KILL -f "{pattern_ref}" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+        _tf_wait_seconds=$((_tf_wait_seconds + 1))
+    done
+fi"""
+
+
+def system_launchd_bootstrap_script(
+    *,
+    label_var: str = "LABEL",
+    plist_path_var: str = "PLIST_PATH",
+    run_root: str = "run_root",
+) -> str:
+    label_ref = f"${{{label_var}}}"
+    plist_ref = f"${{{plist_path_var}}}"
+    return f"""{run_root} /bin/launchctl enable "system/{label_ref}" 2>/dev/null || true
+set +e
+{run_root} /bin/launchctl bootstrap system "{plist_ref}"
+_tf_bootstrap_exit=$?
+set -e
+if [[ $_tf_bootstrap_exit -ne 0 ]]; then
+    echo "launchd bootstrap failed: label={label_ref} exit=$_tf_bootstrap_exit" >&2
+    echo "launchd plist: {plist_ref}" >&2
+    {run_root} /bin/launchctl print "system/{label_ref}" 2>&1 || true
+    exit $_tf_bootstrap_exit
+fi
+{run_root} /bin/launchctl kickstart -k "system/{label_ref}"
+{run_root} /bin/launchctl print "system/{label_ref}" >/dev/null"""
+
+
+def system_launchd_stop_wait_command(
+    *,
+    label: str,
+    process_pattern: str = "",
+    uid_expr: str = "$(id -u)",
+    root_prefix: str = "/usr/bin/sudo -n ",
+    wait_seconds: int = 10,
+) -> str:
+    commands = [
+        f"{root_prefix}/bin/launchctl bootout system/{label} 2>/dev/null || true",
+    ]
+    if process_pattern:
+        quoted_pattern = shlex.quote(process_pattern)
+        commands.extend(
+            [
+                f"/usr/bin/pkill -TERM -f {quoted_pattern} 2>/dev/null || true",
+                "_tf_wait_seconds=0",
+                (
+                    f"while /usr/bin/pgrep -f {quoted_pattern} >/dev/null 2>&1; do "
+                    f"if [[ $_tf_wait_seconds -ge {wait_seconds} ]]; then "
+                    f"echo 'process still running after {wait_seconds}s; sending SIGKILL' >&2; "
+                    f"/usr/bin/pkill -KILL -f {quoted_pattern} 2>/dev/null || true; "
+                    "break; fi; "
+                    "sleep 1; "
+                    "_tf_wait_seconds=$((_tf_wait_seconds + 1)); "
+                    "done"
+                ),
+            ]
+        )
+    return " ; ".join(
+        [
+            f"launchctl bootout user/{uid_expr}/{label} 2>/dev/null || true",
+            f"launchctl bootout gui/{uid_expr}/{label} 2>/dev/null || true",
+            *commands,
+        ]
+    )
+
+
+def system_launchd_bootstrap_command(
+    *,
+    label: str,
+    plist_path: str,
+    root_prefix: str = "/usr/bin/sudo -n ",
+) -> str:
+    return " ; ".join(
+        [
+            f"{root_prefix}/bin/launchctl enable system/{label} 2>/dev/null || true",
+            "set +e",
+            f"{root_prefix}/bin/launchctl bootstrap system {plist_path}",
+            "_tf_bootstrap_exit=$?",
+            "set -e",
+            (
+                "if [[ $_tf_bootstrap_exit -ne 0 ]]; then "
+                f"echo 'launchd bootstrap failed: label={label} exit='$_tf_bootstrap_exit >&2; "
+                f"echo 'launchd plist: {plist_path}' >&2; "
+                f"{root_prefix}/bin/launchctl print system/{label} 2>&1 || true; "
+                "exit $_tf_bootstrap_exit; "
+                "fi"
+            ),
+            f"{root_prefix}/bin/launchctl kickstart -k system/{label}",
+            f"{root_prefix}/bin/launchctl print system/{label} >/dev/null",
+        ]
+    )
+
+
 def generate_launchd_plist(spec: LaunchdServiceSpec, *, system_daemon: bool = False) -> str:
     program_arguments_xml = "\n".join(
         f"        <string>{html.escape(argument)}</string>" for argument in spec.program_arguments
@@ -151,71 +268,70 @@ def system_launchd_commands(
     admin_user = admin_user.strip()
 
     if admin_user:
-        sudo_prompt = f"Password for {admin_user} on %h to manage Thunder Forge frontend daemon {label}: "
+        sudo_prompt = f"[%h] password: user={admin_user} reason=manage Thunder Forge daemon {label}: "
         sudo_validate = (
             f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} -v"
             if interactive_sudo
             else "/usr/bin/sudo -n -v"
         )
         admin_notice = (
-            f"Next prompt 'Password:' is su asking for admin user {admin_user}'s local macOS login password "
-            f"so Thunder Forge can manage frontend daemon {label}."
+            f"password prompt: host=%h method=su user={admin_user} "
+            f"reason=manage Thunder Forge daemon {label}"
         )
-        sudo_notice = (
-            f"After su succeeds, sudo may ask once for admin user {admin_user}'s password to install/restart {label}."
+        sudo_notice = f"password prompt: host=%h method=sudo user={admin_user} reason=install/restart {label}"
+        stop_wait = system_launchd_stop_wait_command(
+            label=label,
+            process_pattern=process_pattern,
+            root_prefix="/usr/bin/sudo -n ",
+        )
+        bootstrap = system_launchd_bootstrap_command(
+            label=label,
+            plist_path=plist_path,
+            root_prefix="/usr/bin/sudo -n ",
         )
         admin_script_parts = [
             "set -e",
             f"printf '%s\\n' {shlex.quote(sudo_notice)}",
             sudo_validate,
+            stop_wait,
             f"/usr/bin/sudo -n /usr/bin/install -o root -g wheel -m 644 {staging_plist_path} {plist_path}",
-            f"/usr/bin/sudo -n /bin/launchctl bootout system/{label} 2>/dev/null || true",
-            f"/usr/bin/sudo -n /bin/launchctl bootstrap system {plist_path}",
-            f"/usr/bin/sudo -n /bin/launchctl kickstart -k system/{label}",
-            f"/usr/bin/sudo -n /bin/launchctl print system/{label} >/dev/null",
+            bootstrap,
         ]
         commands = [
             setup_command,
             f"printf '%s\\n' {shlex.quote(admin_notice)}",
-            f"launchctl bootout user/$(id -u)/{label} 2>/dev/null || true",
-            f"launchctl bootout gui/$(id -u)/{label} 2>/dev/null || true",
         ]
-        if process_pattern:
-            commands.append(f"pkill -f {shlex.quote(process_pattern)} 2>/dev/null || true")
         admin_script = "; ".join(admin_script_parts)
         commands.append(f"/usr/bin/su - {shlex.quote(admin_user)} -c {shlex.quote(admin_script)}")
         commands.append("true")
         return commands
 
+    sudo_prompt = f"[%h] password: user=%p reason=manage Thunder Forge daemon {label}: "
+
     def root_command(command: str) -> str:
         if interactive_sudo:
-            prompt = f"Password for %p on %h to manage Thunder Forge frontend daemon {label}: "
-            sudo_command = f"/usr/bin/sudo -p {shlex.quote(prompt)} {command}"
+            sudo_command = f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} {command}"
         else:
             sudo_command = f"/usr/bin/sudo -n {command}"
         return sudo_command
 
+    root_prefix = f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} " if interactive_sudo else "/usr/bin/sudo -n "
+
     commands = [setup_command]
     if interactive_sudo:
-        notice = (
-            "sudo needs the local macOS login password for the sudo-capable user "
-            f"on this frontend host to manage {label}."
-        )
+        notice = f"password prompt: host=%h method=sudo user=%p reason=manage Thunder Forge daemon {label}"
         commands.append(f"printf '%s\\n' {shlex.quote(notice)}")
+    commands.append(
+        system_launchd_stop_wait_command(
+            label=label,
+            process_pattern=process_pattern,
+            root_prefix=root_prefix,
+        )
+    )
     commands.extend(
         [
             root_command(f"/usr/bin/install -o root -g wheel -m 644 {staging_plist_path} {plist_path}"),
-            f"launchctl bootout user/$(id -u)/{label} 2>/dev/null || true",
-            f"launchctl bootout gui/$(id -u)/{label} 2>/dev/null || true",
-            root_command(f"/bin/launchctl bootout system/{label} 2>/dev/null || true"),
-        ]
-    )
-    if process_pattern:
-        commands.append(f"pkill -f {shlex.quote(process_pattern)} 2>/dev/null || true")
-    commands.extend(
-        [
-            root_command(f"/bin/launchctl bootstrap system {plist_path}"),
-            root_command(f"/bin/launchctl kickstart -k system/{label}"),
+            system_launchd_bootstrap_command(label=label, plist_path=plist_path, root_prefix=root_prefix),
             root_command(f"/bin/launchctl print system/{label} >/dev/null"),
         ]
     )
@@ -251,6 +367,7 @@ def launchd_daemon_sudoers_command_set(
         install_command=f"/usr/bin/install -o root -g wheel -m 644 {staging_plist_path} {plist_path}",
         launchd_commands=[
             f"/bin/launchctl bootout system/{label}",
+            f"/bin/launchctl enable system/{label}",
             f"/bin/launchctl bootstrap system {plist_path}",
             f"/bin/launchctl kickstart -k system/{label}",
             f"/bin/launchctl print system/{label}",

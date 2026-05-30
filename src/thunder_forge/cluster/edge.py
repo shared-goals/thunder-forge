@@ -816,8 +816,9 @@ def _wait_edge_healthy(
     retries: int = 30,
     interval: float = 1.0,
     timeout: float = 5.0,
+    progress: Callable[[str], None] | None = None,
 ) -> bool:
-    for _ in range(retries):
+    for attempt in range(1, retries + 1):
         try:
             with httpx.Client(base_url=base_url, timeout=timeout, trust_env=False) as client:
                 response = client.get("/v1/models")
@@ -825,6 +826,8 @@ def _wait_edge_healthy(
                     return True
         except httpx.HTTPError:
             pass
+        if progress and (attempt == 1 or attempt % 5 == 0):
+            progress(f"health: waiting for TF edge at {base_url} ({attempt}/{retries})")
         time.sleep(interval)
     return False
 

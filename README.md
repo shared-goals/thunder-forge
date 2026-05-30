@@ -67,11 +67,11 @@ cp tfconfig.example.yaml tfconfig.yaml
 # Generate Olla config from the TF cluster config
 uv run thunder-forge generate-olla-config
 
-# One-time bootstrap: install gateway (Olla + Edge) and node (oMLX) LaunchDaemons
+# One-time prepare: install gateway (Olla + Edge), cache hub, and node (oMLX) LaunchDaemons
 # Operator user must have passwordless SSH to all nodes first (see Prerequisites)
-make daemon-bootstrap           # all nodes
-make daemon-bootstrap studio    # gateway only
-make daemon-bootstrap msm3      # inference node only
+make prepare           # gateway + cache + inference nodes
+make prepare studio    # gateway/cache host only
+make prepare msm3      # inference node only
 
 # Restart daemons after config changes (passwordless via installed sudoers)
 make daemon-restart
@@ -82,38 +82,49 @@ make daemon-smoke
 # Check node runtime status
 make runtime-status
 ```
-make full-daemon-test EDGE_CLIENT=<client-id>
-```
-
-`make olla-restart` is a convenience wrapper for installing the pinned Olla binary and applying the local frontend launchd restart.
 
 ## Service Management
 
-`service restart` is the unified operator path for managed Thunder Forge daemons:
+The Makefile is a thin dispatcher for cluster-level CLI commands:
+
+- `make prepare [node]` -> `uv run thunder-forge cluster prepare [node] --apply`
+- `make daemon-restart [node]` -> `uv run thunder-forge cluster restart [node] --apply`
+- `make daemon-smoke [node]` -> `uv run thunder-forge cluster smoke [node] ...`
+- `make runtime-status [node]` -> `uv run thunder-forge cluster status [node]`
+
+`service restart` remains the lower-level per-service path for managed Thunder Forge daemons:
 
 - `uv run thunder-forge service restart --service olla --apply` installs or updates the local frontend LaunchAgent and restarts Olla as the current user. This is the default path for `studio`, so `shag` can restart Olla without sudo.
 - `uv run thunder-forge service restart --service edge --apply` installs or updates the local frontend TF edge LaunchAgent and restarts it as the current user.
 - `uv run thunder-forge service restart --service omlx --node <node> --manager daemon --apply` delegates to the existing node LaunchDaemon workflow after one-time setup.
 - Use `--dry-run` first to print the generated plist and shell commands without changing the host.
 
-For reboot-durable system daemons, bootstrap once with `make daemon-bootstrap`, then use `make daemon-restart` for all subsequent updates. Bootstrap installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. After that, `make daemon-restart` regenerates Olla config and reinstalls/restarts all services with `sudo -n`; no password prompt is expected.
+For reboot-durable system daemons, prepare once with `make prepare`, then use `make daemon-restart` for all subsequent updates. Prepare installs the pinned Olla binary, generates Olla config, prepares the local oMLX model cache hub, installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. After that, `make daemon-restart` regenerates Olla config and reinstalls/restarts all services with `sudo -n`; no password prompt is expected.
+
+Prepare verifies minimal service readiness only: Olla `/internal/health`, TF edge auth boundary health, and direct oMLX `/health`. It does not require inference models or chat to be ready; use `make daemon-smoke` for model visibility, routing, and chat checks after the cluster has warmed up.
 
 Run system-daemon install targets from a real terminal, not the VS Code guarded terminal, because macOS sudo/su password prompts can be blocked by the editor guard:
 
 ```bash
 cd /path/to/thunder-forge
-make daemon-bootstrap          # first time: prompts for admin passwords
+make prepare                   # first time: prompts for admin passwords
 make daemon-restart            # subsequent: passwordless via installed sudoers
 make daemon-smoke              # verify cluster health
 ```
 
-**Bootstrap escalation modes** (operator user always SSHes, escalation runs on the remote):
+**Prepare escalation modes** (operator user always SSHes, escalation runs on the remote):
 
-- **Gateway** (`studio`): operator SSHes, then `su - <admin_user>` so admin can `sudo` run the setup script. The unlabeled `Password:` prompt is `su` asking for the admin account's local macOS login password.
-- **Inference nodes** (default, `--ssh-admin`): operator SSHes, then `sudo` directly as the operator user. The labeled prompt names the operator user and the node.
-- **Inference nodes** (override, `DAEMON_ADMIN_USER=admin`): operator SSHes, then `su - admin` so admin can `sudo` run the setup script. Use this when the operator user lacks sudo on the node.
+- **Gateway** (`studio`): the local operator runs `su - <admin_user>`, then admin uses `sudo` to run the setup script.
+- **Inference nodes**: Thunder Forge SSHes as `nodes.<node>.user`, then uses `su - nodes.<node>.admin_user` so admin can `sudo` run the setup script. If a node has no admin user configured, setup falls back to direct sudo as the operator user.
 
-After bootstrap, node restarts use already-installed narrow `sudo -n` rules for the operator user and should not ask for a password.
+Every password notice is printed before macOS asks for input and includes `host`, `method`, `user`, and `reason`, for example:
+
+```text
+[msm3-wifi.lan] password prompt: method=su user=admin reason=bootstrap Thunder Forge oMLX daemon com.thunder-forge.omlx-8018
+[%h] password: user=admin reason=install Thunder Forge oMLX daemon com.thunder-forge.omlx-8018:
+```
+
+After prepare, node restarts use already-installed narrow `sudo -n` rules for the operator user and should not ask for a password.
 
 For an agent-managed cluster, run these commands as the dedicated operator account. The account should exist on the frontend role, the cache/download host, and every node it manages. On the current dev setup, `studio` holds both frontend and cache/download roles; in production, `rock` should hold the frontend role while `studio` keeps cache/download work close to the Mac inference fabric.
 
@@ -155,7 +166,7 @@ Explicit CLI flags such as `--port` still win over config defaults, and explicit
 
 For production nodes, prefer `--manager daemon` after node setup grants only the required non-interactive sudo commands. Use the default `process` manager for dev recovery and immediate no-sudo operation.
 
-`runtime setup-daemon` is the one-time setup path. By default it prints the generated node-side admin script and remote commands. With `--apply`, it copies the script to the node and runs it through an admin account:
+`cluster prepare` is the unified one-time setup path for the pre-MVP cluster. It prints a plan, then applies phases in this order: gateway tooling, gateway daemons, cache hub, inference daemons. Use the lower-level `runtime setup-daemon` command only when working on one node directly. By default it prints the generated node-side admin script and remote commands. With `--apply`, it copies the script to the node and runs it through an admin account:
 
 ```bash
 uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply

@@ -50,10 +50,12 @@ def test_system_launchd_commands_can_prompt_for_install_repair() -> None:
         interactive_sudo=True,
     )
 
-    assert "sudo needs the local macOS login password" in commands[1]
-    assert "/usr/bin/sudo -p" in commands[2]
-    assert "Password for %p on %h to manage Thunder Forge frontend daemon com.thunder-forge.sample" in commands[2]
-    assert "/usr/bin/install" in commands[2]
+    assert "password prompt: host=%h method=sudo user=%p reason=manage Thunder Forge daemon" in commands[1]
+    assert "launchctl bootout" in commands[2]
+    assert "/usr/bin/sudo -p" in commands[3]
+    assert "[%h] password: user=%p reason=manage Thunder Forge daemon com.thunder-forge.sample" in commands[3]
+    assert "/usr/bin/install" in commands[3]
+    assert "launchctl enable system/com.thunder-forge.sample" in "\n".join(commands)
     assert "/usr/bin/sudo -n" not in "\n".join(commands)
 
 
@@ -68,15 +70,14 @@ def test_system_launchd_commands_can_prompt_through_admin_user() -> None:
     )
 
     joined = "\n".join(commands)
-    assert "Next prompt" in commands[1]
-    assert "Password:" in commands[1]
-    assert "admin user serpo" in commands[1]
-    assert "local macOS login password" in commands[1]
+    assert "password prompt: host=%h method=su user=serpo" in commands[1]
+    assert "reason=manage Thunder Forge daemon com.thunder-forge.sample" in commands[1]
     assert sum("/usr/bin/su - serpo -c" in command for command in commands) == 1
     assert joined.count("/usr/bin/sudo -p") == 1
-    assert "After su succeeds, sudo may ask once" in joined
-    assert "Password for serpo on %h to manage Thunder Forge frontend daemon com.thunder-forge.sample" in joined
+    assert "password prompt: host=%h method=sudo user=serpo" in joined
+    assert "[%h] password: user=serpo reason=manage Thunder Forge daemon com.thunder-forge.sample" in joined
     assert "/usr/bin/install" in joined
+    assert "launchctl enable system/com.thunder-forge.sample" in joined
     assert "/usr/bin/sudo -n /bin/launchctl bootstrap system" in joined
     assert commands[-1] == "true"
 
@@ -108,7 +109,7 @@ def test_gateway_daemon_setup_generates_combined_sudoers(tmp_path: Path) -> None
     assert "run_root /usr/sbin/visudo -cf" in result.script_content
     assert "run_root /bin/launchctl bootstrap system" in result.script_content
     assert any("/usr/bin/su - serpo -c" in command for command in result.commands)
-    assert any("Password for serpo" in command for command in result.commands)
+    assert any("user=serpo reason=install Thunder Forge gateway daemons" in command for command in result.commands)
 
 
 def test_gateway_daemon_setup_apply_verifies_with_narrow_sudoers(tmp_path: Path, monkeypatch) -> None:
@@ -125,10 +126,20 @@ def test_gateway_daemon_setup_apply_verifies_with_narrow_sudoers(tmp_path: Path,
         assert timeout == 300
         return True, ""
 
+    health_checks: list[tuple[str, str]] = []
+
+    def fake_wait_olla_healthy(base_url, **kwargs):
+        health_checks.append(("olla", base_url))
+        return True
+
+    def fake_wait_edge_healthy(base_url, **kwargs):
+        health_checks.append(("edge", base_url))
+        return True
+
     monkeypatch.setattr(gateway_module, "write_local_file", fake_write_local_file)
     monkeypatch.setattr(gateway_module, "run_local_commands", fake_run_local_commands)
-    monkeypatch.setattr(gateway_module, "_wait_olla_healthy", lambda base_url, **kwargs: True)
-    monkeypatch.setattr(gateway_module, "_wait_edge_healthy", lambda base_url, **kwargs: True)
+    monkeypatch.setattr(gateway_module, "_wait_olla_healthy", fake_wait_olla_healthy)
+    monkeypatch.setattr(gateway_module, "_wait_edge_healthy", fake_wait_edge_healthy)
 
     result = run_gateway_daemon_setup(
         repo_root=tmp_path,
@@ -148,6 +159,7 @@ def test_gateway_daemon_setup_apply_verifies_with_narrow_sudoers(tmp_path: Path,
         "/usr/bin/sudo -n /bin/launchctl print system/com.thunder-forge.olla-40115 >/dev/null",
         "/usr/bin/sudo -n /bin/launchctl print system/com.thunder-forge.edge-40116 >/dev/null",
     ]
+    assert health_checks == [("olla", "http://127.0.0.1:40115"), ("edge", "http://127.0.0.1:40116")]
 
 
 def test_run_local_commands_stream_failure_reports_exit_code() -> None:
@@ -232,7 +244,9 @@ def test_run_olla_service_restart_daemon_apply_writes_staging_before_install(tmp
     assert result.ok
     assert written_files[0][0] == str(tmp_path / ".tmp/run/com.thunder-forge.olla-40115.plist")
     assert command_batches[0] == [f"mkdir -p {tmp_path}/.tmp/run {tmp_path}/logs"]
-    assert command_batches[1][0].startswith("/usr/bin/sudo -n /usr/bin/install")
+    assert "launchctl bootout" in command_batches[1][0]
+    assert command_batches[1][1].startswith("/usr/bin/sudo -n /usr/bin/install")
+    assert "launchctl bootstrap system" in command_batches[1][2]
     assert command_batches[2] == [
         "/usr/bin/sudo -n /bin/launchctl print system/com.thunder-forge.olla-40115 >/dev/null"
     ]
@@ -281,9 +295,9 @@ def test_run_edge_service_restart_daemon_apply_reinstalls_every_time(tmp_path: P
     assert result.ok
     assert written_files[0][0] == str(tmp_path / ".tmp/run/com.thunder-forge.edge-40116.plist")
     assert command_batches[0] == [f"mkdir -p {tmp_path}/.tmp/run {tmp_path}/logs"]
-    assert command_batches[1][0].startswith("/usr/bin/sudo -n /usr/bin/install")
-    assert any("launchctl bootout system/com.thunder-forge.edge-40116" in command for command in command_batches[1])
-    assert any("launchctl bootstrap system" in command for command in command_batches[1])
+    assert "launchctl bootout" in command_batches[1][0]
+    assert command_batches[1][1].startswith("/usr/bin/sudo -n /usr/bin/install")
+    assert "launchctl bootstrap system" in command_batches[1][2]
     assert command_batches[2] == [
         "/usr/bin/sudo -n /bin/launchctl print system/com.thunder-forge.edge-40116 >/dev/null"
     ]

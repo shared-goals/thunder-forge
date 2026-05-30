@@ -2,12 +2,14 @@
 
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import yaml as yaml_lib
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
 from thunder_forge.cluster.config import ClusterConfig, ServiceConfig
+from thunder_forge.cluster.edge import EdgeSmokeResult
 from thunder_forge.cluster.gateway import GatewayDaemonSetupResult
 from thunder_forge.cluster.olla import OllaDevSmokeResult, OllaSmokeResult
 from thunder_forge.cluster.omlx import OmlxDaemonSetupResult, OmlxHealthResult, OmlxProcessResult, OmlxSmokeResult
@@ -399,6 +401,301 @@ def test_service_setup_daemon_apply_requires_prompt_when_admin_user_configured(
 
     assert result.exit_code == 1
     assert "requires --allow-sudo-prompt" in result.stderr
+
+
+def test_cluster_prepare_dry_run_prints_unified_plan(tmp_path: Path, monkeypatch) -> None:
+        import thunder_forge.cluster.config as config_module
+
+        repo = tmp_path
+        (repo / "tfconfig.yaml").write_text(
+                dedent("""\
+                        services:
+                            frontend:
+                                admin_user: serpo
+                        models: {}
+                        nodes:
+                            studio:
+                                host: studio.lan
+                                ram_gb: 128
+                                roles: [gateway, cache]
+                                user: shag
+                                admin_user: serpo
+                            msm3:
+                                host: msm3-wifi.lan
+                                ram_gb: 128
+                                roles: [inference]
+                                user: shag
+                                admin_user: admin
+                                runtime:
+                                    type: omlx
+                """)
+        )
+        monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+        result = runner.invoke(app, ["cluster", "prepare"])
+
+        assert result.exit_code == 0
+        assert "Thunder Forge cluster prepare" in result.stdout
+        assert "gateway: studio (studio.lan) -> Olla + TF edge" in result.stdout
+        assert "cache: studio (studio.lan) -> oMLX model hub" in result.stdout
+        assert "inference: msm3 -> oMLX LaunchDaemon" in result.stdout
+        assert "would: ensure Olla v0.0.27" in result.stdout
+        assert "would: bootstrap msm3 ssh=shag@msm3-wifi.lan su=admin" in result.stdout
+
+
+def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, monkeypatch) -> None:
+        import thunder_forge.cli as cli_module
+        import thunder_forge.cluster.config as config_module
+
+        repo = tmp_path
+        (repo / "tfconfig.yaml").write_text(
+                dedent("""\
+                        services:
+                            frontend:
+                                admin_user: serpo
+                        models: {}
+                        nodes:
+                            studio:
+                                host: studio.lan
+                                ram_gb: 128
+                                roles: [gateway, cache]
+                                user: shag
+                                admin_user: serpo
+                            msm3:
+                                host: msm3-wifi.lan
+                                ram_gb: 128
+                                roles: [inference]
+                                user: shag
+                                admin_user: admin
+                                runtime:
+                                    type: omlx
+                """)
+        )
+        calls: list[str] = []
+
+        def fake_ensure_olla_binary(**kwargs):
+                calls.append("olla")
+                kwargs["progress"]("olla: already current at .tmp/olla-bin/olla")
+                return SimpleNamespace(binary_path=repo / ".tmp/olla-bin/olla")
+
+        def fake_write_generated_olla_config(config, *, repo_root, port=None):
+                calls.append("config")
+                return repo_root / "configs/olla-config.yaml"
+
+        def fake_run_gateway_daemon_setup(**kwargs):
+                calls.append("gateway")
+                kwargs["progress"]("health: gateway ok")
+                return GatewayDaemonSetupResult(
+                        user=kwargs["user"],
+                        admin_user=kwargs["admin_user"],
+                        sudoers_path="/etc/sudoers.d/thunder-forge",
+                        script_path=str(repo / ".tmp/run/thunder-forge-gateway-daemon-setup.sh"),
+                        applied=True,
+                        sudoers_verified=True,
+                        service_labels_verified=True,
+                        health_ok=True,
+                )
+
+        def fake_ensure_cache_hub_dir(*, progress):
+                calls.append("cache")
+                progress("cache: oMLX model hub ready at /Users/shag/.omlx/models")
+                return Path("/Users/shag/.omlx/models")
+
+        def fake_run_omlx_daemon_setup(runtime_node, **kwargs):
+                calls.append("inference")
+                kwargs["progress"]("health: oMLX ok (http://msm3-wifi.lan:8018)")
+                return OmlxDaemonSetupResult(
+                        node=runtime_node.host,
+                        label="com.thunder-forge.omlx-8018",
+                        plist_path="/Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist",
+                        staging_plist_path="/Users/shag/.omlx/run/com.thunder-forge.omlx-8018.plist",
+                        sudoers_path="/etc/sudoers.d/thunder-forge",
+                        script_path="/tmp/thunder-forge-setup-com.thunder-forge.omlx-8018.sh",
+                        admin_user=kwargs["admin_user"],
+                        ssh_user=runtime_node.user,
+                        via_su=kwargs["via_su"],
+                        applied=True,
+                        sudoers_verified=True,
+                        service_label_verified=True,
+                        health_ok=True,
+                )
+
+        monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(cli_module, "ensure_olla_binary", fake_ensure_olla_binary)
+        monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+        monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
+        monkeypatch.setattr(cli_module, "ensure_cache_hub_dir", fake_ensure_cache_hub_dir)
+        monkeypatch.setattr(cli_module, "run_omlx_daemon_setup", fake_run_omlx_daemon_setup)
+
+        result = runner.invoke(app, ["cluster", "prepare", "--apply"])
+
+        assert result.exit_code == 0
+        assert calls == ["olla", "config", "gateway", "cache", "inference"]
+        assert "== Gateway: studio (studio.lan) ==" in result.stdout
+        assert "auth: operator=shag admin=serpo reason=install Olla + TF edge LaunchDaemons" in result.stdout
+        assert "== Cache Hub: studio (studio.lan) ==" in result.stdout
+        assert "== Inference: msm3 (msm3-wifi.lan) ==" in result.stdout
+        assert "auth: ssh=shag@msm3-wifi.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
+        assert "status: cluster prepare complete" in result.stdout
+
+
+def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            services:
+              olla:
+                port: 45115
+              edge:
+                port: 45116
+            models: {}
+            nodes:
+              studio:
+                host: studio.lan
+                ram_gb: 128
+                roles: [gateway, cache]
+                user: shag
+              msm3:
+                host: msm3-wifi.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                runtime:
+                  type: omlx
+        """)
+    )
+    calls: list[str] = []
+
+    def fake_write_generated_olla_config(config, *, repo_root, port=None):
+        calls.append("config")
+        return repo_root / "configs/olla-config.yaml"
+
+    def fake_service(**kwargs):
+        calls.append(kwargs.get("service", "service"))
+        return LaunchdServiceResult(
+            service=kwargs.get("service", "service"),
+            label=f"com.thunder-forge.{kwargs.get('service', 'service')}",
+            plist_path="/Library/LaunchDaemons/com.thunder-forge.test.plist",
+            applied=True,
+            service_label_verified=True,
+            health_ok=True,
+        )
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+    monkeypatch.setattr(cli_module, "run_olla_service_restart", lambda **kwargs: fake_service(service="olla", **kwargs))
+    monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
+    monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", lambda *args, **kwargs: fake_service(service="omlx"))
+
+    result = runner.invoke(app, ["cluster", "restart", "--apply"])
+
+    assert result.exit_code == 0
+    assert calls == ["config", "olla", "edge", "omlx"]
+    assert "Thunder Forge cluster restart" in result.stdout
+    assert "status: cluster restart complete" in result.stdout
+
+
+def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                runtime:
+                  type: omlx
+        """)
+    )
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda base_url: OmlxHealthResult(base_url=base_url, health_ok=True, models_ok=True, models=["memory"]),
+    )
+
+    result = runner.invoke(app, ["cluster", "status"])
+
+    assert result.exit_code == 0
+    assert "Thunder Forge cluster status" in result.stdout
+    assert "msm3: health=ok models=ok" in result.stdout
+    assert "served_models: memory" in result.stdout
+
+
+def test_cluster_smoke_runs_runtime_olla_and_edge(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              msm3:
+                host: msm3-wifi.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                runtime:
+                  type: omlx
+        """)
+    )
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda base_url: OmlxHealthResult(base_url=base_url, health_ok=True, models_ok=True),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "smoke_olla_router",
+        lambda **kwargs: OllaSmokeResult(
+            base_url=kwargs["base_url"],
+            model=kwargs["model"],
+            alias=kwargs["alias"],
+            health_ok=True,
+            endpoints_ok=True,
+            models_ok=True,
+            chat_ok=True,
+            alias_ok=True,
+            session_ok=True,
+            root_v1_absent=True,
+        ),
+    )
+    monkeypatch.setattr(cli_module, "edge_api_key_from_env", lambda **kwargs: ("TF_USER_ADMIN", "secret"))
+    monkeypatch.setattr(
+        cli_module,
+        "smoke_edge_contract",
+        lambda **kwargs: EdgeSmokeResult(
+            base_url=kwargs["base_url"],
+            model=kwargs["model"],
+            missing_auth_401=True,
+            invalid_auth_401=True,
+            models_ok=True,
+            chat_ok=True,
+            session_ok=True,
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["cluster", "smoke", "--model", "gpt-oss-20b-MXFP4-Q8", "--alias", "memory", "--client-id", "admin"],
+    )
+
+    assert result.exit_code == 0
+    assert "runtime msm3: health=ok models=ok" in result.stdout
+    assert "olla: health=ok chat=ok alias=ok" in result.stdout
+    assert "edge: auth=ok chat=ok session=ok" in result.stdout
+    assert "status: cluster smoke complete" in result.stdout
 
 
 def test_service_restart_olla_apply_exits_on_early_error(tmp_path: Path, monkeypatch) -> None:
@@ -885,7 +1182,7 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
     parsed = yaml_lib.safe_load(output_path.read_text())
     assert parsed["server"]["port"] == 40115
     assert parsed["model_aliases"] == {"qwen3-1.7b-omlx-msm3-test": ["Qwen3-1.7B-4bit"]}
-    assert f"Generated {output_path}" in result.stdout
+    assert f"generated: {output_path}" in result.stdout
 
 
 def test_generate_olla_config_cli_uses_service_port(tmp_path: Path, monkeypatch) -> None:

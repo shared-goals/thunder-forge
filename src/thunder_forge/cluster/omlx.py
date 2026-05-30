@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import httpx
@@ -14,7 +15,9 @@ from thunder_forge.cluster.services import (
     LaunchdServiceSpec,
     daemon_sudoers_path,
     launch_daemon_path,
+    system_launchd_bootstrap_script,
     system_launchd_commands,
+    system_launchd_stop_wait_script,
     user_launchd_commands,
 )
 from thunder_forge.cluster.services import (
@@ -194,6 +197,7 @@ def check_omlx_health(
     base_url: str,
     *,
     timeout: float = 5.0,
+    include_models: bool = True,
     transport: httpx.BaseTransport | None = None,
 ) -> OmlxHealthResult:
     """Probe an oMLX server directly."""
@@ -208,6 +212,9 @@ def check_omlx_health(
                 result.errors.append(f"GET /health returned {response.status_code}")
         except httpx.HTTPError as exc:
             result.errors.append(f"GET /health failed: {exc}")
+
+        if not include_models:
+            return result
 
         try:
             response = client.get("/v1/models")
@@ -526,12 +533,30 @@ def _process_restart_commands(node: Node) -> tuple[OmlxProcessResult, int | None
     return result, port
 
 
-def _wait_for_omlx_health(base_url: str, *, wait_seconds: int) -> OmlxHealthResult:
+def _wait_for_omlx_health(
+    base_url: str,
+    *,
+    wait_seconds: int,
+    require_models: bool = True,
+    progress: Callable[[str], None] | None = None,
+) -> OmlxHealthResult:
+    def ready(result: OmlxHealthResult) -> bool:
+        return result.health_ok and (result.models_ok if require_models else True)
+
     deadline = time.monotonic() + wait_seconds
-    last_result = check_omlx_health(base_url, timeout=10.0)
-    while not (last_result.health_ok and last_result.models_ok) and time.monotonic() < deadline:
+    attempt = 1
+    health_label = "oMLX" if require_models else "oMLX service"
+    if progress:
+        progress(f"health: waiting for {health_label} at {base_url}")
+    last_result = check_omlx_health(base_url, timeout=10.0, include_models=require_models)
+    while not ready(last_result) and time.monotonic() < deadline:
+        if progress and attempt % 5 == 0:
+            progress(f"health: still waiting for {health_label} at {base_url} ({attempt}s)")
         time.sleep(1)
-        last_result = check_omlx_health(base_url, timeout=10.0)
+        attempt += 1
+        last_result = check_omlx_health(base_url, timeout=10.0, include_models=require_models)
+    if progress and ready(last_result):
+        progress(f"health: {health_label} ok ({base_url})")
     return last_result
 
 
@@ -658,47 +683,18 @@ THUNDER_FORGE_SUDOERS
 run_root /bin/mkdir -p "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs" "$SUDOERS_DIR"
 run_root /usr/sbin/chown -R "$NODE_USER":staff "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs"
 run_root /usr/sbin/visudo -cf "$TMP_SUDOERS"
-# Remove any legacy per-port sudoers files so they don't cause duplicate-alias warnings
-setopt nullglob 2>/dev/null || true
-for legacy in "$SUDOERS_DIR"/thunder-forge-omlx-*; do
-    run_root /bin/rm -f "$legacy"
-done
-unsetopt nullglob 2>/dev/null || true
 
-# Bootout before touching the plist on disk to avoid launchd state conflicts
 NODE_UID="$(/usr/bin/id -u "$NODE_USER")"
-run_root /bin/launchctl bootout "user/$NODE_UID/$LABEL" 2>/dev/null || true
-run_root /bin/launchctl bootout "gui/$NODE_UID/$LABEL" 2>/dev/null || true
-run_root /bin/launchctl bootout "system/$LABEL" 2>/dev/null || true
-run_root /usr/bin/pkill -TERM -f "$PROCESS_PATTERN" 2>/dev/null || true
-# Wait for the process to fully exit before installing new plist; launchd returns
-# EIO (exit 5) from bootstrap if the old process is still alive (SIGTERMed state).
-_wait=0
-while /usr/bin/pgrep -f "$PROCESS_PATTERN" >/dev/null 2>&1; do
-    if [[ $_wait -ge 10 ]]; then
-        echo "process still running after 10s; sending SIGKILL" >&2
-        run_root /usr/bin/pkill -KILL -f "$PROCESS_PATTERN" 2>/dev/null || true
-        break
-    fi
-    sleep 1
-    _wait=$((_wait + 1))
-done
+echo "launchd: stopping $LABEL"
+{system_launchd_stop_wait_script(uid_var="NODE_UID")}
 
+echo "launchd: installing $LABEL"
 run_root /usr/bin/install -o "$NODE_USER" -g staff -m 644 "$TMP_PLIST" "$STAGING_PLIST_PATH"
 run_root /usr/bin/install -o root -g wheel -m 644 "$TMP_PLIST" "$PLIST_PATH"
 run_root /usr/bin/install -o root -g wheel -m 440 "$TMP_SUDOERS" "$SUDOERS_PATH"
 
-# Enable clears any "disabled" override left by prior failed bootstrap attempts
-run_root /bin/launchctl enable "system/$LABEL" 2>/dev/null || true
-if ! run_root /bin/launchctl bootstrap system "$PLIST_PATH" 2>&1; then
-    _bootstrap_exit=$?
-    echo "Bootstrap failed: $_bootstrap_exit" >&2
-    echo "plist: $PLIST_PATH" >&2
-    run_root /bin/launchctl print "system/$LABEL" 2>&1 || true
-    exit $_bootstrap_exit
-fi
-run_root /bin/launchctl kickstart -k "system/$LABEL"
-run_root /bin/launchctl print "system/$LABEL" >/dev/null
+echo "launchd: starting $LABEL"
+{system_launchd_bootstrap_script()}
 
 echo "installed: $PLIST_PATH"
 echo "sudoers: $SUDOERS_PATH"
@@ -706,17 +702,24 @@ echo "label: $LABEL"
 """
 
 
-def _daemon_setup_run_command(script_path: str, *, admin_user: str, via_su: bool, label: str = "", host: str = "") -> str:
+def _daemon_setup_run_command(
+    script_path: str,
+    *,
+    admin_user: str,
+    via_su: bool,
+    label: str = "",
+    host: str = "",
+) -> str:
     quoted_script = shlex.quote(script_path)
     target = f"Thunder Forge oMLX daemon {label}" if label else "Thunder Forge oMLX daemon"
     host_tag = f"[{host}] " if host else ""
-    sudo_prompt = f"[%h] Password for {admin_user or '%p'} — {target}: "
+    sudo_prompt = f"[%h] password: user={admin_user or '%p'} reason=install {target}: "
     if not via_su:
-        notice = f"{host_tag}sudo: {admin_user or 'your'}'s local password needed to set up {target}."
+        notice = f"{host_tag}password prompt: method=sudo user={admin_user or '%p'} reason=install {target}"
         sudo_command = f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} /bin/zsh {quoted_script}"
         return f"chmod 700 {quoted_script} && printf '%s\\n' {shlex.quote(notice)} && {sudo_command}"
-    su_notice = f"{host_tag}su: {admin_user}'s macOS login password needed to bootstrap {target}."
-    sudo_notice = f"{host_tag}sudo: {admin_user}'s password needed to install {target}."
+    su_notice = f"{host_tag}password prompt: method=su user={admin_user} reason=bootstrap {target}"
+    sudo_notice = f"{host_tag}password prompt: method=sudo user={admin_user} reason=install {target}"
     admin_shell = "; ".join(
         [
             f"printf '%s\\n' {shlex.quote(sudo_notice)}",
@@ -762,8 +765,6 @@ def _build_omlx_daemon_setup_result(
         return setup_result
 
     setup_result.script_content = generate_daemon_setup_script(node, sudoers_path=sudoers_path)
-    # --via-su: shag SSHes → su to admin → admin sudos; prompt admin's password
-    # --ssh-admin: shag SSHes → shag sudos directly; prompt shag's password
     prompt_user = resolved_admin_user if via_su else node.user
     run_command = _daemon_setup_run_command(
         resolved_script_path,
@@ -825,8 +826,9 @@ def _apply_omlx_launchd_update(
             health = _wait_for_omlx_health(
                 f"http://{node.host}:{node.runtime.port}",
                 wait_seconds=min(max(timeout, 10), 60),
+                require_models=False,
             )
-            result.health_ok = health.health_ok and health.models_ok
+            result.health_ok = health.health_ok
             if not result.health_ok:
                 result.errors.extend(health.errors)
         except Exception as exc:  # noqa: BLE001
@@ -874,8 +876,9 @@ def _apply_omlx_daemon_update(
             health = _wait_for_omlx_health(
                 f"http://{node.host}:{node.runtime.port}",
                 wait_seconds=min(max(timeout, 10), 60),
+                require_models=False,
             )
-            result.health_ok = health.health_ok and health.models_ok
+            result.health_ok = health.health_ok
             if not result.health_ok:
                 result.errors.extend(health.errors)
         except Exception as exc:  # noqa: BLE001
@@ -917,6 +920,7 @@ def run_omlx_daemon_setup(
     script_path: str | None = None,
     apply: bool = True,
     timeout: int = 300,
+    progress: Callable[[str], None] | None = None,
 ) -> OmlxDaemonSetupResult:
     """Install the sudoers rule and system LaunchDaemon using an admin-side setup script."""
     result = _build_omlx_daemon_setup_result(
@@ -944,7 +948,6 @@ def run_omlx_daemon_setup(
             result.errors.append(f"Failed to copy setup script to {result.ssh_user}@{node.host}: {err}")
         return result
 
-    # prompt_user: --via-su escalates through admin (admin's password), --ssh-admin shag sudos directly
     prompt_user = result.admin_user if result.via_su else node.user
     run_command = _daemon_setup_run_command(
         result.script_path,
@@ -966,6 +969,7 @@ def run_omlx_daemon_setup(
     if run_res.returncode != 0:
         err_output = (run_res.stdout or "") + (run_res.stderr or "")
         if "is not allowed to execute" in err_output or "not in the sudoers file" in err_output:
+            node_label = node.name if hasattr(node, "name") else ""
             escalation = (
                 f"su: {result.admin_user}'s password (--via-su / DAEMON_ADMIN_USER={result.admin_user})"
                 if not result.via_su
@@ -973,7 +977,7 @@ def run_omlx_daemon_setup(
             )
             result.errors.append(
                 f"{node.user} cannot sudo on {node.host}. "
-                f"Try: make daemon-bootstrap {node.name if hasattr(node, 'name') else ''} DAEMON_ADMIN_USER={result.admin_user} "
+                f"Try: make prepare {node_label} DAEMON_ADMIN_USER={result.admin_user} "
                 f"({escalation})"
             )
         elif "su: Sorry" in err_output:
@@ -998,8 +1002,10 @@ def run_omlx_daemon_setup(
             health = _wait_for_omlx_health(
                 f"http://{node.host}:{node.runtime.port}",
                 wait_seconds=min(max(timeout, 10), 60),
+                require_models=False,
+                progress=progress,
             )
-            result.health_ok = health.health_ok and health.models_ok
+            result.health_ok = health.health_ok
             if not result.health_ok:
                 result.errors.extend(health.errors)
         except Exception as exc:  # noqa: BLE001
@@ -1029,8 +1035,9 @@ def run_omlx_process_restart(node: Node, *, apply: bool = True, timeout: int = 6
         health = _wait_for_omlx_health(
             f"http://{node.host}:{port}",
             wait_seconds=min(max(timeout, 10), 60),
+            require_models=False,
         )
-        result.health_ok = health.health_ok and health.models_ok
+        result.health_ok = health.health_ok
         if not result.health_ok:
             result.errors.extend(health.errors)
     except Exception as exc:  # noqa: BLE001

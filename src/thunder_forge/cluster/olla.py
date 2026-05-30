@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -336,9 +336,10 @@ def _wait_olla_healthy(
     retries: int = OLLA_HEALTH_RETRIES,
     interval: float = OLLA_HEALTH_RETRY_INTERVAL,
     timeout: float = 5.0,
+    progress: Callable[[str], None] | None = None,
 ) -> bool:
     """Poll Olla /internal/health until it responds or retries are exhausted."""
-    for _ in range(retries):
+    for attempt in range(1, retries + 1):
         try:
             with httpx.Client(base_url=base_url, timeout=timeout, trust_env=False) as client:
                 response = client.get("/internal/health")
@@ -346,6 +347,8 @@ def _wait_olla_healthy(
                     return True
         except httpx.HTTPError:
             pass
+        if progress and (attempt == 1 or attempt % 5 == 0):
+            progress(f"health: waiting for Olla at {base_url} ({attempt}/{retries})")
         time.sleep(interval)
     return False
 

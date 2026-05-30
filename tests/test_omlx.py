@@ -60,6 +60,28 @@ def test_check_omlx_health_collects_models_and_optional_status() -> None:
     assert result.errors == []
 
 
+def test_check_omlx_health_can_probe_service_only() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(500)
+
+    result = check_omlx_health(
+        "http://msm3-wifi.lan:8018",
+        include_models=False,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.health_ok is True
+    assert result.models_ok is False
+    assert result.status_ok is None
+    assert result.errors == []
+    assert paths == ["/health"]
+
+
 def test_check_omlx_health_parses_model_statuses() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
