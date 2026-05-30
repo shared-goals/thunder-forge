@@ -31,4 +31,4 @@ def test_invalid_port_values_raise_clear_errors() -> None:
 
 def test_local_base_url_uses_validated_port() -> None:
     assert local_base_url(40115) == "http://127.0.0.1:40115"
-    assert local_base_url(40115, host="studio.lan") == "http://studio.lan:40115"
+    assert local_base_url(40115, host="gateway-cache-01.lan") == "http://gateway-cache-01.lan:40115"

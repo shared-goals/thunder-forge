@@ -8,7 +8,7 @@ from thunder_forge.cluster.omlx import build_omlx_serve_command, check_omlx_heal
 
 def test_build_omlx_serve_command_omits_default_model_dir() -> None:
     node = Node(
-        host="msm3-wifi.lan",
+        host="infer-03.lan",
         ram_gb=128,
         user="shag",
         roles=["inference"],
@@ -24,7 +24,7 @@ def test_build_omlx_serve_command_omits_default_model_dir() -> None:
 
 def test_build_omlx_serve_command_includes_memory_caps_when_configured() -> None:
     node = Node(
-        host="msm3-wifi.lan",
+        host="infer-03.lan",
         ram_gb=128,
         user="shag",
         roles=["inference"],
@@ -40,14 +40,13 @@ def test_build_omlx_serve_command_includes_memory_caps_when_configured() -> None
     command = build_omlx_serve_command(node)
 
     assert command == (
-        "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 "
-        "--max-model-memory 90GB --max-process-memory auto"
+        "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 --max-model-memory 90GB --max-process-memory auto"
     )
 
 
 def test_build_omlx_serve_command_includes_explicit_model_dir_only_when_configured() -> None:
     node = Node(
-        host="msm3-wifi.lan",
+        host="infer-03.lan",
         ram_gb=128,
         user="shag",
         roles=["inference"],
@@ -58,8 +57,7 @@ def test_build_omlx_serve_command_includes_explicit_model_dir_only_when_configur
     command = build_omlx_serve_command(node)
 
     assert command == (
-        "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 "
-        "--model-dir /Volumes/cache/omlx-models"
+        "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 --model-dir /Volumes/cache/omlx-models"
     )
 
 
@@ -73,9 +71,9 @@ def test_check_omlx_health_collects_models_and_optional_status() -> None:
             return httpx.Response(200, json={"ready": True})
         return httpx.Response(404)
 
-    result = check_omlx_health("http://msm3-wifi.lan:8018", transport=httpx.MockTransport(handler))
+    result = check_omlx_health("http://infer-03.lan:8018", transport=httpx.MockTransport(handler))
 
-    assert result.base_url == "http://msm3-wifi.lan:8018"
+    assert result.base_url == "http://infer-03.lan:8018"
     assert result.health_ok is True
     assert result.models_ok is True
     assert result.status_ok is True
@@ -93,7 +91,7 @@ def test_check_omlx_health_can_probe_service_only() -> None:
         return httpx.Response(500)
 
     result = check_omlx_health(
-        "http://msm3-wifi.lan:8018",
+        "http://infer-03.lan:8018",
         include_models=False,
         transport=httpx.MockTransport(handler),
     )
@@ -127,7 +125,7 @@ def test_check_omlx_health_parses_model_statuses() -> None:
             )
         return httpx.Response(404)
 
-    result = check_omlx_health("http://msm3-wifi.lan:8018", transport=httpx.MockTransport(handler))
+    result = check_omlx_health("http://infer-03.lan:8018", transport=httpx.MockTransport(handler))
 
     assert result.status_ok is True
     assert result.model_statuses["Qwen3-1.7B-4bit"]["loaded"] is True
@@ -144,7 +142,7 @@ def test_check_omlx_health_keeps_health_when_optional_status_fails() -> None:
             return httpx.Response(404)
         return httpx.Response(404)
 
-    result = check_omlx_health("http://msm3-wifi.lan:8018/", transport=httpx.MockTransport(handler))
+    result = check_omlx_health("http://infer-03.lan:8018/", transport=httpx.MockTransport(handler))
 
     assert result.health_ok is True
     assert result.models_ok is True
@@ -160,7 +158,7 @@ def test_check_omlx_health_reports_failed_required_probe() -> None:
             raise httpx.ConnectError("connection refused", request=request)
         return httpx.Response(404)
 
-    result = check_omlx_health("http://msm3-wifi.lan:8018", transport=httpx.MockTransport(handler))
+    result = check_omlx_health("http://infer-03.lan:8018", transport=httpx.MockTransport(handler))
 
     assert result.health_ok is False
     assert result.models_ok is False
@@ -189,7 +187,7 @@ def test_smoke_omlx_chat_skips_chat_when_model_is_still_loading() -> None:
         return httpx.Response(404)
 
     result = smoke_omlx_chat(
-        "http://msm3-wifi.lan:8018",
+        "http://infer-03.lan:8018",
         model="Qwen3-1.7B-4bit",
         transport=httpx.MockTransport(handler),
     )

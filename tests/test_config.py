@@ -32,8 +32,8 @@ def cluster_yaml(tmp_path: Path) -> Path:
 
         nodes:
           rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", roles: [gateway] }
-          msm1:
-            host: "msm1-wifi.lan"
+          infer-01:
+            host: "infer-01.lan"
             ram_gb: 128
             user: "admin"
             roles: [inference]
@@ -52,11 +52,11 @@ def test_load_cluster_config(cluster_yaml: Path) -> None:
     assert config.models["coder"].source.type == "huggingface"
     assert config.models["coder"].runtime_model_id == "Qwen3-Coder-Next-4bit"
     assert config.models["coder"].disk_gb == 44.8
-    assert "msm1" in config.nodes
-    assert config.nodes["msm1"].host == "msm1-wifi.lan"
-    assert config.nodes["msm1"].role == "inference"
-    assert config.nodes["msm1"].admin_user == "admin"
-    assert config.nodes["msm1"].models == ["coder"]
+    assert "infer-01" in config.nodes
+    assert config.nodes["infer-01"].host == "infer-01.lan"
+    assert config.nodes["infer-01"].role == "inference"
+    assert config.nodes["infer-01"].admin_user == "admin"
+    assert config.nodes["infer-01"].models == ["coder"]
     assert "rock" in config.nodes
     assert config.nodes["rock"].role == "gateway"
 
@@ -74,20 +74,20 @@ def test_parse_config_admin_users() -> None:
             },
             "models": {},
             "nodes": {
-                "studio": {
-                    "host": "studio.lan",
+                "gateway-cache-01": {
+                    "host": "gateway-cache-01.lan",
                     "ram_gb": 128,
                     "user": "shag",
                     "admin_user": "serpo",
                     "roles": ["gateway", "cache"],
                 },
-                "msm3": {
-                    "host": "msm3-wifi.lan",
+                "infer-03": {
+                    "host": "infer-03.lan",
                     "ram_gb": 128,
                     "user": "shag",
                     "admin_user": "admin",
                     "roles": ["inference"],
-                }
+                },
             },
         }
     )
@@ -101,10 +101,10 @@ def test_parse_config_admin_users() -> None:
     assert config.operations.sync.transport == "management"
     assert config.operations.sync.timeout == 123
     assert config.operations.sync.restart_runtime is False
-    assert config.nodes["studio"].roles == ["gateway", "cache"]
-    assert config.nodes["studio"].admin_user == "serpo"
-    assert config.nodes["msm3"].user == "shag"
-    assert config.nodes["msm3"].admin_user == "admin"
+    assert config.nodes["gateway-cache-01"].roles == ["gateway", "cache"]
+    assert config.nodes["gateway-cache-01"].admin_user == "serpo"
+    assert config.nodes["infer-03"].user == "shag"
+    assert config.nodes["infer-03"].admin_user == "admin"
 
 
 def test_parse_config_rejects_role_field() -> None:
@@ -113,8 +113,8 @@ def test_parse_config_rejects_role_field() -> None:
             {
                 "models": {},
                 "nodes": {
-                    "studio": {
-                        "host": "studio.lan",
+                    "gateway-cache-01": {
+                        "host": "gateway-cache-01.lan",
                         "ram_gb": 128,
                         "role": "gateway",
                     }
@@ -139,12 +139,12 @@ def test_load_cluster_config_user_defaults(tmp_path: Path, monkeypatch: pytest.M
             disk_gb: 10
         nodes:
           rock: { host: "rock.lan", ram_gb: 32, roles: [gateway] }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, roles: [inference] }
+          infer-01: { host: "infer-01.lan", ram_gb: 128, roles: [inference] }
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
     config = load_cluster_config(path)
-    assert config.nodes["msm1"].user == "testuser"
+    assert config.nodes["infer-01"].user == "testuser"
     assert config.nodes["rock"].user == "testuser"
 
 
@@ -157,7 +157,7 @@ def test_load_cluster_config_rejects_legacy_roles(tmp_path: Path) -> None:
             disk_gb: 10
         nodes:
           rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", roles: [infra] }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", roles: [node] }
+          infer-01: { host: "infer-01.lan", ram_gb: 128, user: "admin", roles: [node] }
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
@@ -180,8 +180,8 @@ def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) 
     content = dedent("""\
         models: {}
         nodes:
-          msm3:
-            host: msm3-wifi.lan
+          infer-03:
+            host: infer-03.lan
             fabric_host: true
             ram_gb: 128
             user: shag
@@ -195,9 +195,9 @@ def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) 
     path.write_text(content)
 
     config = load_cluster_config(path)
-    node = config.nodes["msm3"]
+    node = config.nodes["infer-03"]
 
-    assert node.host == "msm3-wifi.lan"
+    assert node.host == "infer-03.lan"
     assert node.fabric_host is True
     assert node.home_dir == "/srv/shag"
     assert node.runtime is not None
@@ -211,8 +211,8 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
     content = dedent("""\
         models: {}
         nodes:
-          msm3:
-            host: msm3-wifi.lan
+          infer-03:
+            host: infer-03.lan
             ram_gb: 128
             user: shag
             roles: [node]
@@ -237,7 +237,7 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
     path.write_text(content)
 
     config = load_cluster_config(path)
-    runtime = config.nodes["msm3"].runtime
+    runtime = config.nodes["infer-03"].runtime
 
     assert runtime is not None
     assert runtime.bind_host == "127.0.0.1"
@@ -272,9 +272,9 @@ def test_parse_node_rejects_string_fabric_host(tmp_path: Path) -> None:
     content = dedent("""\
         models: {}
         nodes:
-          msm3:
-            host: msm3-wifi.lan
-            fabric_host: msm3-fabric
+          infer-03:
+            host: infer-03.lan
+            fabric_host: infer-03-fabric
             ram_gb: 128
             user: shag
             roles: [inference]
@@ -294,29 +294,29 @@ def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.M
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, roles: [inference] }
+          infer-01: { host: "infer-01.lan", ram_gb: 128, roles: [inference] }
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
     monkeypatch.setenv("GATEWAY_SSH_USER", "deploy_bot")
     config = load_cluster_config(path)
-    assert config.nodes["msm1"].user == "deploy_bot"
+    assert config.nodes["infer-01"].user == "deploy_bot"
 
 
 def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path: Path) -> None:
     content = dedent("""\
         models:
-          qwen3-1.7b-omlx-msm3-test:
+          qwen3-1.7b-omlx-infer-03-test:
             source: { repo: mlx-community/Qwen3-1.7B-4bit }
             runtime_model_id: Qwen3-1.7B-4bit
         nodes:
-          studio:
-            host: studio.lan
+          gateway-cache-01:
+            host: gateway-cache-01.lan
             ram_gb: 64
             user: shag
             roles: [gateway]
-          msm3:
-            host: msm3-wifi.lan
+          infer-03:
+            host: infer-03.lan
             ram_gb: 128
             user: shag
             roles: [inference]
@@ -324,7 +324,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
               type: omlx
               port: 8018
             models:
-              - qwen3-1.7b-omlx-msm3-test
+              - qwen3-1.7b-omlx-infer-03-test
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
@@ -341,8 +341,8 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
     endpoints = parsed["discovery"]["static"]["endpoints"]
     assert endpoints == [
         {
-            "url": "http://msm3-wifi.lan:8018",
-            "name": "msm3-omlx-live",
+            "url": "http://infer-03.lan:8018",
+            "name": "infer-03-omlx-live",
             "type": "openai-compatible",
             "priority": 100,
             "model_url": "/v1/models",
@@ -352,8 +352,9 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
         }
     ]
     assert parsed["model_aliases"] == {
-        "qwen3-1.7b-omlx-msm3-test": ["Qwen3-1.7B-4bit"],
+        "qwen3-1.7b-omlx-infer-03-test": ["Qwen3-1.7B-4bit"],
     }
+
 
 def test_generate_olla_config_uses_service_port_and_ignores_env(monkeypatch) -> None:
     monkeypatch.setenv("TF_OLLA_PORT", "45115")
@@ -367,8 +368,8 @@ def test_generate_olla_config_uses_service_port_and_ignores_env(monkeypatch) -> 
                 }
             },
             "nodes": {
-                "msm3": {
-                    "host": "msm3-wifi.lan",
+                "infer-03": {
+                    "host": "infer-03.lan",
                     "ram_gb": 128,
                     "roles": ["inference"],
                     "runtime": {"type": "omlx", "port": 8018},
@@ -389,8 +390,8 @@ def test_runtime_port_defaults_to_shared_omlx_service_port() -> None:
             "services": {"omlx": {"port": 8818}},
             "models": {},
             "nodes": {
-                "msm3": {
-                    "host": "msm3-wifi.lan",
+                "infer-03": {
+                    "host": "infer-03.lan",
                     "ram_gb": 128,
                     "roles": ["inference"],
                     "runtime": {"type": "omlx"},
@@ -399,8 +400,8 @@ def test_runtime_port_defaults_to_shared_omlx_service_port() -> None:
         },
     )
 
-    assert config.nodes["msm3"].runtime is not None
-    assert config.nodes["msm3"].runtime.port == 8818
+    assert config.nodes["infer-03"].runtime is not None
+    assert config.nodes["infer-03"].runtime.port == 8818
 
 
 def test_edge_defaults_and_overrides() -> None:
@@ -423,8 +424,8 @@ def test_generate_olla_config_rejects_unknown_node_model(tmp_path: Path) -> None
     content = dedent("""\
         models: {}
         nodes:
-          msm3:
-            host: msm3-wifi.lan
+          infer-03:
+            host: infer-03.lan
             ram_gb: 128
             user: shag
             roles: [inference]
@@ -456,8 +457,8 @@ def test_lint_cluster_config_reports_unknown_models_and_exposure_warnings(tmp_pa
             benchmark_only: true
             runtime_model_id: gpt-oss-20b-mxfp4-bf16
         nodes:
-          msm3:
-            host: msm3-wifi.lan
+          infer-03:
+            host: infer-03.lan
             ram_gb: 128
             user: shag
             roles: [node]
@@ -475,16 +476,16 @@ def test_lint_cluster_config_reports_unknown_models_and_exposure_warnings(tmp_pa
 
     issues = lint_cluster_config(config)
 
-    assert ("error", "nodes.msm3.models", "unknown model 'missing'") in [
+    assert ("error", "nodes.infer-03.models", "unknown model 'missing'") in [
         (issue.severity, issue.path, issue.message) for issue in issues
     ]
-    assert ("warning", "nodes.msm3.models", "benchmark-only model 'memory-bf16' is assigned to node") in [
+    assert ("warning", "nodes.infer-03.models", "benchmark-only model 'memory-bf16' is assigned to node") in [
         (issue.severity, issue.path, issue.message) for issue in issues
     ]
     assert ("warning", "models.memory-copy.runtime_model_id", "runtime model id also used by 'memory'") in [
         (issue.severity, issue.path, issue.message) for issue in issues
     ]
-    assert ("warning", "nodes.msm3.runtime", "oMLX runtime binds 0.0.0.0 without trusted_network: true") in [
+    assert ("warning", "nodes.infer-03.runtime", "oMLX runtime binds 0.0.0.0 without trusted_network: true") in [
         (issue.severity, issue.path, issue.message) for issue in issues
     ]
 

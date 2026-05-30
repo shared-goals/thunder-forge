@@ -7,15 +7,16 @@ import httpx
 from thunder_forge.cluster.edge import (
     EdgeAccessLog,
     EdgeClient,
+    EdgeModelCatalogEntry,
     EdgeProxyConfig,
     authenticate_edge_request,
     build_edge_access_log,
     build_edge_clients_from_env,
     edge_api_key_from_env,
+    edge_models_payload,
     ensure_edge_api_keys,
     ensure_olla_session_id,
     load_edge_clients_from_env,
-    parse_edge_users_json,
     proxy_edge_request,
     rewrite_openai_path,
     summarize_edge_usage,
@@ -63,13 +64,6 @@ def test_edge_users_and_multi_client_loader() -> None:
     assert "" not in clients
 
 
-def test_edge_users_json_parses_json_blob() -> None:
-    assert parse_edge_users_json('{"client-a":"secret-a","client-b":"secret-b","empty":""}') == {
-        "client-a": "secret-a",
-        "client-b": "secret-b",
-    }
-
-
 def test_build_edge_clients_reads_only_user_prefixed_keys() -> None:
     clients = build_edge_clients_from_env(
         env={"TF_USER_CLIENT_A": "secret-a", "OTHER_KEY": "ignored-secret"},
@@ -93,7 +87,6 @@ def test_ensure_edge_api_keys_creates_missing_keys_without_overwriting_existing(
     assert "HF_TOKEN=keep-me" in content
     assert "TF_USER_CLIENT_A=existing-a" in content
     assert "TF_USER_CLIENT_B=" in content
-    assert "TF_USERS" not in content
     assert "existing-a" not in repr(result)
 
 
@@ -109,6 +102,37 @@ def test_rewrite_openai_path_rejects_non_openai_paths() -> None:
         assert "only /v1/* paths" in str(exc)
     else:
         raise AssertionError("expected non-/v1 path to be rejected")
+
+
+def test_edge_models_payload_uses_tf_aliases_with_base_id_descriptions() -> None:
+    payload = edge_models_payload(
+        [
+            EdgeModelCatalogEntry(
+                id="coder",
+                name="coder",
+                description="mlx-community/Qwen3-Coder-Next-4bit; runtime: Qwen3-Coder-Next-4bit",
+                runtime_model_id="Qwen3-Coder-Next-4bit",
+                source_repo="mlx-community/Qwen3-Coder-Next-4bit",
+                context_length=262144,
+            ),
+            EdgeModelCatalogEntry(
+                id="agent-better",
+                name="agent-better",
+                description="mlx-community/Qwen3.6-35B-A3B-mxfp8; runtime: Qwen3.6-35B-A3B-mxfp8",
+                runtime_model_id="Qwen3.6-35B-A3B-mxfp8",
+                source_repo="mlx-community/Qwen3.6-35B-A3B-mxfp8",
+            ),
+        ]
+    )
+
+    assert payload["object"] == "list"
+    data = payload["data"]
+    assert isinstance(data, list)
+    assert [item["id"] for item in data] == ["agent-better", "coder"]
+    assert data[0]["name"] == "agent-better"
+    assert "mlx-community/Qwen3.6-35B-A3B-mxfp8" in str(data[0]["description"])
+    assert data[0]["tf_runtime_model_id"] == "Qwen3.6-35B-A3B-mxfp8"
+    assert data[1]["context_length"] == 262144
 
 
 def test_session_id_is_preserved_or_generated_without_using_api_key() -> None:
@@ -127,10 +151,10 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
         request_id="req-1",
         client_id="client-a",
         path="/v1/chat/completions",
-        model="qwen3-1.7b-omlx-msm3-test",
+        model="qwen3-1.7b-omlx-infer-03-test",
         status_code=200,
         latency_ms=42,
-        olla_endpoint="msm3-omlx-live",
+        olla_endpoint="infer-03-omlx-live",
         api_key="dev-secret",
     )
 
@@ -140,10 +164,10 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     assert isinstance(payload["timestamp"], str)
     assert payload["request_id"] == "req-1"
     assert payload["client_id"] == "client-a"
-    assert payload["model"] == "qwen3-1.7b-omlx-msm3-test"
+    assert payload["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert payload["status_code"] == 200
     assert payload["latency_ms"] == 42
-    assert payload["olla_endpoint"] == "msm3-omlx-live"
+    assert payload["olla_endpoint"] == "infer-03-omlx-live"
     assert "api_key" not in payload
     assert "dev-secret" not in str(payload)
 
@@ -184,6 +208,51 @@ def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_oll
     assert invalid.body == b'{"error":"unauthorized"}'
 
 
+def test_proxy_edge_request_serves_tf_alias_model_catalog_without_calling_olla() -> None:
+    requests: list[httpx.Request] = []
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, json={"unexpected": True})
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+        model_catalog=[
+            EdgeModelCatalogEntry(
+                id="coder",
+                name="coder",
+                description="mlx-community/Qwen3-Coder-Next-4bit",
+                runtime_model_id="Qwen3-Coder-Next-4bit",
+                source_repo="mlx-community/Qwen3-Coder-Next-4bit",
+            )
+        ],
+    )
+
+    result = proxy_edge_request(
+        method="GET",
+        path="/v1/models",
+        headers={"Authorization": "Bearer dev-secret"},
+        body=b"",
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 200
+    assert requests == []
+    payload = json.loads(result.body)
+    assert [item["id"] for item in payload["data"]] == ["coder"]
+    assert payload["data"][0]["description"] == "mlx-community/Qwen3-Coder-Next-4bit"
+    assert len(logs) == 1
+    logged = json.loads(logs[0])
+    assert logged["client_id"] == "client-a"
+    assert logged["path"] == "/v1/models"
+    assert logged["model"] == ""
+    assert logged["status_code"] == 200
+
+
 def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() -> None:
     forwarded: list[httpx.Request] = []
     logs: list[str] = []
@@ -192,7 +261,7 @@ def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() ->
         forwarded.append(request)
         return httpx.Response(
             200,
-            headers={"Content-Type": "text/event-stream", "X-Olla-Endpoint": "msm3-omlx-live"},
+            headers={"Content-Type": "text/event-stream", "X-Olla-Endpoint": "infer-03-omlx-live"},
             content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
         )
 
@@ -208,7 +277,7 @@ def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() ->
         headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
         body=json.dumps(
             {
-                "model": "qwen3-1.7b-omlx-msm3-test",
+                "model": "qwen3-1.7b-omlx-infer-03-test",
                 "messages": [{"role": "user", "content": "do not log me"}],
                 "stream": True,
             }
@@ -219,7 +288,7 @@ def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() ->
 
     assert result.status_code == 200
     assert result.headers["Content-Type"] == "text/event-stream"
-    assert result.headers["X-Olla-Endpoint"] == "msm3-omlx-live"
+    assert result.headers["X-Olla-Endpoint"] == "infer-03-omlx-live"
     assert b"data:" in result.body
     assert len(forwarded) == 1
     assert forwarded[0].url == "http://olla.local:40115/olla/openai-compatible/v1/chat/completions"
@@ -229,7 +298,7 @@ def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() ->
     assert len(logs) == 1
     logged = json.loads(logs[0])
     assert logged["client_id"] == "client-a"
-    assert logged["model"] == "qwen3-1.7b-omlx-msm3-test"
+    assert logged["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert logged["status_code"] == 200
 
 
@@ -241,7 +310,7 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
         forwarded.append(request)
         return httpx.Response(
             200,
-            headers={"X-Olla-Endpoint": "msm3-omlx-live"},
+            headers={"X-Olla-Endpoint": "infer-03-omlx-live"},
             json={"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]},
         )
 
@@ -255,14 +324,14 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
         method="POST",
         path="/v1/chat/completions",
         headers={"Authorization": "Bearer dev-secret", "X-Olla-Session-ID": "session-123"},
-        body=json.dumps({"model": "qwen3-1.7b-omlx-msm3-test", "messages": []}).encode(),
+        body=json.dumps({"model": "qwen3-1.7b-omlx-infer-03-test", "messages": []}).encode(),
         config=config,
         transport=httpx.MockTransport(handler),
     )
 
     assert result.status_code == 200
     assert result.body == b'{"id":"chatcmpl-1","choices":[{"message":{"content":"pong"}}]}'
-    assert result.headers["X-Olla-Endpoint"] == "msm3-omlx-live"
+    assert result.headers["X-Olla-Endpoint"] == "infer-03-omlx-live"
     assert len(forwarded) == 1
     assert forwarded[0].method == "POST"
     assert forwarded[0].url == "http://olla.local:40115/olla/openai-compatible/v1/chat/completions"
@@ -272,9 +341,9 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     logged = json.loads(logs[0])
     assert logged["client_id"] == "client-a"
     assert logged["path"] == "/v1/chat/completions"
-    assert logged["model"] == "qwen3-1.7b-omlx-msm3-test"
+    assert logged["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert logged["status_code"] == 200
-    assert logged["olla_endpoint"] == "msm3-omlx-live"
+    assert logged["olla_endpoint"] == "infer-03-omlx-live"
     assert "dev-secret" not in logs[0]
 
 
@@ -290,7 +359,7 @@ def test_summarize_edge_usage_groups_requests_by_client(tmp_path) -> None:
                         "model": "memory",
                         "status_code": 200,
                         "latency_ms": 10,
-                        "olla_endpoint": "msm3-omlx-live",
+                        "olla_endpoint": "infer-03-omlx-live",
                     }
                 ),
                 json.dumps(
@@ -328,6 +397,6 @@ def test_summarize_edge_usage_groups_requests_by_client(tmp_path) -> None:
     assert client_a.requests == 2
     assert client_a.failures == 1
     assert client_a.models == {"memory": 1, "agent": 1}
-    assert client_a.endpoints == {"msm3-omlx-live": 1}
+    assert client_a.endpoints == {"infer-03-omlx-live": 1}
     assert client_a.latency_ms_p50 == 10
     assert client_a.latency_ms_p95 == 30

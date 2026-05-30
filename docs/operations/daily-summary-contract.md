@@ -24,7 +24,7 @@ This document defines the minimal JSON contract for daily utilization and audit 
       "hermes-cron": 53
     },
     "by_model": {
-      "qwen3-1.7b-omlx-msm3-test": 142
+      "qwen3-1.7b-omlx-infer-03-test": 142
     },
     "by_status": {
       "200": 138,
@@ -46,8 +46,8 @@ This document defines the minimal JSON contract for daily utilization and audit 
 
   "nodes": [
     {
-      "name": "msm3",
-      "host": "msm3-wifi.lan",
+      "name": "infer-03",
+      "host": "infer-03.lan",
       "port": 8018,
       "health_ok": true,
       "models_served": ["Qwen3-1.7B-4bit"],
@@ -75,7 +75,7 @@ This document defines the minimal JSON contract for daily utilization and audit 
       "timestamp": "2026-05-26T14:23:18Z",
       "client_id": "shag-dev",
       "path": "/v1/chat/completions",
-      "model": "qwen3-1.7b-omlx-msm3-test",
+      "model": "qwen3-1.7b-omlx-infer-03-test",
       "status_code": 502,
       "error": "upstream_failed: ConnectError: [Errno 61] Connection refused",
       "olla_endpoint": ""
@@ -83,7 +83,7 @@ This document defines the minimal JSON contract for daily utilization and audit 
   ],
 
   "model_freshness": {
-    "qwen3-1.7b-omlx-msm3-test": {
+    "qwen3-1.7b-omlx-infer-03-test": {
       "model_dir": "/Users/shag/.omlx/models/Qwen3-1.7B-4bit",
       "last_modified": "2026-05-20T10:15:00Z",
       "age_days": 6,

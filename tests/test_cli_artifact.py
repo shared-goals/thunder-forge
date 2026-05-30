@@ -6,7 +6,7 @@ from textwrap import dedent
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
-from thunder_forge.cluster.artifacts import STUDIO_OMLX_MODELS_DIR_ENV, ArtifactPresence
+from thunder_forge.cluster.artifacts import CACHE_OMLX_MODELS_DIR_ENV, ArtifactPresence
 from thunder_forge.cluster.services import LaunchdServiceResult
 
 runner = CliRunner()
@@ -20,8 +20,8 @@ def _write_runtime_config(repo: Path, *, fabric_host: bool = True) -> None:
         dedent(f"""\
             models: {{}}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-01:
+                host: infer-01.lan
 {fabric_line}                ram_gb: 128
                 user: shag
                 roles: [inference]
@@ -46,8 +46,8 @@ def _write_runtime_config_with_models(repo: Path, *, fabric_host: bool = False) 
         source:
             repo: mlx-community/Qwen3-Coder-Next-4bit
 nodes:
-    msm3:
-        host: msm3-wifi.lan
+    infer-01:
+        host: infer-01.lan
 {fabric_line}        ram_gb: 128
         user: shag
         roles: [inference]
@@ -59,7 +59,7 @@ nodes:
             - memory
             - coder
 """
-            )
+    )
 
 
 def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> None:
@@ -73,8 +73,8 @@ def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -87,19 +87,19 @@ def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> N
             "--model",
             "mlx-community/gpt-oss-20b-MXFP4-Q8",
             "--node",
-            "msm3",
+            "infer-01",
         ],
     )
 
     assert result.exit_code == 0
     assert "model: mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
-    assert "node: msm3" in result.stdout
-    assert "management_host: msm3-wifi.lan" in result.stdout
+    assert "node: infer-01" in result.stdout
+    assert "management_host: infer-01.lan" in result.stdout
     assert "model_dir_name: mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
     assert "runtime_model_id: gpt-oss-20b-MXFP4-Q8" in result.stdout
-    assert "studio_omlx_model_dir_path: ~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
+    assert "cache_omlx_model_dir_path: ~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
     assert "node_omlx_model_dir_path: /Users/shag/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
-    assert "studio_omlx_model_dir: ready" in result.stdout
+    assert "cache_omlx_model_dir: ready" in result.stdout
     assert "node_omlx_model_dir: missing_or_incomplete" in result.stdout
     assert "ready: no" in result.stdout
     assert "next_actions:" in result.stdout
@@ -131,7 +131,7 @@ def test_artifact_download_dry_run_prints_direct_omlx_download_plan(tmp_path: Pa
     assert "model_dir_name: mlx-community/Qwen3-1.7B-4bit" in result.stdout
     assert "runtime_model_id: Qwen3-1.7B-4bit" in result.stdout
     assert "destination: ~/.omlx/models/mlx-community/Qwen3-1.7B-4bit" in result.stdout
-    assert "action: download_to_studio_omlx" in result.stdout
+    assert "action: download_to_cache_omlx" in result.stdout
     assert "mode: dry-run" in result.stdout
     assert "omlx serve" in result.stdout
     assert "/admin/api/hf/download" in result.stdout
@@ -139,15 +139,15 @@ def test_artifact_download_dry_run_prints_direct_omlx_download_plan(tmp_path: Pa
     assert ".cache/huggingface" not in result.stdout
 
 
-def test_artifact_download_dry_run_uses_studio_omlx_dir_env(tmp_path: Path, monkeypatch) -> None:
+def test_artifact_download_dry_run_uses_cache_omlx_dir_env(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo)
-    studio_omlx_models_dir = str(tmp_path / "studio" / ".omlx" / "models")
+    cache_omlx_models_dir = str(tmp_path / "cache" / ".omlx" / "models")
 
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setenv(STUDIO_OMLX_MODELS_DIR_ENV, studio_omlx_models_dir)
+    monkeypatch.setenv(CACHE_OMLX_MODELS_DIR_ENV, cache_omlx_models_dir)
 
     result = runner.invoke(
         app,
@@ -161,11 +161,11 @@ def test_artifact_download_dry_run_uses_studio_omlx_dir_env(tmp_path: Path, monk
     )
 
     assert result.exit_code == 0
-    assert f"destination: {studio_omlx_models_dir}/mlx-community/Qwen3-1.7B-4bit" in result.stdout
-    assert f"--model-dir {studio_omlx_models_dir}" in result.stdout
+    assert f"destination: {cache_omlx_models_dir}/mlx-community/Qwen3-1.7B-4bit" in result.stdout
+    assert f"--model-dir {cache_omlx_models_dir}" in result.stdout
 
 
-def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkeypatch) -> None:
+def test_artifact_sync_dry_run_prints_cache_to_node_plan(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo, fabric_host=False)
 
@@ -176,8 +176,8 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -190,22 +190,22 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--dry-run",
         ],
     )
 
     assert result.exit_code == 0
     assert "mode: dry-run" in result.stdout
-    assert "source: studio" in result.stdout
-    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "source: cache" in result.stdout
+    assert "transport_host: infer-01.lan" in result.stdout
     assert "fabric_fallback" not in result.stdout
     assert "model_dir_name: BAAI/bge-small-en-v1.5" in result.stdout
     assert "runtime_model_id: bge-small-en-v1.5" in result.stdout
     assert "action: sync_to_node_omlx" in result.stdout
     assert "rsync" in result.stdout
     assert "/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
+    assert "shag@infer-01.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
     assert ".cache/huggingface" not in result.stdout
 
 
@@ -220,8 +220,8 @@ def test_artifact_sync_without_model_syncs_all_node_models(tmp_path: Path, monke
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -232,7 +232,7 @@ def test_artifact_sync_without_model_syncs_all_node_models(tmp_path: Path, monke
             "artifact",
             "sync",
             "--node",
-            "msm3",
+            "infer-01",
             "--dry-run",
         ],
     )
@@ -246,21 +246,21 @@ def test_artifact_sync_without_model_syncs_all_node_models(tmp_path: Path, monke
     assert "status: node sync dry-run complete" in result.stdout
 
 
-def test_artifact_sync_dry_run_uses_studio_omlx_dir_env(tmp_path: Path, monkeypatch) -> None:
+def test_artifact_sync_dry_run_uses_cache_omlx_dir_env(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo, fabric_host=False)
-    studio_omlx_models_dir = str(tmp_path / "studio" / ".omlx" / "models")
+    cache_omlx_models_dir = str(tmp_path / "cache" / ".omlx" / "models")
 
     import thunder_forge.cli as cli_module
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setenv(STUDIO_OMLX_MODELS_DIR_ENV, studio_omlx_models_dir)
+    monkeypatch.setenv(CACHE_OMLX_MODELS_DIR_ENV, cache_omlx_models_dir)
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -273,13 +273,13 @@ def test_artifact_sync_dry_run_uses_studio_omlx_dir_env(tmp_path: Path, monkeypa
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--dry-run",
         ],
     )
 
     assert result.exit_code == 0
-    assert f"source_path: {studio_omlx_models_dir}/BAAI/bge-small-en-v1.5/" in result.stdout
+    assert f"source_path: {cache_omlx_models_dir}/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Path, monkeypatch) -> None:
@@ -294,8 +294,8 @@ def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Pat
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -313,7 +313,7 @@ def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Pat
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--dry-run",
         ],
     )
@@ -321,7 +321,7 @@ def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Pat
     assert result.exit_code == 0
     assert "transport_host: 169.254.251.195" in result.stdout
     assert "resolved_transport_host" not in result.stdout
-    assert "HostKeyAlias=msm3-wifi.lan" in result.stdout
+    assert "HostKeyAlias=infer-01.lan" in result.stdout
     assert "shag@169.254.251.195:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
@@ -340,8 +340,8 @@ def test_artifact_sync_falls_back_to_management_host_when_fabric_is_unresolved(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -359,15 +359,15 @@ def test_artifact_sync_falls_back_to_management_host_when_fabric_is_unresolved(
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--dry-run",
         ],
     )
 
     assert result.exit_code == 0
-    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "transport_host: infer-01.lan" in result.stdout
     assert "fabric_fallback: dynamic probe unresolved" in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
+    assert "shag@infer-01.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(tmp_path: Path, monkeypatch) -> None:
@@ -381,8 +381,8 @@ def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -395,16 +395,16 @@ def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--management",
             "--dry-run",
         ],
     )
 
     assert result.exit_code == 0
-    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "transport_host: infer-01.lan" in result.stdout
     assert "resolved_transport_host" not in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
+    assert "shag@infer-01.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_without_fabric_host_uses_management_even_when_probe_would_work(
@@ -422,8 +422,8 @@ def test_artifact_sync_without_fabric_host_uses_management_even_when_probe_would
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -441,15 +441,15 @@ def test_artifact_sync_without_fabric_host_uses_management_even_when_probe_would
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--dry-run",
         ],
     )
 
     assert result.exit_code == 0
-    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "transport_host: infer-01.lan" in result.stdout
     assert "resolved_transport_host" not in result.stdout
-    assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
+    assert "shag@infer-01.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
 
 
 def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None:
@@ -466,8 +466,8 @@ def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -486,7 +486,7 @@ def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--apply",
             "--timeout",
             "123",
@@ -515,8 +515,8 @@ def test_artifact_sync_apply_without_model_invokes_runner_for_each_node_model(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -533,7 +533,7 @@ def test_artifact_sync_apply_without_model_invokes_runner_for_each_node_model(
             "artifact",
             "sync",
             "--node",
-            "msm3",
+            "infer-01",
             "--apply",
             "--timeout",
             "123",
@@ -556,8 +556,8 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
     config_body = config_path.read_text().replace(
         "nodes:\n",
         """nodes:
-    studio:
-        host: studio.lan
+    gateway-cache-01:
+        host: gateway-cache-01.lan
         ram_gb: 64
         user: shag
         roles: [gateway, cache]
@@ -585,8 +585,8 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -609,16 +609,16 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
     monkeypatch.setattr(cli_module, "run_artifact_sync", fake_run_artifact_sync)
     monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_run_omlx_daemon_restart)
 
-    result = runner.invoke(app, ["cluster", "sync", "msm3", "--apply"])
+    result = runner.invoke(app, ["cluster", "sync", "infer-01", "--apply"])
 
     assert result.exit_code == 0
     assert calls == [
         ("mlx-community/gpt-oss-20b-MXFP4-Q8", 123),
         ("mlx-community/Qwen3-Coder-Next-4bit", 123),
     ]
-    assert restarts == [("msm3-wifi.lan", True, 300)]
+    assert restarts == [("infer-01.lan", True, 300)]
     assert "Thunder Forge cluster sync" in result.stdout
-    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "transport_host: infer-01.lan" in result.stdout
     assert "== Runtime Restart ==" in result.stdout
     assert "notice: if model placement or node topology changed" in result.stdout
 
@@ -682,8 +682,8 @@ def test_artifact_sync_apply_propagates_runner_failure(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
-            studio_omlx_model_dir=True,
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
     )
@@ -701,7 +701,7 @@ def test_artifact_sync_apply_propagates_runner_failure(tmp_path: Path, monkeypat
             "--model",
             "BAAI/bge-small-en-v1.5",
             "--node",
-            "msm3",
+            "infer-01",
             "--apply",
         ],
     )

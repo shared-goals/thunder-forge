@@ -49,11 +49,7 @@ def _record_has_healthy_endpoint_indicator(record: Mapping[str, Any]) -> bool:
         if key in record and _value_indicates_endpoint_health(record[key]):
             return True
 
-    return any(
-        _record_has_healthy_endpoint_indicator(value)
-        for value in record.values()
-        if isinstance(value, Mapping)
-    )
+    return any(_record_has_healthy_endpoint_indicator(value) for value in record.values() if isinstance(value, Mapping))
 
 
 def _endpoint_records_from_container(container: Any) -> Iterator[Mapping[str, Any]]:
@@ -271,9 +267,7 @@ def smoke_olla_router(
             result.alias_ok = response.is_success and bool(result.alias_endpoint)
             if not result.alias_ok:
                 if not response.is_success:
-                    result.errors.append(
-                        f"alias POST returned {response.status_code}: {response.text}"
-                    )
+                    result.errors.append(f"alias POST returned {response.status_code}: {response.text}")
                 else:
                     result.errors.append(f"alias request did not return an Olla endpoint for '{alias}'")
         except httpx.HTTPError as exc:

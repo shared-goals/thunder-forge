@@ -10,7 +10,7 @@ ADR 0001 chose oMLX as the node-level runtime for Thunder Forge v2. The next que
 
 The current Thunder Forge production stack uses LiteLLM and remains valuable as a library of proven techniques. For the new architecture, the frontend should be generated from Thunder Forge desired state and should not become the source of truth.
 
-Olla `v0.0.27` was smoked on `studio` against the development oMLX endpoint on `msm3-wifi.lan:8018`. The smoke result is recorded in `docs/notes/2026-05-26-frontend-balancer-alternatives.md`.
+Olla `v0.0.27` was smoked on `gateway-cache-01` against the development oMLX endpoint on `infer-03.lan:8018`. The smoke result is recorded in `docs/notes/2026-05-26-frontend-balancer-alternatives.md`.
 
 What Olla proved well:
 
@@ -42,15 +42,15 @@ The MVP traffic shape is:
 
 ```text
 internal trusted clients
-  -> TF edge on studio
-  -> Olla on studio
-  -> oMLX on msm3
+  -> TF edge on gateway-cache-01
+  -> Olla on gateway-cache-01
+  -> oMLX on infer-03
 
 external clients
   -> Caddy homelab ingress
-  -> TF edge on studio
-  -> Olla on studio
-  -> oMLX on msm3
+  -> TF edge on gateway-cache-01
+  -> Olla on gateway-cache-01
+  -> oMLX on infer-03
 ```
 
 An optional uniform path is allowed:
@@ -99,7 +99,7 @@ Decision: keep as a viable minimal external ingress, but do not make Caddy the T
 
 ### Option B: Tiny custom TF edge behind Caddy
 
-Add a small Thunder Forge-owned proxy service on `studio` between clients/Caddy and Olla.
+Add a small Thunder Forge-owned proxy service on `gateway-cache-01` between clients/Caddy and Olla.
 
 Minimum behavior:
 
@@ -162,7 +162,7 @@ Trade-offs:
 ## MVP guardrails
 
 - Do not modify production `rock`.
-- Do not disturb `msm4` / Hindsight.
+- Do not disturb `infer-04` / Hindsight.
 - Generate Olla config from Thunder Forge desired state; do not hand-edit generated config as source of truth.
 - Do not commit API keys. Use env vars or local ignored files.
 - Keep tracing off by default.
@@ -174,8 +174,8 @@ Trade-offs:
 
 The ADR is implemented for MVP when:
 
-1. Thunder Forge can generate an Olla config for `msm3` from desired state.
+1. Thunder Forge can generate an Olla config for `infer-03` from desired state.
 2. Olla smoke verifies health, models, chat, alias rewrite, sticky sessions, failover exclusion, and endpoint attribution headers.
 3. TF edge smoke verifies root `/v1/*` compatibility, static API-key enforcement, session id behavior, and structured request log output.
 4. Optional Caddy smoke verifies external-style routing to TF edge without moving auth/accounting out of TF.
-5. All steps run on `studio`/`msm3` only and leave `rock` and `msm4` untouched.
+5. All steps run on `gateway-cache-01`/`infer-03` only and leave `rock` and `infer-04` untouched.

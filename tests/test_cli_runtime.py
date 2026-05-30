@@ -36,8 +36,8 @@ def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypat
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -52,12 +52,12 @@ def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypat
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    result = runner.invoke(app, ["runtime", "start", "--node", "msm3", "--dry-run"])
+    result = runner.invoke(app, ["runtime", "start", "--node", "infer-03", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "node: msm3" in result.stdout
+    assert "node: infer-03" in result.stdout
     assert "runtime: omlx" in result.stdout
-    assert "management_host: msm3-wifi.lan" in result.stdout
+    assert "management_host: infer-03.lan" in result.stdout
     assert "fabric_host: true" in result.stdout
     assert "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018" in result.stdout
     assert "--model-dir" not in result.stdout
@@ -71,8 +71,8 @@ def test_runtime_start_apply_starts_remote_runtime(tmp_path: Path, monkeypatch) 
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -100,10 +100,10 @@ def test_runtime_start_apply_starts_remote_runtime(tmp_path: Path, monkeypatch) 
         lambda runtime_node, *, timeout: OmlxStartResult(returncode=0, pid="4242"),
     )
 
-    result = runner.invoke(app, ["runtime", "start", "--node", "msm3", "--apply"])
+    result = runner.invoke(app, ["runtime", "start", "--node", "infer-03", "--apply"])
 
     assert result.exit_code == 0
-    assert "node: msm3" in result.stdout
+    assert "node: infer-03" in result.stdout
     assert "command: /Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018" in result.stdout
     assert "pid: 4242" in result.stdout
     assert "status: started" in result.stdout
@@ -117,8 +117,8 @@ def test_runtime_start_apply_skips_when_runtime_is_already_healthy(tmp_path: Pat
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -155,7 +155,7 @@ def test_runtime_start_apply_skips_when_runtime_is_already_healthy(tmp_path: Pat
     )
     monkeypatch.setattr(cli_module, "run_omlx_runtime_start", fake_start)
 
-    result = runner.invoke(app, ["runtime", "start", "--node", "msm3", "--apply"])
+    result = runner.invoke(app, ["runtime", "start", "--node", "infer-03", "--apply"])
 
     assert result.exit_code == 0
     assert started is False
@@ -170,8 +170,8 @@ def test_runtime_restart_dry_run_prints_process_commands(tmp_path: Path, monkeyp
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -187,10 +187,10 @@ def test_runtime_restart_dry_run_prints_process_commands(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
 
-    result = runner.invoke(app, ["runtime", "restart", "--node", "msm3", "--dry-run"])
+    result = runner.invoke(app, ["runtime", "restart", "--node", "infer-03", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "node: msm3" in result.stdout
+    assert "node: infer-03" in result.stdout
     assert "manager: process" in result.stdout
     assert "command: /Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018" in result.stdout
     assert "pid_path: /Users/shag/.omlx/run/omlx-8018.pid" in result.stdout
@@ -207,8 +207,8 @@ def test_runtime_restart_daemon_dry_run_prints_plist_and_sudo_commands(tmp_path:
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -224,7 +224,7 @@ def test_runtime_restart_daemon_dry_run_prints_plist_and_sudo_commands(tmp_path:
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
 
-    result = runner.invoke(app, ["runtime", "restart", "--node", "msm3", "--manager", "daemon", "--dry-run"])
+    result = runner.invoke(app, ["runtime", "restart", "--node", "infer-03", "--manager", "daemon", "--dry-run"])
 
     assert result.exit_code == 0
     assert "manager: daemon" in result.stdout
@@ -336,8 +336,8 @@ def test_service_setup_daemon_dry_run_prints_gateway_plan(tmp_path: Path, monkey
                 access_log: logs/custom-edge.jsonl
             models: {}
             nodes:
-              studio:
-                host: studio.lan
+              gateway-cache-01:
+                host: gateway-cache-01.lan
                 ram_gb: 128
                 roles: [gateway, cache]
                 user: shag
@@ -429,14 +429,14 @@ def test_cluster_prepare_dry_run_prints_unified_plan(tmp_path: Path, monkeypatch
                                 host: 0.0.0.0
                         models: {}
                         nodes:
-                            studio:
-                                host: studio.lan
+                            gateway-cache-01:
+                                host: gateway-cache-01.lan
                                 ram_gb: 128
                                 roles: [gateway, cache]
                                 user: shag
                                 admin_user: serpo
-                            msm3:
-                                host: msm3-wifi.lan
+                            infer-03:
+                                host: infer-03.lan
                                 ram_gb: 128
                                 roles: [inference]
                                 user: shag
@@ -451,12 +451,12 @@ def test_cluster_prepare_dry_run_prints_unified_plan(tmp_path: Path, monkeypatch
 
     assert result.exit_code == 0
     assert "Thunder Forge cluster prepare" in result.stdout
-    assert "gateway: studio (studio.lan) -> Olla + TF edge" in result.stdout
-    assert "cache: studio (studio.lan) -> oMLX model hub" in result.stdout
-    assert "inference: msm3 -> oMLX LaunchDaemon" in result.stdout
+    assert "gateway: gateway-cache-01 (gateway-cache-01.lan) -> Olla + TF edge" in result.stdout
+    assert "cache: gateway-cache-01 (gateway-cache-01.lan) -> oMLX model hub" in result.stdout
+    assert "inference: infer-03 -> oMLX LaunchDaemon" in result.stdout
     assert "would: ensure Olla v0.0.27" in result.stdout
     assert "would: ensure oMLX CLI at /Users/shag/.local/bin/omlx" in result.stdout
-    assert "would: bootstrap msm3 ssh=shag@msm3-wifi.lan su=admin" in result.stdout
+    assert "would: bootstrap infer-03 ssh=shag@infer-03.lan su=admin" in result.stdout
 
 
 def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, monkeypatch) -> None:
@@ -471,14 +471,14 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
                 admin_user: serpo
             models: {}
             nodes:
-              studio:
-                host: studio.lan
+              gateway-cache-01:
+                host: gateway-cache-01.lan
                 ram_gb: 128
                 roles: [gateway, cache]
                 user: shag
                 admin_user: serpo
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 ram_gb: 128
                 roles: [inference]
                 user: shag
@@ -533,7 +533,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
 
     def fake_run_omlx_daemon_setup(runtime_node, **kwargs):
         calls.append("inference")
-        kwargs["progress"]("health: oMLX ok (http://msm3-wifi.lan:8018)")
+        kwargs["progress"]("health: oMLX ok (http://infer-03.lan:8018)")
         return OmlxDaemonSetupResult(
             node=runtime_node.host,
             label="com.thunder-forge.omlx-8018",
@@ -563,11 +563,11 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     assert result.exit_code == 0
     assert calls == ["olla", "config", "gateway", "cache", "tooling", "inference"]
     assert gateway_calls[0]["edge_host"] == "0.0.0.0"
-    assert "== Gateway: studio (studio.lan) ==" in result.stdout
+    assert "== Gateway: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
     assert "auth: operator=shag admin=serpo reason=install Olla + TF edge LaunchDaemons" in result.stdout
-    assert "== Cache Hub: studio (studio.lan) ==" in result.stdout
-    assert "== Inference: msm3 (msm3-wifi.lan) ==" in result.stdout
-    assert "auth: ssh=shag@msm3-wifi.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
+    assert "== Cache Hub: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
+    assert "== Inference: infer-03 (infer-03.lan) ==" in result.stdout
+    assert "auth: ssh=shag@infer-03.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
     assert "tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx" in result.stdout
     assert "status: cluster prepare complete" in result.stdout
 
@@ -587,13 +587,13 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
                 port: 45116
             models: {}
             nodes:
-              studio:
-                host: studio.lan
+              gateway-cache-01:
+                host: gateway-cache-01.lan
                 ram_gb: 128
                 roles: [gateway, cache]
                 user: shag
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 ram_gb: 128
                 roles: [inference]
                 user: shag
@@ -648,8 +648,8 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 ram_gb: 128
                 roles: [inference]
                 user: shag
@@ -668,7 +668,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
 
     assert result.exit_code == 0
     assert "Thunder Forge cluster status" in result.stdout
-    assert "msm3: health=ok models=ok" in result.stdout
+    assert "infer-03: health=ok models=ok" in result.stdout
     assert "served_models: memory" in result.stdout
 
 
@@ -688,8 +688,8 @@ models:
             repo: mlx-community/gpt-oss-20b-MXFP4-Q8
         runtime_model_id: gpt-oss-20b-MXFP4-Q8
 nodes:
-    msm3:
-        host: msm3-wifi.lan
+    infer-03:
+        host: infer-03.lan
         ram_gb: 128
         roles: [inference]
         user: shag
@@ -743,15 +743,15 @@ nodes:
 
     result = runner.invoke(
         app,
-        ["cluster", "smoke", "msm3"],
+        ["cluster", "smoke", "infer-03"],
     )
 
     assert result.exit_code == 0
-    assert "runtime msm3: health=ok models=ok model_visible=yes" in result.stdout
+    assert "runtime infer-03: health=ok models=ok model_visible=yes" in result.stdout
     assert "olla: health=ok chat=ok alias=ok" in result.stdout
     assert "edge: auth=ok chat=ok session=ok" in result.stdout
     assert "status: cluster smoke complete" in result.stdout
-    assert captured_olla["expected_endpoint"] == "msm3-omlx-live"
+    assert captured_olla["expected_endpoint"] == "infer-03-omlx-live"
 
 
 def test_cluster_smoke_fails_when_runtime_model_is_missing(tmp_path: Path, monkeypatch) -> None:
@@ -763,8 +763,8 @@ def test_cluster_smoke_fails_when_runtime_model_is_missing(tmp_path: Path, monke
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 ram_gb: 128
                 roles: [inference]
                 user: shag
@@ -815,8 +815,8 @@ def test_cluster_smoke_fails_when_runtime_model_is_missing(tmp_path: Path, monke
     )
 
     assert result.exit_code == 1
-    assert "runtime msm3: health=ok models=fail model_visible=no" in result.stdout
-    assert "Error: msm3: model 'gpt-oss-20b-MXFP4-Q8' is not visible" in result.stderr
+    assert "runtime infer-03: health=ok models=fail model_visible=no" in result.stdout
+    assert "Error: infer-03: model 'gpt-oss-20b-MXFP4-Q8' is not visible" in result.stderr
 
 
 def test_service_restart_olla_apply_exits_on_early_error(tmp_path: Path, monkeypatch) -> None:
@@ -939,8 +939,8 @@ def test_service_restart_omlx_launchd_dry_run_prints_service_plan(tmp_path: Path
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -957,10 +957,10 @@ def test_service_restart_omlx_launchd_dry_run_prints_service_plan(tmp_path: Path
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
 
-    result = runner.invoke(app, ["service", "restart", "--service", "omlx", "--node", "msm3"])
+    result = runner.invoke(app, ["service", "restart", "--service", "omlx", "--node", "infer-03"])
 
     assert result.exit_code == 0
-    assert "node: msm3" in result.stdout
+    assert "node: infer-03" in result.stdout
     assert "service: omlx" in result.stdout
     assert "manager: launchd" in result.stdout
     assert "plist_path: ~/Library/LaunchAgents/com.thunder-forge.omlx-8018.plist" in result.stdout
@@ -975,8 +975,8 @@ def test_runtime_setup_daemon_dry_run_prints_admin_script(tmp_path: Path, monkey
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -993,7 +993,7 @@ def test_runtime_setup_daemon_dry_run_prints_admin_script(tmp_path: Path, monkey
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
 
-    result = runner.invoke(app, ["runtime", "setup-daemon", "--node", "msm3", "--via-su"])
+    result = runner.invoke(app, ["runtime", "setup-daemon", "--node", "infer-03", "--via-su"])
 
     assert result.exit_code == 0
     assert "manager: daemon" in result.stdout
@@ -1004,7 +1004,7 @@ def test_runtime_setup_daemon_dry_run_prints_admin_script(tmp_path: Path, monkey
     assert "script:" in result.stdout
     assert "#!/bin/zsh" in result.stdout
     assert "run_root /usr/sbin/visudo -cf" in result.stdout
-    assert "copy setup script to shag@msm3-wifi.lan" in result.stdout
+    assert "copy setup script to shag@infer-03.lan" in result.stdout
 
 
 def test_runtime_setup_daemon_apply_hides_admin_script(tmp_path: Path, monkeypatch) -> None:
@@ -1015,8 +1015,8 @@ def test_runtime_setup_daemon_apply_hides_admin_script(tmp_path: Path, monkeypat
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -1056,7 +1056,7 @@ def test_runtime_setup_daemon_apply_hides_admin_script(tmp_path: Path, monkeypat
 
     result = runner.invoke(
         app,
-        ["runtime", "setup-daemon", "--node", "msm3", "--admin-user", "admin", "--apply"],
+        ["runtime", "setup-daemon", "--node", "infer-03", "--admin-user", "admin", "--apply"],
     )
 
     assert result.exit_code == 0
@@ -1074,8 +1074,8 @@ def test_runtime_setup_daemon_via_su_requires_admin_user(tmp_path: Path, monkeyp
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 ram_gb: 128
                 user: shag
                 roles: [inference]
@@ -1088,7 +1088,7 @@ def test_runtime_setup_daemon_via_su_requires_admin_user(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
 
-    result = runner.invoke(app, ["runtime", "setup-daemon", "--node", "msm3", "--via-su"])
+    result = runner.invoke(app, ["runtime", "setup-daemon", "--node", "infer-03", "--via-su"])
 
     assert result.exit_code == 1
     assert "--via-su requires --admin-user or nodes.<node>.admin_user" in result.stderr
@@ -1102,8 +1102,8 @@ def test_runtime_restart_apply_reports_restarted(tmp_path: Path, monkeypatch) ->
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -1135,7 +1135,7 @@ def test_runtime_restart_apply_reports_restarted(tmp_path: Path, monkeypatch) ->
         ),
     )
 
-    result = runner.invoke(app, ["runtime", "restart", "--node", "msm3", "--apply"])
+    result = runner.invoke(app, ["runtime", "restart", "--node", "infer-03", "--apply"])
 
     assert result.exit_code == 0
     assert "manager: process" in result.stdout
@@ -1153,8 +1153,8 @@ def test_runtime_status_reports_omlx_health(tmp_path: Path, monkeypatch) -> None
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -1182,14 +1182,14 @@ def test_runtime_status_reports_omlx_health(tmp_path: Path, monkeypatch) -> None
         raising=False,
     )
 
-    result = runner.invoke(app, ["runtime", "status", "--node", "msm3"])
+    result = runner.invoke(app, ["runtime", "status", "--node", "infer-03"])
 
     assert result.exit_code == 0
-    assert "node: msm3" in result.stdout
+    assert "node: infer-03" in result.stdout
     assert "runtime: omlx" in result.stdout
-    assert "management_host: msm3-wifi.lan" in result.stdout
+    assert "management_host: infer-03.lan" in result.stdout
     assert "fabric_host: true" in result.stdout
-    assert "base_url: http://msm3-wifi.lan:8018" in result.stdout
+    assert "base_url: http://infer-03.lan:8018" in result.stdout
     assert "health: ok" in result.stdout
     assert "models: ok" in result.stdout
     assert "status: ok" in result.stdout
@@ -1204,8 +1204,8 @@ def test_runtime_smoke_reports_direct_chat_result(tmp_path: Path, monkeypatch) -
         dedent("""\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -1243,15 +1243,15 @@ def test_runtime_smoke_reports_direct_chat_result(tmp_path: Path, monkeypatch) -
             "runtime",
             "smoke",
             "--node",
-            "msm3",
+            "infer-03",
             "--model",
             "Qwen3-1.7B-4bit",
         ],
     )
 
     assert result.exit_code == 0
-    assert "node: msm3" in result.stdout
-    assert "base_url: http://msm3-wifi.lan:8018" in result.stdout
+    assert "node: infer-03" in result.stdout
+    assert "base_url: http://infer-03.lan:8018" in result.stdout
     assert "model: Qwen3-1.7B-4bit" in result.stdout
     assert "health: ok" in result.stdout
     assert "models: ok" in result.stdout
@@ -1269,17 +1269,17 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
     assignments.write_text(
         dedent("""\
                         models:
-                            qwen3-1.7b-omlx-msm3-test:
+                            qwen3-1.7b-omlx-infer-03-test:
                                 source: { repo: mlx-community/Qwen3-1.7B-4bit }
                                 runtime_model_id: Qwen3-1.7B-4bit
                         nodes:
-                            studio:
-                                host: studio.lan
+                            gateway-cache-01:
+                                host: gateway-cache-01.lan
                                 ram_gb: 64
                                 user: shag
                                 roles: [gateway]
-                            msm3:
-                                host: msm3-wifi.lan
+                            infer-03:
+                                host: infer-03.lan
                                 ram_gb: 128
                                 user: shag
                                 roles: [inference]
@@ -1287,7 +1287,7 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
                                     type: omlx
                                     port: 8018
                                 models:
-                                    - qwen3-1.7b-omlx-msm3-test
+                                    - qwen3-1.7b-omlx-infer-03-test
                 """)
     )
 
@@ -1302,7 +1302,7 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
     assert output_path.exists()
     parsed = yaml_lib.safe_load(output_path.read_text())
     assert parsed["server"]["port"] == 40115
-    assert parsed["model_aliases"] == {"qwen3-1.7b-omlx-msm3-test": ["Qwen3-1.7B-4bit"]}
+    assert parsed["model_aliases"] == {"qwen3-1.7b-omlx-infer-03-test": ["Qwen3-1.7B-4bit"]}
     assert f"generated: {output_path}" in result.stdout
 
 
@@ -1317,8 +1317,8 @@ def test_generate_olla_config_cli_uses_service_port(tmp_path: Path, monkeypatch)
                                 port: 45115
                         models: {}
                         nodes:
-                            msm3:
-                                host: msm3-wifi.lan
+                            infer-03:
+                                host: infer-03.lan
                                 ram_gb: 128
                                 user: shag
                                 roles: [inference]
@@ -1358,7 +1358,7 @@ def test_olla_smoke_cli_prints_summary(monkeypatch) -> None:
             session_ok=True,
             root_v1_absent=True,
             latency_ms=245,
-            olla_endpoint="msm3-omlx-live",
+            olla_endpoint="infer-03-omlx-live",
         ),
         raising=False,
     )
@@ -1373,14 +1373,14 @@ def test_olla_smoke_cli_prints_summary(monkeypatch) -> None:
             "--model",
             "Qwen3-1.7B-4bit",
             "--alias",
-            "qwen3-1.7b-omlx-msm3-test",
+            "qwen3-1.7b-omlx-infer-03-test",
         ],
     )
 
     assert result.exit_code == 0
     assert "base_url: http://127.0.0.1:40115" in result.stdout
     assert "model: Qwen3-1.7B-4bit" in result.stdout
-    assert "alias: qwen3-1.7b-omlx-msm3-test" in result.stdout
+    assert "alias: qwen3-1.7b-omlx-infer-03-test" in result.stdout
     assert "health: ok" in result.stdout
     assert "endpoints: ok" in result.stdout
     assert "models: ok" in result.stdout
@@ -1388,7 +1388,7 @@ def test_olla_smoke_cli_prints_summary(monkeypatch) -> None:
     assert "alias_routing: ok" in result.stdout
     assert "session: ok" in result.stdout
     assert "root_v1: absent" in result.stdout
-    assert "olla_endpoint: msm3-omlx-live" in result.stdout
+    assert "olla_endpoint: infer-03-omlx-live" in result.stdout
 
 
 def test_olla_smoke_cli_passes_expected_endpoint(monkeypatch) -> None:
@@ -1423,14 +1423,14 @@ def test_olla_smoke_cli_passes_expected_endpoint(monkeypatch) -> None:
             "--model",
             "Qwen3-1.7B-4bit",
             "--alias",
-            "qwen3-1.7b-omlx-msm1-test",
+            "qwen3-1.7b-omlx-infer-01-test",
             "--expected-endpoint",
-            "msm1-omlx-live",
+            "infer-01-omlx-live",
         ],
     )
 
     assert result.exit_code == 0
-    assert captured["expected_endpoint"] == "msm1-omlx-live"
+    assert captured["expected_endpoint"] == "infer-01-omlx-live"
 
 
 def test_olla_dev_smoke_cli_prints_summary(monkeypatch) -> None:
@@ -1439,7 +1439,7 @@ def test_olla_dev_smoke_cli_prints_summary(monkeypatch) -> None:
     fake_smoke = OllaSmokeResult(
         base_url="http://127.0.0.1:40115",
         model="Qwen3-1.7B-4bit",
-        alias="qwen3-1.7b-omlx-msm3-test",
+        alias="qwen3-1.7b-omlx-infer-03-test",
         health_ok=True,
         endpoints_ok=True,
         models_ok=True,
@@ -1448,7 +1448,7 @@ def test_olla_dev_smoke_cli_prints_summary(monkeypatch) -> None:
         session_ok=True,
         root_v1_absent=True,
         latency_ms=245,
-        olla_endpoint="msm3-omlx-live",
+        olla_endpoint="infer-03-omlx-live",
     )
     fake_dev_smoke = OllaDevSmokeResult(
         config_generated=True,
@@ -1477,7 +1477,7 @@ def test_olla_dev_smoke_cli_prints_summary(monkeypatch) -> None:
             "--model",
             "Qwen3-1.7B-4bit",
             "--alias",
-            "qwen3-1.7b-omlx-msm3-test",
+            "qwen3-1.7b-omlx-infer-03-test",
         ],
     )
 
@@ -1501,7 +1501,7 @@ def test_olla_dev_smoke_cli_passes_expected_endpoint(monkeypatch) -> None:
         smoke_result=OllaSmokeResult(
             base_url="http://127.0.0.1:40115",
             model="Qwen3-1.7B-4bit",
-            alias="qwen3-1.7b-omlx-msm1-test",
+            alias="qwen3-1.7b-omlx-infer-01-test",
             health_ok=True,
             endpoints_ok=True,
             models_ok=True,
@@ -1530,14 +1530,14 @@ def test_olla_dev_smoke_cli_passes_expected_endpoint(monkeypatch) -> None:
             "--model",
             "Qwen3-1.7B-4bit",
             "--alias",
-            "qwen3-1.7b-omlx-msm1-test",
+            "qwen3-1.7b-omlx-infer-01-test",
             "--expected-endpoint",
-            "msm1-omlx-live",
+            "infer-01-omlx-live",
         ],
     )
 
     assert result.exit_code == 0
-    assert captured["expected_endpoint"] == "msm1-omlx-live"
+    assert captured["expected_endpoint"] == "infer-01-omlx-live"
 
 
 def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monkeypatch) -> None:
@@ -1549,8 +1549,8 @@ def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monke
             """\
             models: {}
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 fabric_host: true
                 ram_gb: 128
                 user: shag
@@ -1567,10 +1567,10 @@ def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monke
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
 
-    result = runner.invoke(app, ["runtime", "install", "--node", "msm3", "--dry-run"])
+    result = runner.invoke(app, ["runtime", "install", "--node", "infer-03", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "node: msm3" in result.stdout
+    assert "node: infer-03" in result.stdout
     assert "plist_path: ~/Library/LaunchAgents/com.thunder-forge.omlx-8018.plist" in result.stdout
     assert "label: com.thunder-forge.omlx-8018" in result.stdout
     assert "mode: dry-run" in result.stdout

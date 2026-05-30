@@ -20,8 +20,8 @@ def test_config_lint_reports_errors_and_warnings(tmp_path: Path, monkeypatch) ->
                 benchmark_only: true
                 runtime_model_id: gpt-oss-20b-mxfp4-bf16
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 ram_gb: 128
                 user: shag
                 roles: [node]
@@ -42,9 +42,9 @@ def test_config_lint_reports_errors_and_warnings(tmp_path: Path, monkeypatch) ->
 
     assert result.exit_code == 1
     assert "config: issues found" in result.stdout
-    assert "error: nodes.msm3.models: unknown model 'missing'" in result.stdout
-    assert "warning: nodes.msm3.models: benchmark-only model 'memory-bf16' is assigned to node" in result.stdout
-    assert "warning: nodes.msm3.runtime: oMLX runtime binds 0.0.0.0 without trusted_network: true" in result.stdout
+    assert "error: nodes.infer-03.models: unknown model 'missing'" in result.stdout
+    assert "warning: nodes.infer-03.models: benchmark-only model 'memory-bf16' is assigned to node" in result.stdout
+    assert "warning: nodes.infer-03.runtime: oMLX runtime binds 0.0.0.0 without trusted_network: true" in result.stdout
 
 
 def test_config_lint_passes_clean_config(tmp_path: Path, monkeypatch) -> None:
@@ -56,8 +56,8 @@ def test_config_lint_passes_clean_config(tmp_path: Path, monkeypatch) -> None:
                 source: { repo: mlx-community/gpt-oss-20b-MXFP4-Q8 }
                 runtime_model_id: gpt-oss-20b-MXFP4-Q8
             nodes:
-              msm3:
-                host: msm3-wifi.lan
+              infer-03:
+                host: infer-03.lan
                 ram_gb: 128
                 user: shag
                 roles: [node]

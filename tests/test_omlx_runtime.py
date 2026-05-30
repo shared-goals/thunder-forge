@@ -19,7 +19,7 @@ def test_run_omlx_runtime_start_executes_remote_nohup_command(monkeypatch) -> No
 
     monkeypatch.setattr(omlx_module.subprocess, "run", fake_run)
     node = Node(
-        host="msm3-wifi.lan",
+        host="infer-03.lan",
         user="shag",
         ram_gb=128,
         home_dir="/Users/shag",
@@ -36,7 +36,7 @@ def test_run_omlx_runtime_start_executes_remote_nohup_command(monkeypatch) -> No
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=8",
-        "shag@msm3-wifi.lan",
+        "shag@infer-03.lan",
         (
             "nohup /Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 "
             "> /tmp/thunder-forge-omlx-8018.log 2>&1 & echo $!"
@@ -70,7 +70,7 @@ def test_smoke_omlx_chat_passes_when_model_is_visible_and_chat_answers() -> None
         return httpx.Response(404)
 
     result = smoke_omlx_chat(
-        "http://msm3-wifi.lan:8018",
+        "http://infer-03.lan:8018",
         model="Qwen3-1.7B-4bit",
         transport=httpx.MockTransport(handler),
     )
@@ -94,7 +94,7 @@ def test_smoke_omlx_chat_fails_when_requested_model_is_not_visible() -> None:
         return httpx.Response(500)
 
     result = smoke_omlx_chat(
-        "http://msm3-wifi.lan:8018",
+        "http://infer-03.lan:8018",
         model="Qwen3-1.7B-4bit",
         transport=httpx.MockTransport(handler),
     )

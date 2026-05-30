@@ -1,7 +1,0 @@
-[server]
-enableStaticServing = false
-
-[runner]
-# Disable Streamlit's automatic multipage detection from pages/ directory.
-# We use our own page routing in app.py.
-magicEnabled = false

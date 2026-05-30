@@ -15,19 +15,19 @@ from pathlib import Path
 import httpx
 
 DEFAULT_OMLX_MODELS_DIR = "~/.omlx/models"
-STUDIO_OMLX_MODELS_DIR_ENV = "TF_STUDIO_OMLX_MODELS_DIR"
+CACHE_OMLX_MODELS_DIR_ENV = "TF_CACHE_OMLX_MODELS_DIR"
 
 
-def studio_omlx_models_dir_from_env(env: Mapping[str, str] | None = None) -> str:
-    """Return the studio-side oMLX models directory used by artifact commands."""
+def cache_omlx_models_dir_from_env(env: Mapping[str, str] | None = None) -> str:
+    """Return the cache-side oMLX models directory used by artifact commands."""
     import os
 
     source = os.environ if env is None else env
-    return source.get(STUDIO_OMLX_MODELS_DIR_ENV) or DEFAULT_OMLX_MODELS_DIR
+    return source.get(CACHE_OMLX_MODELS_DIR_ENV) or DEFAULT_OMLX_MODELS_DIR
 
 
 class ArtifactReadinessAction(StrEnum):
-    DOWNLOAD_TO_STUDIO_OMLX = "download_to_studio_omlx"
+    DOWNLOAD_TO_CACHE_OMLX = "download_to_cache_omlx"
     SYNC_TO_NODE_OMLX = "sync_to_node_omlx"
 
 
@@ -44,7 +44,7 @@ class ArtifactIdentity:
 class ArtifactPresence:
     """Completeness state for TF-managed oMLX artifact directories."""
 
-    studio_omlx_model_dir: bool
+    cache_omlx_model_dir: bool
     node_omlx_model_dir: bool
 
 
@@ -54,7 +54,7 @@ class ArtifactReadinessPlan:
     model_dir_name: str
     runtime_model_id: str
     node: str
-    studio_omlx_model_dir: str
+    cache_omlx_model_dir: str
     node_omlx_model_dir: str
     ready: bool
     actions: list[ArtifactReadinessAction] = field(default_factory=list)
@@ -108,7 +108,7 @@ def build_artifact_readiness_plan(
     node: str,
     node_home_dir: str,
     presence: ArtifactPresence,
-    studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
+    cache_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
 ) -> ArtifactReadinessPlan:
     """Build a read-only plan for making a model ready for oMLX on a node.
 
@@ -117,12 +117,12 @@ def build_artifact_readiness_plan(
     as the runtime model id.
     """
     identity = build_artifact_identity(repo_id)
-    studio_omlx_model_dir = f"{studio_omlx_models_dir}/{identity.model_dir_name}"
+    cache_omlx_model_dir = f"{cache_omlx_models_dir}/{identity.model_dir_name}"
     node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{identity.model_dir_name}"
 
     actions: list[ArtifactReadinessAction] = []
-    if not presence.studio_omlx_model_dir:
-        actions.append(ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX)
+    if not presence.cache_omlx_model_dir:
+        actions.append(ArtifactReadinessAction.DOWNLOAD_TO_CACHE_OMLX)
     elif not presence.node_omlx_model_dir:
         actions.append(ArtifactReadinessAction.SYNC_TO_NODE_OMLX)
 
@@ -131,7 +131,7 @@ def build_artifact_readiness_plan(
         model_dir_name=identity.model_dir_name,
         runtime_model_id=identity.runtime_model_id,
         node=node,
-        studio_omlx_model_dir=studio_omlx_model_dir,
+        cache_omlx_model_dir=cache_omlx_model_dir,
         node_omlx_model_dir=node_omlx_model_dir,
         ready=not actions,
         actions=actions,
@@ -144,15 +144,15 @@ def build_artifact_sync_plan(
     node_user: str,
     node_host: str,
     node_home_dir: str,
-    studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
+    cache_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
     ssh_host_key_alias: str | None = None,
 ) -> ArtifactSyncPlan:
-    """Build a studio-to-node oMLX model-directory rsync plan."""
+    """Build a cache-to-node oMLX model-directory rsync plan."""
     _validate_user_host_path(node_user=node_user, node_host=node_host, node_home_dir=node_home_dir)
     if ssh_host_key_alias is not None:
         _validate_host(ssh_host_key_alias, name="ssh_host_key_alias")
     identity = build_artifact_identity(repo_id)
-    source_path = f"{_expanded_studio_omlx_models_dir(studio_omlx_models_dir) / identity.model_dir_name}/"
+    source_path = f"{_expanded_cache_omlx_models_dir(cache_omlx_models_dir) / identity.model_dir_name}/"
     remote_omlx_models_dir = f"{node_home_dir}/.omlx/models"
     remote_model_parent_dir = f"{remote_omlx_models_dir}/{identity.namespace}"
     destination = f"{node_user}@{node_host}:{remote_omlx_models_dir}/{identity.model_dir_name}/"
@@ -198,12 +198,12 @@ def build_artifact_sync_plan(
 def build_artifact_download_plan(
     *,
     repo_id: str,
-    studio_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
+    cache_omlx_models_dir: str = DEFAULT_OMLX_MODELS_DIR,
 ) -> ArtifactDownloadPlan:
-    """Build a plan to download a model through oMLX into studio's model directory."""
+    """Build a plan to download a model through oMLX into cache role's model directory."""
     identity = build_artifact_identity(repo_id)
-    destination = _studio_omlx_model_dir(studio_omlx_models_dir, identity.model_dir_name)
-    models_dir_arg = str(_expanded_studio_omlx_models_dir(studio_omlx_models_dir))
+    destination = _cache_omlx_model_dir(cache_omlx_models_dir, identity.model_dir_name)
+    models_dir_arg = str(_expanded_cache_omlx_models_dir(cache_omlx_models_dir))
     base_url = "http://127.0.0.1:8020"
     args = [
         "omlx",
@@ -232,12 +232,12 @@ def build_artifact_download_plan(
     )
 
 
-def _studio_omlx_model_dir(studio_omlx_models_dir: str, model_dir_name: str) -> str:
-    return f"{studio_omlx_models_dir.rstrip('/')}/{model_dir_name}"
+def _cache_omlx_model_dir(cache_omlx_models_dir: str, model_dir_name: str) -> str:
+    return f"{cache_omlx_models_dir.rstrip('/')}/{model_dir_name}"
 
 
-def _expanded_studio_omlx_models_dir(studio_omlx_models_dir: str) -> Path:
-    return Path(studio_omlx_models_dir).expanduser()
+def _expanded_cache_omlx_models_dir(cache_omlx_models_dir: str) -> Path:
+    return Path(cache_omlx_models_dir).expanduser()
 
 
 def _env_without_socks_proxy() -> dict[str, str]:
@@ -475,10 +475,7 @@ def _remote_artifact_complete(host: str, path: str) -> bool:
             f"test -f {quoted_config}",
             f"test -z \"$(find {quoted_path} -name '*.incomplete' -print -quit)\"",
             f"test ! -e {shlex.quote(f'{path}/.rsync-partial')}",
-            (
-                f"test -n \"$(find {quoted_path} "
-                "\\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""
-            ),
+            (f"test -n \"$(find {quoted_path} \\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""),
         ]
     )
     result = subprocess.run(
@@ -520,15 +517,15 @@ def probe_artifact_presence(
     repo_id: str,
     node_host: str,
     node_home_dir: str,
-    studio_omlx_models_dir: str | None = None,
+    cache_omlx_models_dir: str | None = None,
 ) -> ArtifactPresence:
-    """Check oMLX model-directory completeness on studio and a node."""
+    """Check oMLX model-directory completeness on the cache host and a node."""
     identity = build_artifact_identity(repo_id)
-    studio_models_dir = studio_omlx_models_dir or studio_omlx_models_dir_from_env()
-    studio_omlx_model_dir = Path(studio_models_dir).expanduser() / identity.model_dir_name
+    cache_models_dir = cache_omlx_models_dir or cache_omlx_models_dir_from_env()
+    cache_omlx_model_dir = Path(cache_models_dir).expanduser() / identity.model_dir_name
     node_omlx_model_dir = f"{node_home_dir}/.omlx/models/{identity.model_dir_name}"
 
     return ArtifactPresence(
-        studio_omlx_model_dir=is_local_artifact_complete(studio_omlx_model_dir),
+        cache_omlx_model_dir=is_local_artifact_complete(cache_omlx_model_dir),
         node_omlx_model_dir=_remote_artifact_complete(node_host, node_omlx_model_dir),
     )

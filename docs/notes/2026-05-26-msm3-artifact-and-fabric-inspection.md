@@ -28,11 +28,11 @@ The old Hugging Face Hub cache layout (`~/.cache/huggingface/hub/models--.../sna
 
 At inspection time, neither studio nor `msm3` had `~/.omlx/models`. `msm3` did have several older Hugging Face cache entries from previous/manual work, but that state is historical evidence only and is not used by the TF v2 artifact planner.
 
-Artifact status semantics after the `.omlx`-only refactor:
+Artifact status semantics after the cache-host `.omlx`-only refactor:
 
-- missing on studio → next action `download_to_studio_omlx`;
-- present on studio and missing on node → next action `sync_to_node_omlx`;
-- present on studio and node → ready.
+- missing on cache host → next action `download_to_cache_omlx`;
+- present on cache host and missing on node → next action `sync_to_node_omlx`;
+- present on cache host and node → ready.
 
 ## studio ↔ msm3 fabric discovery
 

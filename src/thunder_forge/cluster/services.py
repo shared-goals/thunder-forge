@@ -269,14 +269,9 @@ def system_launchd_commands(
 
     if admin_user:
         sudo_prompt = f"[%h] password: user={admin_user} reason=manage Thunder Forge daemon {label}: "
-        sudo_validate = (
-            f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} -v"
-            if interactive_sudo
-            else "/usr/bin/sudo -n -v"
-        )
+        sudo_validate = f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} -v" if interactive_sudo else "/usr/bin/sudo -n -v"
         admin_notice = (
-            f"password prompt: host=%h method=su user={admin_user} "
-            f"reason=manage Thunder Forge daemon {label}"
+            f"password prompt: host=%h method=su user={admin_user} reason=manage Thunder Forge daemon {label}"
         )
         sudo_notice = f"password prompt: host=%h method=sudo user={admin_user} reason=install/restart {label}"
         stop_wait = system_launchd_stop_wait_command(

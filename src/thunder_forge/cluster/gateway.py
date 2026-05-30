@@ -281,10 +281,7 @@ def build_gateway_daemon_setup_result(
             admin_user=admin_user,
             interactive_sudo=interactive_sudo,
         ),
-        *[
-            f"/usr/bin/sudo -n /bin/launchctl print system/{service.label} >/dev/null"
-            for service in result.services
-        ],
+        *[f"/usr/bin/sudo -n /bin/launchctl print system/{service.label} >/dev/null" for service in result.services],
     ]
     return result, olla_health_url, edge_health_url
 

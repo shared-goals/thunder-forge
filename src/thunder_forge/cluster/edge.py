@@ -82,7 +82,22 @@ class EdgeProxyConfig:
     olla_base_url: str
     clients_by_key: dict[str, EdgeClient]
     access_log_sink: Callable[[str], None] | None = None
+    model_catalog: list[EdgeModelCatalogEntry] = field(default_factory=list)
     timeout: float = 60.0
+
+
+@dataclass(frozen=True)
+class EdgeModelCatalogEntry:
+    """One TF public model alias exposed through the edge model list."""
+
+    id: str
+    name: str
+    description: str
+    runtime_model_id: str
+    source_repo: str = ""
+    base_model: str = ""
+    context_length: int = 0
+    benchmark_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,35 +235,6 @@ def validate_edge_client_id(client_id: str) -> str:
     return normalized
 
 
-def parse_edge_users_json(value: str) -> dict[str, str]:
-    """Parse the TF_USERS client-id -> API-key JSON hash."""
-    if not value.strip():
-        return {}
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError as exc:
-        msg = "TF_USERS must be a JSON object mapping client ids to API keys"
-        raise ValueError(msg) from exc
-    if not isinstance(payload, dict):
-        msg = "TF_USERS must be a JSON object mapping client ids to API keys"
-        raise ValueError(msg)
-
-    users: dict[str, str] = {}
-    for raw_client_id, raw_api_key in payload.items():
-        if not isinstance(raw_client_id, str) or not isinstance(raw_api_key, str):
-            msg = "TF_USERS keys and values must be strings"
-            raise ValueError(msg)
-        client_id = validate_edge_client_id(raw_client_id)
-        api_key = raw_api_key.strip()
-        if api_key:
-            users[client_id] = api_key
-    return users
-
-
-def _encode_edge_users_json(users: dict[str, str]) -> str:
-    return json.dumps(dict(sorted(users.items())), separators=(",", ":"))
-
-
 def _quote_dotenv_value(value: str) -> str:
     return f"'{value}'"
 
@@ -271,7 +257,7 @@ def load_edge_user_keys_from_env(
     result: dict[str, str] = {}
     for key, value in source.items():
         if key.startswith(prefix) and value.strip():
-            suffix = key[len(prefix):]
+            suffix = key[len(prefix) :]
             if suffix:
                 client_id = suffix.lower()
                 try:
@@ -363,9 +349,6 @@ def ensure_edge_api_keys(
         lines = env_file.read_text().splitlines()
     else:
         lines = []
-
-    # Remove legacy TF_USERS JSON blob if present
-    lines = [line for line in lines if not (_m := _ENV_LINE_RE.match(line)) or _m.group("name") != "TF_USERS"]
 
     statuses: list[EdgeKeyStatus] = []
     seen_clients: set[str] = set()
@@ -589,6 +572,64 @@ def _json_response(status_code: int, payload: dict[str, str]) -> EdgeProxyRespon
     )
 
 
+def edge_models_payload(model_catalog: list[EdgeModelCatalogEntry]) -> dict[str, object]:
+    """Build an OpenAI-compatible /v1/models payload from TF public aliases."""
+    data: list[dict[str, object]] = []
+    for model in sorted(model_catalog, key=lambda item: item.id):
+        item: dict[str, object] = {
+            "id": model.id,
+            "object": "model",
+            "created": 0,
+            "owned_by": "thunder-forge",
+            "name": model.name,
+            "description": model.description,
+            "tf_runtime_model_id": model.runtime_model_id,
+        }
+        if model.source_repo:
+            item["tf_source_repo"] = model.source_repo
+        if model.base_model:
+            item["tf_base_model"] = model.base_model
+        if model.context_length:
+            item["context_length"] = model.context_length
+        if model.benchmark_only:
+            item["tf_benchmark_only"] = True
+        data.append(item)
+    return {"object": "list", "data": data}
+
+
+def _edge_models_response(
+    *,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    config: EdgeProxyConfig,
+) -> EdgeProxyResponse | None:
+    normalized_path = path.partition("?")[0]
+    if method.upper() != "GET" or normalized_path != "/v1/models" or not config.model_catalog:
+        return None
+
+    started = time.perf_counter()
+    auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
+    if not auth.allowed:
+        return _json_response(401, {"error": "unauthorized"})
+
+    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    upstream = EdgeProxyUpstreamRequest(
+        olla_path="",
+        forwarded_headers={},
+        request_id=request_id,
+        client_id=auth.client_id,
+        model="",
+        started=started,
+    )
+    _record_edge_access(config, upstream=upstream, path=path, status_code=200)
+    return EdgeProxyResponse(
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(edge_models_payload(config.model_catalog), separators=(",", ":")).encode(),
+    )
+
+
 def _proxy_response_headers(headers: httpx.Headers) -> dict[str, str]:
     proxy_headers: dict[str, str] = {}
     if content_type := headers.get("Content-Type"):
@@ -669,6 +710,10 @@ def proxy_edge_request(
     transport: httpx.BaseTransport | None = None,
 ) -> EdgeProxyResponse:
     """Authenticate, rewrite, and proxy a single buffered edge request."""
+    edge_models = _edge_models_response(method=method, path=path, headers=headers, config=config)
+    if edge_models is not None:
+        return edge_models
+
     upstream = _prepare_edge_upstream_request(
         method=method,
         path=path,

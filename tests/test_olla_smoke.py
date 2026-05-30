@@ -17,7 +17,7 @@ def test_smoke_olla_router_reports_green_paths_and_expected_root_v1_absence() ->
                 json={
                     "endpoints": [
                         {
-                            "name": "msm3-omlx-live",
+                            "name": "infer-03-omlx-live",
                             "status": "healthy",
                         }
                     ]
@@ -33,13 +33,13 @@ def test_smoke_olla_router_reports_green_paths_and_expected_root_v1_absence() ->
             )
         if request.url.path == "/olla/openai-compatible/v1/chat/completions":
             payload = request.read().decode()
-            if "qwen3-1.7b-omlx-msm3-test" in payload:
+            if "qwen3-1.7b-omlx-infer-03-test" in payload:
                 response_model = "Qwen3-1.7B-4bit"
             else:
                 response_model = "Qwen3-1.7B-4bit"
             return httpx.Response(
                 200,
-                headers={"X-Olla-Endpoint": "msm3-omlx-live"},
+                headers={"X-Olla-Endpoint": "infer-03-omlx-live"},
                 json={
                     "id": "chatcmpl-1",
                     "model": response_model,
@@ -53,7 +53,7 @@ def test_smoke_olla_router_reports_green_paths_and_expected_root_v1_absence() ->
     result = smoke_olla_router(
         base_url="http://127.0.0.1:40115",
         model="Qwen3-1.7B-4bit",
-        alias="qwen3-1.7b-omlx-msm3-test",
+        alias="qwen3-1.7b-omlx-infer-03-test",
         transport=httpx.MockTransport(handler),
     )
 
@@ -66,7 +66,7 @@ def test_smoke_olla_router_reports_green_paths_and_expected_root_v1_absence() ->
     assert result.alias_ok is True
     assert result.session_ok is True
     assert result.root_v1_absent is True
-    assert result.olla_endpoint == "msm3-omlx-live"
+    assert result.olla_endpoint == "infer-03-omlx-live"
     assert result.errors == []
 
 
@@ -79,8 +79,8 @@ def test_smoke_olla_router_accepts_alias_on_different_healthy_endpoint() -> None
                 200,
                 json={
                     "endpoints": [
-                        {"name": "msm1-omlx-live", "status": "healthy"},
-                        {"name": "msm3-omlx-live", "status": "healthy"},
+                        {"name": "infer-01-omlx-live", "status": "healthy"},
+                        {"name": "infer-03-omlx-live", "status": "healthy"},
                     ]
                 },
             )
@@ -91,7 +91,7 @@ def test_smoke_olla_router_accepts_alias_on_different_healthy_endpoint() -> None
             )
         if request.url.path == "/olla/openai-compatible/v1/chat/completions":
             payload = json.loads(request.read().decode())
-            endpoint = "msm3-omlx-live" if payload["model"] == "memory" else "msm1-omlx-live"
+            endpoint = "infer-03-omlx-live" if payload["model"] == "memory" else "infer-01-omlx-live"
             return httpx.Response(
                 200,
                 headers={"X-Olla-Endpoint": endpoint},
@@ -109,7 +109,7 @@ def test_smoke_olla_router_accepts_alias_on_different_healthy_endpoint() -> None
     )
 
     assert result.ok is True
-    assert result.olla_endpoint == "msm1-omlx-live"
-    assert result.alias_endpoint == "msm3-omlx-live"
+    assert result.olla_endpoint == "infer-01-omlx-live"
+    assert result.alias_endpoint == "infer-03-omlx-live"
     assert result.alias_ok is True
     assert result.errors == []

@@ -43,7 +43,7 @@ def test_discover_link_local_fabric_host_returns_first_ssh_reachable_node_addres
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    address = discover_link_local_fabric_host(management_host="msm3-wifi.lan", node_user="shag")
+    address = discover_link_local_fabric_host(management_host="infer-03.lan", node_user="shag")
 
     assert address == "169.254.251.195"
     assert calls[0] == [
@@ -56,11 +56,11 @@ def test_discover_link_local_fabric_host_returns_first_ssh_reachable_node_addres
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=8",
-        "shag@msm3-wifi.lan",
+        "shag@infer-03.lan",
         "networksetup -listallhardwareports 2>/dev/null; printf '\\n__TF_IFCONFIG__\\n'; ifconfig",
     ]
     hostname_call = calls[-1]
-    assert "HostKeyAlias=msm3-wifi.lan" in hostname_call
+    assert "HostKeyAlias=infer-03.lan" in hostname_call
     assert "shag@169.254.251.195" in hostname_call
 
 
@@ -99,7 +99,7 @@ def test_discover_link_local_fabric_host_rejects_non_thunderbolt_local_route(mon
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    address = discover_link_local_fabric_host(management_host="msm3-wifi.lan", node_user="shag")
+    address = discover_link_local_fabric_host(management_host="infer-03.lan", node_user="shag")
 
     assert address is None
 
@@ -130,7 +130,7 @@ def test_discover_link_local_fabric_host_ignores_non_thunderbolt_remote_interfac
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    address = discover_link_local_fabric_host(management_host="msm3-wifi.lan", node_user="shag")
+    address = discover_link_local_fabric_host(management_host="infer-03.lan", node_user="shag")
 
     assert address is None
 
@@ -143,7 +143,7 @@ def test_build_transport_plan_prefers_discovered_fabric_when_enabled(monkeypatch
 
     plan = build_transport_plan(
         requested_transport="auto",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
         fabric_host=True,
     )
@@ -162,7 +162,7 @@ def test_build_transport_plan_discovers_link_local_fabric_when_enabled(monkeypat
 
     plan = build_transport_plan(
         requested_transport="auto",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
         fabric_host=True,
     )
@@ -180,14 +180,14 @@ def test_build_transport_plan_uses_management_when_fabric_probe_disabled(monkeyp
 
     plan = build_transport_plan(
         requested_transport="auto",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
     )
 
     assert plan.ok is True
     assert plan.uses_fabric is False
-    assert plan.transport_host == "msm3-wifi.lan"
-    assert plan.resolved_transport_host == "msm3-wifi.lan"
+    assert plan.transport_host == "infer-03.lan"
+    assert plan.resolved_transport_host == "infer-03.lan"
     assert plan.fabric_fallback == ""
 
 
@@ -199,15 +199,15 @@ def test_build_transport_plan_falls_back_to_management_when_auto_fabric_unreacha
 
     plan = build_transport_plan(
         requested_transport="auto",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
         fabric_host=True,
     )
 
     assert plan.ok is True
     assert plan.uses_fabric is False
-    assert plan.transport_host == "msm3-wifi.lan"
-    assert plan.resolved_transport_host == "msm3-wifi.lan"
+    assert plan.transport_host == "infer-03.lan"
+    assert plan.resolved_transport_host == "infer-03.lan"
     assert plan.fabric_fallback == "dynamic probe unresolved"
 
 
@@ -219,14 +219,14 @@ def test_build_transport_plan_falls_back_to_management_when_dynamic_probe_unreso
 
     plan = build_transport_plan(
         requested_transport="auto",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
         fabric_host=True,
     )
 
     assert plan.ok is True
     assert plan.uses_fabric is False
-    assert plan.transport_host == "msm3-wifi.lan"
+    assert plan.transport_host == "infer-03.lan"
     assert plan.fabric_fallback == "dynamic probe unresolved"
 
 
@@ -238,7 +238,7 @@ def test_build_transport_plan_forced_fabric_fails_when_dynamic_probe_unresolved(
 
     plan = build_transport_plan(
         requested_transport="fabric",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
         fabric_host=True,
     )
@@ -250,7 +250,7 @@ def test_build_transport_plan_forced_fabric_fails_when_dynamic_probe_unresolved(
 def test_build_transport_plan_forced_fabric_fails_when_probe_disabled() -> None:
     plan = build_transport_plan(
         requested_transport="fabric",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
     )
 
@@ -261,7 +261,7 @@ def test_build_transport_plan_forced_fabric_fails_when_probe_disabled() -> None:
 def test_build_transport_plan_rejects_invalid_transport() -> None:
     plan = build_transport_plan(
         requested_transport="warp",
-        management_host="msm3-wifi.lan",
+        management_host="infer-03.lan",
         node_user="shag",
     )
 

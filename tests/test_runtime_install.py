@@ -26,7 +26,7 @@ def _make_runtime_node(home_dir="/Users/shag", port=8018, model_dir=None):
 
     runtime = NodeRuntime(type=RuntimeType.OMLX, port=port, model_dir=model_dir)
     return Node(
-        host="msm3-wifi.lan",
+        host="infer-03.lan",
         fabric_host=False,
         ram_gb=128,
         user="shag",
@@ -82,7 +82,7 @@ def test_generate_launchd_plist_system_daemon_runs_as_node_user() -> None:
 
 def test_generate_launchd_plist_errors_without_runtime() -> None:
     node = Node(
-        host="msm3-wifi.lan",
+        host="infer-03.lan",
         fabric_host=False,
         ram_gb=128,
         user="shag",
@@ -100,7 +100,7 @@ def test_generate_launchd_plist_errors_without_runtime() -> None:
 
 def test_omlx_install_result_dry_run_describes_commands() -> None:
     result = OmlxInstallResult(
-        node="msm3",
+        node="infer-03",
         plist_path="~/Library/LaunchAgents/com.thunder-forge.omlx-8018.plist",
         label="com.thunder-forge.omlx-8018",
         commands=[
@@ -116,7 +116,7 @@ def test_omlx_install_result_dry_run_describes_commands() -> None:
 
 def test_omlx_install_result_apply_records_success() -> None:
     result = OmlxInstallResult(
-        node="msm3",
+        node="infer-03",
         plist_path="~/Library/LaunchAgents/com.thunder-forge.omlx-8018.plist",
         label="com.thunder-forge.omlx-8018",
         commands=[],
@@ -237,7 +237,7 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
     result = ensure_omlx_tooling(node, apply=True, timeout=120)
 
     assert result.ok
-    assert calls == [("shag", "msm3-wifi.lan", result.command, True)]
+    assert calls == [("shag", "infer-03.lan", result.command, True)]
     assert "NODE_HOME=/Users/shag" in result.command
 
 

@@ -1061,8 +1061,7 @@ def run_omlx_daemon_setup(
         err = (copy_res.stderr or "").strip()
         if "Permission denied" in err or "publickey" in err or "authentication" in err.lower():
             hint = (
-                f"SSH key auth failed for {result.ssh_user}@{node.host}. "
-                f"Run: ssh-copy-id {result.ssh_user}@{node.host}"
+                f"SSH key auth failed for {result.ssh_user}@{node.host}. Run: ssh-copy-id {result.ssh_user}@{node.host}"
             )
             result.errors.append(hint)
         else:

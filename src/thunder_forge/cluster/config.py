@@ -83,30 +83,30 @@ class ModelSource:
 
 @dataclass
 class ModelInfo:
-    base_model: str = ""                                # maps custom names to known models for token counting
-    mode: str = ""                                      # chat, completion, embedding, image_generation
-    input_cost_per_token: float | None = None           # cost tracking / budget enforcement
-    output_cost_per_token: float | None = None          # cost tracking / budget enforcement
-    supports_vision: bool | None = None                 # multimodal routing
-    supports_function_calling: bool | None = None       # tool use routing
+    base_model: str = ""  # maps custom names to known models for token counting
+    mode: str = ""  # chat, completion, embedding, image_generation
+    input_cost_per_token: float | None = None  # cost tracking / budget enforcement
+    output_cost_per_token: float | None = None  # cost tracking / budget enforcement
+    supports_vision: bool | None = None  # multimodal routing
+    supports_function_calling: bool | None = None  # tool use routing
     supports_parallel_function_calling: bool | None = None  # parallel tool calls
-    supports_response_schema: bool | None = None        # structured output support
+    supports_response_schema: bool | None = None  # structured output support
 
 
 @dataclass
 class ServerArgs:
-    decode_concurrency: int | None = None    # --decode-concurrency (mlx default: 32)
-    prompt_concurrency: int | None = None    # --prompt-concurrency (mlx default: 8)
-    prefill_step_size: int | None = None     # --prefill-step-size (mlx default: 2048)
-    prompt_cache_size: int | None = None     # --prompt-cache-size
-    prompt_cache_bytes: int | None = None    # --prompt-cache-bytes
-    max_tokens: int | None = None            # --max-tokens (mlx default: 512)
-    temp: float | None = None               # --temp (mlx default: 0.0)
-    top_p: float | None = None              # --top-p (mlx default: 1.0)
-    top_k: int | None = None               # --top-k (mlx default: 0)
-    min_p: float | None = None             # --min-p (mlx default: 0.0)
-    draft_model: str | None = None          # --draft-model
-    num_draft_tokens: int | None = None     # --num-draft-tokens (mlx default: 3)
+    decode_concurrency: int | None = None  # --decode-concurrency (mlx default: 32)
+    prompt_concurrency: int | None = None  # --prompt-concurrency (mlx default: 8)
+    prefill_step_size: int | None = None  # --prefill-step-size (mlx default: 2048)
+    prompt_cache_size: int | None = None  # --prompt-cache-size
+    prompt_cache_bytes: int | None = None  # --prompt-cache-bytes
+    max_tokens: int | None = None  # --max-tokens (mlx default: 512)
+    temp: float | None = None  # --temp (mlx default: 0.0)
+    top_p: float | None = None  # --top-p (mlx default: 1.0)
+    top_k: int | None = None  # --top-k (mlx default: 0)
+    min_p: float | None = None  # --min-p (mlx default: 0.0)
+    draft_model: str | None = None  # --draft-model
+    num_draft_tokens: int | None = None  # --num-draft-tokens (mlx default: 3)
 
 
 @dataclass
@@ -243,6 +243,7 @@ class Node:
 
     def has_role(self, role: NodeRole | str) -> bool:
         return role in self.roles
+
 
 @dataclass
 class ClusterConfig:

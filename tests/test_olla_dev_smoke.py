@@ -19,17 +19,17 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
     config_dir.mkdir()
     (repo / "tfconfig.yaml").write_text(
         "models:\n"
-        "  qwen3-1.7b-omlx-msm3-test:\n"
+        "  qwen3-1.7b-omlx-infer-03-test:\n"
         "    source: { repo: mlx-community/Qwen3-1.7B-4bit }\n"
         "    runtime_model_id: Qwen3-1.7B-4bit\n"
         "nodes:\n"
-        "  studio:\n"
-        "    host: studio.lan\n"
+        "  gateway-cache-01:\n"
+        "    host: gateway-cache-01.lan\n"
         "    ram_gb: 64\n"
         "    user: shag\n"
         "    roles: [gateway]\n"
-        "  msm3:\n"
-        "    host: msm3-wifi.lan\n"
+        "  infer-03:\n"
+        "    host: infer-03.lan\n"
         "    ram_gb: 128\n"
         "    user: shag\n"
         "    roles: [inference]\n"
@@ -37,7 +37,7 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
         "      type: omlx\n"
         "      port: 8018\n"
         "    models:\n"
-        "      - qwen3-1.7b-omlx-msm3-test\n"
+        "      - qwen3-1.7b-omlx-infer-03-test\n"
     )
 
     import thunder_forge.cluster.config as config_module
@@ -87,7 +87,7 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
     fake_smoke = OllaSmokeResult(
         base_url="http://127.0.0.1:40115",
         model="Qwen3-1.7B-4bit",
-        alias="qwen3-1.7b-omlx-msm3-test",
+        alias="qwen3-1.7b-omlx-infer-03-test",
         health_ok=True,
         endpoints_ok=True,
         models_ok=True,
@@ -96,14 +96,14 @@ def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monke
         session_ok=True,
         root_v1_absent=True,
         latency_ms=245,
-        olla_endpoint="msm3-omlx-live",
+        olla_endpoint="infer-03-omlx-live",
     )
     monkeypatch.setattr(olla_module, "smoke_olla_router", lambda **kw: fake_smoke)
 
     result = dev_smoke_olla(
         binary="/tmp/tf-gateway-close-look/olla-bin/olla",
         model="Qwen3-1.7B-4bit",
-        alias="qwen3-1.7b-omlx-msm3-test",
+        alias="qwen3-1.7b-omlx-infer-03-test",
     )
 
     # Config generated
@@ -141,7 +141,7 @@ def test_dev_smoke_olla_reports_failure_when_config_generation_fails(tmp_path: P
     result = dev_smoke_olla(
         binary="/tmp/tf-gateway-close-look/olla-bin/olla",
         model="Qwen3-1.7B-4bit",
-        alias="qwen3-1.7b-omlx-msm3-test",
+        alias="qwen3-1.7b-omlx-infer-03-test",
     )
 
     assert result.config_generated is False

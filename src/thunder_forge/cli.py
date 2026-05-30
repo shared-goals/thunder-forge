@@ -1,5 +1,6 @@
 """Thunder Forge CLI — cluster management commands."""
 
+import json
 import os
 from pathlib import Path
 from typing import cast
@@ -11,15 +12,16 @@ from thunder_forge.cluster.artifacts import (
     build_artifact_download_plan,
     build_artifact_readiness_plan,
     build_artifact_sync_plan,
+    cache_omlx_models_dir_from_env,
     probe_artifact_presence,
     run_artifact_download,
     run_artifact_sync,
-    studio_omlx_models_dir_from_env,
 )
 from thunder_forge.cluster.bootstrap import ensure_cache_hub_dir, ensure_olla_binary, write_generated_olla_config
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime
 from thunder_forge.cluster.edge import (
     EDGE_USER_PREFIX,
+    EdgeModelCatalogEntry,
     EdgeProxyConfig,
     build_edge_clients_from_env,
     edge_api_key_from_env,
@@ -69,6 +71,7 @@ app.add_typer(olla_app, name="olla")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
 app.add_typer(cluster_app, name="cluster")
+
 
 def _load_config() -> tuple[ClusterConfig, Path]:
     """Load the TF cluster config. Returns (ClusterConfig, repo_root Path)."""
@@ -147,6 +150,137 @@ def _format_bytes(size_bytes: int) -> str:
 
 def _runtime(runtime_node: Node) -> NodeRuntime:
     return cast(NodeRuntime, runtime_node.runtime)
+
+
+def _edge_model_catalog_from_config(config: ClusterConfig) -> list[EdgeModelCatalogEntry]:
+    assigned_aliases: set[str] = set()
+    for node in config.nodes.values():
+        if not node.models or not node.has_role(NodeRole.INFERENCE) or node.runtime is None:
+            continue
+        assigned_aliases.update(model_id for model_id in node.models if model_id in config.models)
+
+    catalog: list[EdgeModelCatalogEntry] = []
+    for model_id in assigned_aliases:
+        model = config.models[model_id]
+        base_model = model.model_info.base_model if model.model_info is not None else ""
+        real_llm_id = base_model or model.source.repo or model.runtime_model_id
+        description_parts = [real_llm_id] if real_llm_id else []
+        if model.runtime_model_id and model.runtime_model_id != real_llm_id:
+            description_parts.append(f"runtime: {model.runtime_model_id}")
+        if model.notes:
+            description_parts.append(model.notes)
+        catalog.append(
+            EdgeModelCatalogEntry(
+                id=model_id,
+                name=model_id,
+                description="; ".join(description_parts),
+                runtime_model_id=model.runtime_model_id,
+                source_repo=model.source.repo,
+                base_model=base_model,
+                context_length=model.max_context,
+                benchmark_only=model.benchmark_only,
+            )
+        )
+    return catalog
+
+
+def _edge_base_url_from_config(config: ClusterConfig) -> str:
+    try:
+        host = config.gateway.host
+    except ValueError:
+        host = "127.0.0.1"
+    return f"http://{host}:{config.services.edge_port}/v1"
+
+
+def _opencode_config_from_catalog(
+    *,
+    model_catalog: list[EdgeModelCatalogEntry],
+    provider_id: str,
+    provider_name: str,
+    base_url: str,
+    api_key_env: str,
+    model: str | None = None,
+    small_model: str | None = None,
+) -> dict[str, object]:
+    models: dict[str, dict[str, object]] = {}
+    for entry in sorted(model_catalog, key=lambda item: item.id):
+        model_config: dict[str, object] = {
+            "name": entry.name,
+        }
+        if entry.benchmark_only:
+            model_config["status"] = "beta"
+        models[entry.id] = model_config
+
+    provider: dict[str, object] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": provider_name,
+        "options": {
+            "baseURL": base_url,
+            "apiKey": f"{{env:{api_key_env}}}",
+        },
+        "models": models,
+    }
+
+    payload: dict[str, object] = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {provider_id: provider},
+    }
+    if model:
+        payload["model"] = f"{provider_id}/{model}"
+    if small_model:
+        payload["small_model"] = f"{provider_id}/{small_model}"
+    return payload
+
+
+def _opencode_model_comment(entry: EdgeModelCatalogEntry) -> str:
+    return entry.base_model or entry.source_repo or entry.runtime_model_id
+
+
+def _opencode_config_jsonc_from_catalog(
+    *,
+    model_catalog: list[EdgeModelCatalogEntry],
+    provider_id: str,
+    provider_name: str,
+    base_url: str,
+    api_key_env: str,
+    model: str | None = None,
+    small_model: str | None = None,
+) -> str:
+    model_blocks: list[str] = []
+    for entry in sorted(model_catalog, key=lambda item: item.id):
+        model_config: dict[str, object] = {"name": entry.name}
+        if entry.benchmark_only:
+            model_config["status"] = "beta"
+        model_config_text = json.dumps(model_config, indent=2, ensure_ascii=False).replace("\n", "\n        ")
+        comment = _opencode_model_comment(entry)
+        comment_line = f"        // {comment}\n" if comment else ""
+        model_blocks.append(f"{comment_line}        {json.dumps(entry.id)}: {model_config_text}")
+
+    properties = [f'  "$schema": {json.dumps("https://opencode.ai/config.json")}']
+    if model:
+        properties.append(f'  "model": {json.dumps(f"{provider_id}/{model}")}')
+    if small_model:
+        properties.append(f'  "small_model": {json.dumps(f"{provider_id}/{small_model}")}')
+    properties.append(
+        "\n".join(
+            [
+                '  "provider": {',
+                f"    {json.dumps(provider_id)}: {{",
+                '      "npm": "@ai-sdk/openai-compatible",',
+                f'      "name": {json.dumps(provider_name)},',
+                '      "options": {',
+                f'        "baseURL": {json.dumps(base_url)},',
+                f'        "apiKey": {json.dumps(f"{{env:{api_key_env}}}")}',
+                "      },",
+                '      "models": {',
+                ",\n".join(model_blocks),
+                "      }",
+                "    }",
+                "  }",
+            ]
+        )
+    )
+    return "{\n" + ",\n".join(properties) + "\n}\n"
 
 
 def _gateway_restart_notice(config: ClusterConfig) -> str:
@@ -400,7 +534,7 @@ def cluster_prepare(
             typer.echo(f"would: ensure Olla {resolved_olla_version} at {preview_olla_path}")
             typer.echo("would: generate configs/olla-config.yaml")
         if cache_names:
-            typer.echo(f"would: ensure cache hub {studio_omlx_models_dir_from_env()}")
+            typer.echo(f"would: ensure cache hub {cache_omlx_models_dir_from_env()}")
         for name in inference_names:
             node = config.nodes[name]
             resolved_admin_user = admin_user or node.admin_user
@@ -1152,9 +1286,7 @@ def olla_smoke(
 ) -> None:
     """Run a black-box smoke test against a running Olla router."""
     config, _ = _load_config()
-    resolved_base_url = base_url or local_base_url(
-        resolve_port(None, default=config.services.olla_port)
-    )
+    resolved_base_url = base_url or local_base_url(resolve_port(None, default=config.services.olla_port))
     result = smoke_olla_router(
         base_url=resolved_base_url,
         model=model,
@@ -1293,6 +1425,7 @@ def edge_serve(
         olla_base_url=resolved_olla_base_url,
         clients_by_key=clients_by_key,
         access_log_sink=log_sink,
+        model_catalog=_edge_model_catalog_from_config(config),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
@@ -1302,37 +1435,103 @@ def edge_serve(
     serve_edge_proxy(host=host, port=resolved_port, config=config)
 
 
+@edge_app.command("opencode-config")
+def edge_opencode_config(
+    base_url: str | None = typer.Option(
+        None,
+        "--base-url",
+        help="TF edge OpenAI-compatible base URL. Defaults to http://<gateway-host>:<edge-port>/v1.",
+    ),
+    provider_id: str = typer.Option("thunder-forge", "--provider-id", help="OpenCode provider id."),
+    provider_name: str = typer.Option("Thunder Forge", "--provider-name", help="OpenCode provider display name."),
+    api_key_env: str = typer.Option(
+        "TF_USER_OPENCODE", "--api-key-env", help="Env var used by OpenCode for the TF edge API key."
+    ),
+    model: str | None = typer.Option(None, "--model", help="Optional default TF alias for top-level OpenCode model."),
+    small_model: str | None = typer.Option(
+        None,
+        "--small-model",
+        help="Optional default TF alias for top-level OpenCode small_model.",
+    ),
+    output_format: str = typer.Option("jsonc", "--format", help="Output format: jsonc or json."),
+) -> None:
+    """Print an OpenCode config generated from assigned TF model aliases."""
+    config, _ = _load_config()
+    model_catalog = _edge_model_catalog_from_config(config)
+    if not model_catalog:
+        typer.echo("Error: no TF model aliases are assigned to inference nodes", err=True)
+        raise typer.Exit(1)
+
+    model_ids = {entry.id for entry in model_catalog}
+    for option_name, option_value in (("--model", model), ("--small-model", small_model)):
+        if option_value is not None and option_value not in model_ids:
+            typer.echo(f"Error: {option_name} alias '{option_value}' is not assigned to an inference node", err=True)
+            raise typer.Exit(1)
+
+    resolved_base_url = base_url or _edge_base_url_from_config(config)
+    normalized_format = output_format.strip().lower()
+    if normalized_format == "jsonc":
+        typer.echo(
+            _opencode_config_jsonc_from_catalog(
+                model_catalog=model_catalog,
+                provider_id=provider_id,
+                provider_name=provider_name,
+                base_url=resolved_base_url,
+                api_key_env=api_key_env,
+                model=model,
+                small_model=small_model,
+            ),
+            nl=False,
+        )
+        return
+    if normalized_format == "json":
+        payload = _opencode_config_from_catalog(
+            model_catalog=model_catalog,
+            provider_id=provider_id,
+            provider_name=provider_name,
+            base_url=resolved_base_url,
+            api_key_env=api_key_env,
+            model=model,
+            small_model=small_model,
+        )
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    typer.echo("Error: --format must be jsonc or json", err=True)
+    raise typer.Exit(1)
+
+
 @artifact_app.command("status")
 def artifact_status(
     model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
-    node: str = typer.Option(..., "--node", help="Node name to check artifact readiness for (e.g. msm3)."),
+    node: str = typer.Option(..., "--node", help="Node name to check artifact readiness for (e.g. infer-01)."),
 ) -> None:
     """Inspect oMLX model-directory readiness without downloading or syncing."""
     config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
-    studio_omlx_models_dir = studio_omlx_models_dir_from_env()
+    cache_omlx_models_dir = cache_omlx_models_dir_from_env()
     presence = probe_artifact_presence(
         repo_id=model,
         node_host=runtime_node.host,
         node_home_dir=node_home_dir,
-        studio_omlx_models_dir=studio_omlx_models_dir,
+        cache_omlx_models_dir=cache_omlx_models_dir,
     )
     plan = build_artifact_readiness_plan(
         repo_id=model,
         node=node,
         node_home_dir=node_home_dir,
         presence=presence,
-        studio_omlx_models_dir=studio_omlx_models_dir,
+        cache_omlx_models_dir=cache_omlx_models_dir,
     )
 
     typer.echo(f"model: {model}")
     typer.echo(f"model_dir_name: {plan.model_dir_name}")
     typer.echo(f"runtime_model_id: {plan.runtime_model_id}")
     _print_runtime_node_header(node, runtime_node)
-    typer.echo(f"studio_omlx_model_dir_path: {plan.studio_omlx_model_dir}")
+    typer.echo(f"cache_omlx_model_dir_path: {plan.cache_omlx_model_dir}")
     typer.echo(f"node_omlx_model_dir_path: {plan.node_omlx_model_dir}")
-    typer.echo(f"studio_omlx_model_dir: {'ready' if presence.studio_omlx_model_dir else 'missing_or_incomplete'}")
+    typer.echo(f"cache_omlx_model_dir: {'ready' if presence.cache_omlx_model_dir else 'missing_or_incomplete'}")
     typer.echo(f"node_omlx_model_dir: {'ready' if presence.node_omlx_model_dir else 'missing_or_incomplete'}")
     typer.echo(f"ready: {'yes' if plan.ready else 'no'}")
     if plan.actions:
@@ -1351,18 +1550,18 @@ def artifact_download(
     ),
     timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for model download when applying."),
 ) -> None:
-    """Download a model directly into studio's oMLX model directory."""
+    """Download a model directly into cache role's oMLX model directory."""
     _load_repo_dotenv()
     plan = build_artifact_download_plan(
         repo_id=model,
-        studio_omlx_models_dir=studio_omlx_models_dir_from_env(),
+        cache_omlx_models_dir=cache_omlx_models_dir_from_env(),
     )
 
     typer.echo(f"model: {model}")
     typer.echo(f"model_dir_name: {plan.model_dir_name}")
     typer.echo(f"runtime_model_id: {plan.runtime_model_id}")
     typer.echo(f"destination: {plan.destination}")
-    typer.echo("action: download_to_studio_omlx")
+    typer.echo("action: download_to_cache_omlx")
     typer.echo(f"command: {plan.command}")
 
     if dry_run:
@@ -1415,7 +1614,7 @@ def _run_artifact_sync_workflow(
 ) -> None:
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
-    studio_omlx_models_dir = studio_omlx_models_dir_from_env()
+    cache_omlx_models_dir = cache_omlx_models_dir_from_env()
     repo_ids = [model] if model else []
     if not repo_ids:
         if not runtime_node.models:
@@ -1456,21 +1655,21 @@ def _run_artifact_sync_workflow(
             repo_id=repo_id,
             node_host=runtime_node.host,
             node_home_dir=node_home_dir,
-            studio_omlx_models_dir=studio_omlx_models_dir,
+            cache_omlx_models_dir=cache_omlx_models_dir,
         )
         readiness_plan = build_artifact_readiness_plan(
             repo_id=repo_id,
             node=node,
             node_home_dir=node_home_dir,
             presence=presence,
-            studio_omlx_models_dir=studio_omlx_models_dir,
+            cache_omlx_models_dir=cache_omlx_models_dir,
         )
         sync_plan = build_artifact_sync_plan(
             repo_id=repo_id,
             node_user=runtime_node.user,
             node_host=transport_plan.resolved_transport_host,
             node_home_dir=node_home_dir,
-            studio_omlx_models_dir=studio_omlx_models_dir,
+            cache_omlx_models_dir=cache_omlx_models_dir,
             ssh_host_key_alias=runtime_node.host if transport_plan.uses_fabric else None,
         )
 
@@ -1478,7 +1677,7 @@ def _run_artifact_sync_workflow(
         typer.echo(f"model_dir_name: {sync_plan.model_dir_name}")
         typer.echo(f"runtime_model_id: {sync_plan.runtime_model_id}")
         _print_runtime_node_header(node, runtime_node)
-        typer.echo("source: studio")
+        typer.echo("source: cache")
         typer.echo(f"transport_host: {transport_plan.transport_host}")
         if transport_plan.resolved_transport_host != transport_plan.transport_host:
             typer.echo(f"resolved_transport_host: {transport_plan.resolved_transport_host}")
@@ -1489,10 +1688,10 @@ def _run_artifact_sync_workflow(
         typer.echo("action: sync_to_node_omlx")
         typer.echo(f"command: {sync_plan.command}")
 
-        if ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX in readiness_plan.actions:
+        if ArtifactReadinessAction.DOWNLOAD_TO_CACHE_OMLX in readiness_plan.actions:
             typer.echo(
-                "Error: studio oMLX model directory is missing or incomplete; "
-                "download the model to studio oMLX models first",
+                "Error: cache oMLX model directory is missing or incomplete; "
+                "download the model to cache oMLX models first",
                 err=True,
             )
             raise typer.Exit(1)
@@ -1521,7 +1720,7 @@ def artifact_sync(
         "--model",
         help="Optional Hugging Face model repo id. Omit to sync every model assigned to the node.",
     ),
-    node: str = typer.Option(..., "--node", help="Node name to sync artifact to (e.g. msm3)."),
+    node: str = typer.Option(..., "--node", help="Node name to sync artifact to (e.g. infer-01)."),
     dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print sync command without executing by default."),
     transport: str | None = typer.Option(
         None,
@@ -1535,7 +1734,7 @@ def artifact_sync(
     ),
     timeout: int | None = typer.Option(None, "--timeout", help="Timeout in seconds for rsync when applying."),
 ) -> None:
-    """Sync oMLX model directories from studio to a node."""
+    """Sync oMLX model directories from cache to a node."""
     config, _ = _load_config()
     _run_artifact_sync_workflow(
         config=config,
@@ -1550,7 +1749,7 @@ def artifact_sync(
 
 @runtime_app.command("start")
 def runtime_start(
-    node: str = typer.Option(..., "--node", help="Node name to start runtime on (e.g. msm3)."),
+    node: str = typer.Option(..., "--node", help="Node name to start runtime on (e.g. infer-01)."),
     dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print command without executing by default."),
     timeout: int = typer.Option(30, "--timeout", help="Timeout in seconds for the SSH start command."),
 ) -> None:
@@ -1678,7 +1877,7 @@ def runtime_setup_daemon(
 
 @runtime_app.command("restart")
 def runtime_restart(
-    node: str = typer.Option(..., "--node", help="Node name to restart runtime on (e.g. msm3)."),
+    node: str = typer.Option(..., "--node", help="Node name to restart runtime on (e.g. infer-01)."),
     manager: str = typer.Option(
         "process",
         "--manager",
@@ -1782,7 +1981,7 @@ def runtime_restart(
 
 @runtime_app.command("status")
 def runtime_status(
-    node: str = typer.Option(..., "--node", help="Node name to check runtime status for (e.g. msm3)."),
+    node: str = typer.Option(..., "--node", help="Node name to check runtime status for (e.g. infer-01)."),
 ) -> None:
     """Probe a node-level oMLX runtime directly."""
     config, _ = _load_config()
@@ -1809,7 +2008,7 @@ def runtime_status(
 
 @runtime_app.command("smoke")
 def runtime_smoke(
-    node: str = typer.Option(..., "--node", help="Node name to smoke-test runtime for (e.g. msm3)."),
+    node: str = typer.Option(..., "--node", help="Node name to smoke-test runtime for (e.g. infer-01)."),
     model: str = typer.Option(..., "--model", help="oMLX model id to test, usually the model directory name."),
     prompt: str = typer.Option("Reply with one short word: pong.", "--prompt", help="Short smoke-test prompt."),
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
@@ -1843,7 +2042,7 @@ def runtime_smoke(
 
 @runtime_app.command("install")
 def runtime_install(
-    node: str = typer.Option(..., "--node", help="Node name to install launchd daemon for (e.g. msm3)."),
+    node: str = typer.Option(..., "--node", help="Node name to install launchd daemon for (e.g. infer-01)."),
     dry_run: bool = typer.Option(
         True,
         "--dry-run/--apply",

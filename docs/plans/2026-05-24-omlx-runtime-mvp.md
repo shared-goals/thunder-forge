@@ -2,9 +2,9 @@
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
-**Goal:** Build a dev-only Thunder Forge MVP that runs one MLX artifact through oMLX on `msm3` from oMLX's default model directory, then exposes it through a small OpenAI-compatible frontend on `studio`.
+**Goal:** Build a dev-only Thunder Forge MVP that runs one MLX artifact through oMLX on `infer-03` from oMLX's default model directory, then exposes it through a small OpenAI-compatible frontend on `gateway-cache-01`.
 
-**Architecture:** Thunder Forge remains the control plane. oMLX is modeled as a node-level daemon on `msm3`, not as one service per model. `studio` is the dev frontend/future cache hub. `msm4` remains dedicated to direct oMLX/Hindsight and `rock` production is not touched. The first operator interface is CLI with stable JSON and dry-run/apply semantics; API, MCP, web UI, PostgreSQL, and queues are deferred until the simpler shape is insufficient. Olla plus a minimal Thunder Forge edge is the MVP frontend direction.
+**Architecture:** Thunder Forge remains the control plane. oMLX is modeled as a node-level daemon on `infer-03`, not as one service per model. `gateway-cache-01` is the dev frontend/future cache hub. `infer-04` remains dedicated to direct oMLX/Hindsight and `rock` production is not touched. The first operator interface is CLI with stable JSON and dry-run/apply semantics; API, MCP, web UI, PostgreSQL, and queues are deferred until the simpler shape is insufficient. Olla plus a minimal Thunder Forge edge is the MVP frontend direction.
 
 **Tech Stack:** Python 3.12+, Typer, pytest, httpx, existing Thunder Forge SSH helpers, oMLX CLI/server, generated Olla config, minimal TF edge, optional Caddy ingress snippet.
 
@@ -12,40 +12,40 @@
 
 ## Constraints and guardrails
 
-- Work only in `/Users/shag/Work/thunder-forge` on `studio`.
+- Work only in `/Users/shag/Work/thunder-forge` on `gateway-cache-01`.
 - Do not modify production `rock` for this MVP.
-- Do not disturb `msm4`; it is the dedicated direct oMLX/Hindsight node.
+- Do not disturb `infer-04`; it is the dedicated direct oMLX/Hindsight node.
 - Use `uv run`, never raw `python` or `pytest`, inside this repo.
 - Use existing `ssh_run` / `scp_content` helpers for remote operations; do not introduce ad-hoc subprocess SSH wrappers.
 - Use `.lan` names only for normal LAN-resolved hosts.
-- Treat `msm3-wifi.lan` as stable management/bootstrap path.
+- Treat `infer-03.lan` as stable management/bootstrap path.
 - Treat future Thunderbolt/fabric paths as point-to-point, not necessarily `.lan`; do not assume any fabric hostname exists until `/etc/hosts`, mDNS, or another macOS mapping is configured.
-- Do not model Hugging Face cache layout as TF v2/oMLX product state. Download MVP model weights directly into the oMLX default model directory on `studio`, then sync that model directory to the node.
+- Do not model Hugging Face cache layout as TF v2/oMLX product state. Download MVP model weights directly into the oMLX default model directory on `gateway-cache-01`, then sync that model directory to the node.
 - Use oMLX's default download layout under `/Users/shag/.omlx/models/<owner>/<repo>`. For a Hugging Face repo id like `mlx-community/Qwen3.6-35B-A3B-4bit`, the default local directory is `/Users/shag/.omlx/models/mlx-community/Qwen3.6-35B-A3B-4bit`, and oMLX exposes `Qwen3.6-35B-A3B-4bit` as the runtime model id.
-- Prefer dev port `8018` on `msm3` until stale `admin`-owned MLX processes are fully removed.
+- Prefer dev port `8018` on `infer-03` until stale `admin`-owned MLX processes are fully removed.
 - Do not touch Hindsight production traffic during this MVP.
 - Keep public docs framed around operator expectations and system behavior, not personal user stories.
 - Treat the FastAPI/PostgreSQL/React/jobs design sketch as a useful backlog, not as MVP scope.
 
-## Task 1: Record the dev topology, operator expectations, and msm3/msm4 split in docs
+## Task 1: Record the dev topology, operator expectations, and infer-03/infer-04 split in docs
 
 **Objective:** Keep PRD/ADR aligned with the agreed split and public-doc language before code changes.
 
 **Files:**
 - Modify: `docs/prd/2026-05-24-omlx-runtime-mvp.md`
 - Modify: `docs/adr/0001-omlx-node-runtime.md`
-- Create/modify: `docs/notes/2026-05-25-msm3-dev-node-inspection.md`
+- Create/modify: `docs/notes/2026-05-25-infer-03-dev-node-inspection.md`
 
 **Steps:**
-1. Ensure the PRD says the first TF v2 dev use case runs a model prepared under oMLX's default model directory on `msm3`.
+1. Ensure the PRD says the first TF v2 dev use case runs a model prepared under oMLX's default model directory on `infer-03`.
 2. Ensure the PRD describes operator expectations rather than a personal named-user story.
 3. Ensure the PRD captures the final expectation: Thunder Forge as compute resource for Shared Goals platform, `whattodo`, and `text-forge`, with Daily Compass / operations summaries.
-4. Ensure the ADR says oMLX is node-level runtime and `msm4` is excluded from dev experiments while dedicated to Hindsight.
-5. Verify docs mention `msm3-wifi.lan` as stable LAN management and fabric aliasing as an unresolved point-to-point setup, not necessarily `.lan`.
-6. Record `msm3` live facts: `uv`, oMLX metadata, cache candidates, stale admin-process caveat.
+4. Ensure the ADR says oMLX is node-level runtime and `infer-04` is excluded from dev experiments while dedicated to Hindsight.
+5. Verify docs mention `infer-03.lan` as stable LAN management and fabric aliasing as an unresolved point-to-point setup, not necessarily `.lan`.
+6. Record `infer-03` live facts: `uv`, oMLX metadata, cache candidates, stale admin-process caveat.
 7. Run:
    ```bash
-   git diff -- docs/prd/2026-05-24-omlx-runtime-mvp.md docs/adr/0001-omlx-node-runtime.md docs/notes/2026-05-25-msm3-dev-node-inspection.md
+   git diff -- docs/prd/2026-05-24-omlx-runtime-mvp.md docs/adr/0001-omlx-node-runtime.md docs/notes/2026-05-25-infer-03-dev-node-inspection.md
    ```
 
 **Expected:** Diff shows doc-only updates and no production `rock` changes.
@@ -86,8 +86,8 @@ Add tests for parsing a node like:
 
 ```yaml
 nodes:
-  msm3:
-    host: msm3-wifi.lan
+  infer-03:
+    host: infer-03.lan
     fabric_host: true
     runtime:
       type: omlx
@@ -97,7 +97,7 @@ nodes:
 Assertions:
 
 ```python
-assert node.host == "msm3-wifi.lan"
+assert node.host == "infer-03.lan"
 assert node.fabric_host is True
 assert node.runtime.type == "omlx"
 assert node.runtime.port == 8018
@@ -174,7 +174,7 @@ Expected: PASS.
 
 ## Task 5: Add `runtime status` CLI for oMLX nodes
 
-**Objective:** Let Shag inspect `msm3` oMLX readiness from the dev repo.
+**Objective:** Let Shag inspect `infer-03` oMLX readiness from the dev repo.
 
 **Files:**
 - Modify: `src/thunder_forge/cli.py`
@@ -185,17 +185,17 @@ Expected: PASS.
 Test command shape only, with mocked oMLX client:
 
 ```bash
-uv run thunder-forge runtime status --node msm3
+uv run thunder-forge runtime status --node infer-03
 ```
 
 Expected output includes:
 
 ```text
-node: msm3
+node: infer-03
 runtime: omlx
-management_host: msm3-wifi.lan
+management_host: infer-03.lan
 fabric_host: true
-base_url: http://msm3-wifi.lan:8018
+base_url: http://infer-03.lan:8018
 health: ok
 ```
 
@@ -219,9 +219,9 @@ uv run pytest tests/test_cli_runtime.py -q
 
 Expected: PASS.
 
-## Task 6: Add oMLX model-directory readiness command for `msm3`
+## Task 6: Add oMLX model-directory readiness command for `infer-03`
 
-**Objective:** Report whether the selected model exists in the oMLX default model directory on `studio` and on `msm3`, without representing Hugging Face cache layout as product state.
+**Objective:** Report whether the selected model exists in the oMLX default model directory on `gateway-cache-01` and on `infer-03`, without representing Hugging Face cache layout as product state.
 
 **Files:**
 - Create or modify: `src/thunder_forge/cluster/models.py`
@@ -231,18 +231,18 @@ Expected: PASS.
 **Command shape:**
 
 ```bash
-uv run thunder-forge artifact status --node msm3 --model mlx-community/Qwen3.6-35B-A3B-4bit
+uv run thunder-forge artifact status --node infer-03 --model mlx-community/Qwen3.6-35B-A3B-4bit
 ```
 
 **Step 1: Write failing tests**
 
 Mock local/SSH existence checks. Assert the command reports:
 
-- studio oMLX model directory path;
+- cache oMLX model directory path;
 - node oMLX model directory path;
-- whether the model directory is present on `studio`;
-- whether the model directory is present on `msm3`;
-- recommended next action: `download_to_studio_omlx`, `sync_to_node_omlx`, or ready.
+- whether the model directory is present on the cache host;
+- whether the model directory is present on the inference node;
+- recommended next action: `download_to_cache_omlx`, `sync_to_node_omlx`, or ready.
 
 **Step 2: Implement inspect-only logic**
 
@@ -256,9 +256,9 @@ uv run pytest tests/test_models.py -q
 
 Expected: PASS.
 
-## Task 7: Add direct-to-studio oMLX model download dry-run/apply
+## Task 7: Add direct-to-cache oMLX model download dry-run/apply
 
-**Objective:** Download the selected Hugging Face model directly into studio's oMLX default model directory without using Hugging Face cache layout as product state.
+**Objective:** Download the selected Hugging Face model directly into the cache host's oMLX default model directory without using Hugging Face cache layout as product state.
 
 **Files:**
 - Modify: `src/thunder_forge/cluster/artifacts.py`
@@ -274,16 +274,16 @@ uv run thunder-forge artifact download --model mlx-community/Qwen3-1.7B-4bit --a
 
 **Behavior:**
 
-- Destination is studio oMLX model directory (`~/.omlx/models/<model-dir>`).
+- Destination is cache oMLX model directory (`~/.omlx/models/<model-dir>`).
 - For Hugging Face repo ids, `<model-dir>` is the repo name segment (`Qwen3-1.7B-4bit`).
 - Implementation may use `uvx --from huggingface_hub hf download ... --local-dir ...`, but `.cache/huggingface` is not product state.
 - Default to dry-run; `--apply` performs the download.
 
 **Expected:** CLI prints exact download plan and tests prove the destination is `.omlx/models`, not HF cache.
 
-## Task 8: Add studio-to-node oMLX model-directory sync dry-run/apply
+## Task 8: Add cache-to-node oMLX model-directory sync dry-run/apply
 
-**Objective:** Move a studio oMLX model directory to an oMLX node without any node-to-studio backfill path and without using Hugging Face cache layout as product state.
+**Objective:** Move a cache oMLX model directory to an oMLX node without any node-to-cache backfill path and without using Hugging Face cache layout as product state.
 
 **Files:**
 - Modify: `src/thunder_forge/cluster/artifacts.py`
@@ -293,20 +293,20 @@ uv run thunder-forge artifact download --model mlx-community/Qwen3-1.7B-4bit --a
 **Command shape:**
 
 ```bash
-uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node msm3 --dry-run
-uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node msm3 --transport fabric --dry-run
+uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node infer-01 --dry-run
+uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node infer-01 --transport fabric --dry-run
 ```
 
 **Behavior:**
 
-- Source is always studio oMLX model directory (`~/.omlx/models/<model-dir>/`).
+- Source is always cache oMLX model directory (`~/.omlx/models/<model-dir>/`).
 - Destination is the selected node oMLX model directory (`<node_home>/.omlx/models/<model-dir>/`).
-- Default `auto` transport probes fabric only when `fabric_host: true`, then falls back to management (`msm3-wifi.lan`).
+- Default `auto` transport probes fabric only when `fabric_host: true`, then falls back to management (`infer-01.lan`).
 - `--transport fabric` requires `fabric_host: true` and fails if no reachable link-local fabric address is discovered.
-- If the studio oMLX model directory is missing, fail with `download_to_studio_omlx` guidance rather than importing from the node.
+- If the cache oMLX model directory is missing, fail with `download_to_cache_omlx` guidance rather than importing from the node.
 - Default to dry-run; `--apply` performs rsync.
 
-**Expected:** CLI prints exact rsync plan and tests prove studio-primary oMLX-directory direction.
+**Expected:** CLI prints exact rsync plan and tests prove cache-primary oMLX-directory direction.
 
 ## Task 10: Add direct memory/agent-like smoke test
 
@@ -320,7 +320,7 @@ uv run thunder-forge artifact sync --model mlx-community/Qwen3-1.7B-4bit --node 
 **Command shape:**
 
 ```bash
-uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
+uv run thunder-forge runtime smoke --node infer-03 --model <selected-model-id>
 ```
 
 **Smoke checks:**
@@ -340,20 +340,20 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 **Objective:** Store runtime/model evidence before any runtime promotion.
 
 **Files:**
-- Create: `docs/compatibility/omlx-msm3-dev-model.md`
+- Create: `docs/compatibility/omlx-infer-03-dev-model.md`
 - Optionally create CLI writer later, but start with doc template.
 
 **Template fields:**
 
 ```markdown
-# oMLX Compatibility: msm3 dev model
+# oMLX Compatibility: infer-03 dev model
 
 - Runtime artifact:
 - Cache path:
 - Resolved snapshot path:
 - Date:
-- Node: msm3
-- Runtime host: msm3-wifi.lan
+- Node: infer-03
+- Runtime host: infer-03.lan
 - Port: 8018
 - Model dir:
 - oMLX version:
@@ -380,7 +380,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 **Route name pattern:**
 
 ```text
-<model-short-name>-omlx-msm3-test
+<model-short-name>-omlx-infer-03-test
 ```
 
 **Guardrail:** Do not modify production Hindsight config.
@@ -392,12 +392,12 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 **Files:**
 - Create: `docs/notes/2026-05-26-frontend-balancer-alternatives.md` if missing.
 - Create/modify: `docs/notes/2026-05-26-openziti-llm-gateway-spike.md`.
-- Do not modify production `rock`, Hindsight config, or `msm4`.
+- Do not modify production `rock`, Hindsight config, or `infer-04`.
 
 **Completed evidence:**
 
-- macOS arm64 binary works on `studio`.
-- Minimal LAN config proxies `msm3` oMLX without zrok/OpenZiti features.
+- macOS arm64 binary works on `gateway-cache-01`.
+- Minimal LAN config proxies `infer-03` oMLX without zrok/OpenZiti features.
 - `/health`, authenticated `/v1/models`, authenticated non-streaming `/v1/chat/completions`, and `/metrics` were tested.
 - Virtual API keys work for authentication and per-key model allowlists.
 - Prometheus metrics expose per-key/per-model request count and duration, plus token counters for non-streaming responses.
@@ -421,7 +421,7 @@ uv run thunder-forge runtime smoke --node msm3 --model <selected-model-id>
 
 ```bash
 uv run thunder-forge gateway olla config --dry-run
-uv run thunder-forge gateway olla smoke --base-url http://127.0.0.1:40115 --model Qwen3-1.7B-4bit --alias qwen3-1.7b-omlx-msm3-test
+uv run thunder-forge gateway olla smoke --base-url http://127.0.0.1:40115 --model Qwen3-1.7B-4bit --alias qwen3-1.7b-omlx-infer-03-test
 ```
 
 **Behavior:**
@@ -444,11 +444,11 @@ uv run thunder-forge gateway olla smoke --base-url http://127.0.0.1:40115 --mode
   6. sticky session miss/hit is observable;
   7. response headers include `X-Olla-Endpoint`.
 
-**Expected:** Repeatable local Olla config and smoke without touching production `rock`, Hindsight, or `msm4`. Root `/v1/*`, static client API keys, stable session defaulting, and accounting are handled by the follow-up TF edge plan.
+**Expected:** Repeatable local Olla config and smoke without touching production `rock`, Hindsight, or `infer-04`. Root `/v1/*`, static client API keys, stable session defaulting, and accounting are handled by the follow-up TF edge plan.
 
 ## Task 15: Add launchd install command for node-level oMLX runtime
 
-**Objective:** Make `msm3` oMLX durable as one node-level daemon managed by Thunder Forge, without reverting to one plist per model/port.
+**Objective:** Make `infer-03` oMLX durable as one node-level daemon managed by Thunder Forge, without reverting to one plist per model/port.
 
 **Files:**
 - Modify: `src/thunder_forge/cluster/omlx.py`
@@ -458,8 +458,8 @@ uv run thunder-forge gateway olla smoke --base-url http://127.0.0.1:40115 --mode
 **Command shape:**
 
 ```bash
-uv run thunder-forge runtime install --node msm3 --dry-run
-uv run thunder-forge runtime install --node msm3 --apply
+uv run thunder-forge runtime install --node infer-03 --dry-run
+uv run thunder-forge runtime install --node infer-03 --apply
 ```
 
 **Behavior:**
@@ -479,9 +479,9 @@ uv run thunder-forge runtime install --node msm3 --apply
   6. `launchctl bootstrap gui/<uid> <plist>`;
   7. verify `launchctl list com.thunder-forge.omlx-8018`;
   8. run direct `runtime status`.
-- Do not touch old `admin` plists and do not touch `msm4`.
+- Do not touch old `admin` plists and do not touch `infer-04`.
 
-**Expected:** `runtime install --dry-run` prints the plist and commands; `--apply` installs a durable node-level oMLX daemon on `msm3` only.
+**Expected:** `runtime install --dry-run` prints the plist and commands; `--apply` installs a durable node-level oMLX daemon on `infer-03` only.
 
 ## Task 16: Add utilization and audit summary design
 
@@ -526,4 +526,4 @@ Expected:
 - Ruff passes.
 - Diff is reviewable.
 - No production `rock` files changed.
-- No Hindsight/`msm4` runtime changes are included.
+- No Hindsight/`infer-04` runtime changes are included.

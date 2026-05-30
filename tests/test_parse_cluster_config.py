@@ -19,8 +19,8 @@ def test_parse_cluster_config_basic():
         },
         "nodes": {
             "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "roles": ["gateway"]},
-            "msm1": {
-                "host": "msm1-wifi.lan",
+            "infer-01": {
+                "host": "infer-01.lan",
                 "ram_gb": 128,
                 "user": "admin",
                 "roles": ["inference"],
@@ -33,8 +33,8 @@ def test_parse_cluster_config_basic():
     assert config.models["coder"].source.type == "huggingface"
     assert config.models["coder"].runtime_model_id == "Qwen3-Coder-Next-4bit"
     assert config.models["coder"].disk_gb == 44.8
-    assert config.nodes["msm1"].user == "admin"
-    assert config.nodes["msm1"].models == ["coder"]
+    assert config.nodes["infer-01"].user == "admin"
+    assert config.nodes["infer-01"].models == ["coder"]
     assert config.nodes["rock"].role == "gateway"
 
 

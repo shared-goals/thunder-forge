@@ -114,7 +114,7 @@ models:
 # Model registry keys are public aliases; runtime_model_id is the oMLX model id.
 # Canonical public aliases: memory, coder, agent.
 # Use memory for the Hindsight LLM; do not add a second Hindsight memory alias.
-# Current dev mirror: msm1/msm2/msm3 expose memory, coder, and agent variants.
+# Example rollout mirror: infer-01/infer-02/infer-03 expose memory, coder, and agent variants.
 # Future production spread can narrow back to memory+coder or memory+agent after burn-in.
 # Olla LRU manages active model loading — not all models loaded simultaneously.
 # Each node has 128GB RAM. Budget memory at ~20GB runtime RAM and coder/agent
@@ -126,26 +126,26 @@ models:
 # then $USER (current OS user). Roles are "gateway", "cache", and "inference".
 # admin_user is optional and names the local/remote admin account used for sudo things.
 nodes:
-  # Production frontend; commented for the dev setup on studio.
-  # rock:
-  #   host: "rock.lan"
+  # Split gateway example; commented when using a combined gateway/cache host.
+  # gateway-01:
+  #   host: "gateway-01.lan"
   #   ram_gb: 32
   #   roles: [gateway]
-  #   admin_user: <rock-admin>
+  #   admin_user: <gateway-admin>
 
-  studio:
-    host: "studio.lan"
+  gateway-cache-01:
+    host: "gateway-cache-01.lan"
     ram_gb: 128
     roles: [gateway, cache]
     user: user1
     admin_user: admin
 
   # Current rollout state:
-  # - msm1/msm2/msm3 are TF v2 inference nodes with mirrored model sets.
-  # - msm4 is direct oMLX for Hindsight today and migrates last.
+  # - infer-01/infer-02/infer-03 are TF v2 inference nodes with mirrored model sets.
+  # - infer-04 can stay reserved for a direct oMLX workload and migrate last.
 
-  msm1:
-    host: "msm1-wifi.lan"
+  infer-01:
+    host: "infer-01.lan"
     # Boolean: probe Thunderbolt/fabric dynamically from the management host.
     fabric_host: true
     ram_gb: 128
@@ -163,8 +163,8 @@ nodes:
       - coder
       - coder-better
 
-  msm2:
-    host: "msm2-wifi.lan"
+  infer-02:
+    host: "infer-02.lan"
     # Boolean: probe Thunderbolt/fabric dynamically from the management host.
     fabric_host: true
     ram_gb: 128
@@ -182,8 +182,8 @@ nodes:
       - coder
       - coder-better
 
-  msm3:
-    host: "msm3-wifi.lan"
+  infer-03:
+    host: "infer-03.lan"
     # Boolean: probe Thunderbolt/fabric dynamically from the management host.
     fabric_host: true
     ram_gb: 128
@@ -201,8 +201,8 @@ nodes:
       - coder
       - coder-better
 
-  # msm4: enable when migrating direct Hindsight oMLX into TF v2.
-  # host: "msm4-wifi.lan"
+  # infer-04: enable when migrating a reserved direct oMLX workload into TF v2.
+  # host: "infer-04.lan"
   # ram_gb: 128
   # roles: [inference]
   # user: user1

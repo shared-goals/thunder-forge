@@ -1,10 +1,10 @@
 # Olla Router + Thunder Forge Edge MVP Plan
 
-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task. Keep each task reviewable. Do not touch production `rock` or `msm4`.
+> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task. Keep each task reviewable. Do not touch production `rock` or `infer-04`.
 
-**Goal:** Turn the Olla smoke result into a reproducible Thunder Forge MVP: generate Olla config from TF desired state, smoke Olla against `msm3` oMLX, then add the smallest TF edge needed for root OpenAI `/v1/*`, client API-key validation, stable session behavior, and structured request accounting.
+**Goal:** Turn the Olla smoke result into a reproducible Thunder Forge MVP: generate Olla config from TF desired state, smoke Olla against `infer-03` oMLX, then add the smallest TF edge needed for root OpenAI `/v1/*`, client API-key validation, stable session behavior, and structured request accounting.
 
-**Architecture:** `studio` runs Thunder Forge control plane, generated Olla router config, and optionally the TF edge service. `msm3` runs oMLX on dev port `8018`. External clients go through homelab Caddy to TF edge; internal trusted clients may call TF edge directly for MVP simplicity. Both can later route through Caddy if uniform ingress is useful.
+**Architecture:** `gateway-cache-01` runs Thunder Forge control plane, generated Olla router config, and optionally the TF edge service. `infer-03` runs oMLX on dev port `8018`. External clients go through homelab Caddy to TF edge; internal trusted clients may call TF edge directly for MVP simplicity. Both can later route through Caddy if uniform ingress is useful.
 
 **Tech Stack:** Python 3.12+, Typer, pytest, httpx, existing Thunder Forge SSH/config helpers, Olla release binary/config, optional Caddy config snippet. The custom edge may be implemented as a tiny Python ASGI/httpx streaming proxy or a small Go service; choose only after writing the edge spike acceptance tests.
 
@@ -12,11 +12,11 @@
 
 ## Constraints and guardrails
 
-- Work only in `/Users/shag/Work/thunder-forge` on `studio`.
+- Work only in `/Users/shag/Work/thunder-forge` on `gateway-cache-01`.
 - Use `uv run`, never raw `python` or `pytest`, inside this repo.
 - Do not modify production `rock`.
-- Do not disturb `msm4`; it remains dedicated to direct oMLX/Hindsight stability.
-- Use `msm3-wifi.lan` as the stable management/runtime host for this MVP.
+- Do not disturb `infer-04`; it remains dedicated to direct oMLX/Hindsight stability.
+- Use `infer-03.lan` as the stable management/runtime host for this MVP.
 - Keep generated Olla config out of source-of-truth role; Thunder Forge desired state owns node/model/router intent.
 - Do not commit API keys. Use env vars or ignored local files.
 - Keep tracing off by default.
@@ -33,7 +33,7 @@ Green:
 
 - `/internal/health`;
 - endpoint health/failover exclusion;
-- discovered model `Qwen3-1.7B-4bit` from `msm3` oMLX;
+- discovered model `Qwen3-1.7B-4bit` from `infer-03` oMLX;
 - `/olla/proxy/v1/models` and `/olla/openai-compatible/v1/models`;
 - non-streaming `/v1/chat/completions` through Olla;
 - alias rewrite;
@@ -94,11 +94,11 @@ router:
     enabled: true
     session_header: X-Olla-Session-ID
   aliases:
-    qwen3-1.7b-omlx-msm3-test: Qwen3-1.7B-4bit
+    qwen3-1.7b-omlx-infer-03-test: Qwen3-1.7B-4bit
 
 nodes:
-  msm3:
-    host: msm3-wifi.lan
+  infer-03:
+    host: infer-03.lan
     runtime:
       type: omlx
       port: 8018
@@ -141,7 +141,7 @@ uv run thunder-forge gateway olla config --output /tmp/tf-olla.yaml --apply
 
 - listen address from config, default local-only for MVP;
 - OpenAI-compatible backend profile for oMLX nodes;
-- endpoint name equals TF node id or explicit runtime endpoint id, e.g. `msm3-omlx`;
+- endpoint name equals TF node id or explicit runtime endpoint id, e.g. `infer-03-omlx`;
 - health checks with `check_timeout < check_interval` to avoid the known Olla validation error;
 - sticky sessions enabled;
 - aliases generated from TF model aliases;
@@ -166,13 +166,13 @@ uv run thunder-forge gateway olla config --output /tmp/tf-olla.yaml --apply
 uv run thunder-forge gateway olla smoke \
   --base-url http://127.0.0.1:40115 \
   --model Qwen3-1.7B-4bit \
-  --alias qwen3-1.7b-omlx-msm3-test
+  --alias qwen3-1.7b-omlx-infer-03-test
 ```
 
 **Smoke checks:**
 
 1. `GET /internal/health` returns healthy.
-2. `GET /internal/status/endpoints` includes healthy `msm3` and excludes dead endpoint from routable use.
+2. `GET /internal/status/endpoints` includes healthy `infer-03` and excludes dead endpoint from routable use.
 3. `GET /olla/openai-compatible/v1/models` includes requested backend model id.
 4. `POST /olla/openai-compatible/v1/chat/completions` succeeds non-streaming.
 5. Alias request succeeds and returns/routs to backend model.
@@ -223,7 +223,7 @@ uv run thunder-forge gateway olla smoke \
 uv run thunder-forge edge smoke \
   --base-url http://127.0.0.1:40116 \
   --client-id <client-id> \
-  --model qwen3-1.7b-omlx-msm3-test
+  --model qwen3-1.7b-omlx-infer-03-test
 ```
 
 **Smoke expectations:**
@@ -232,7 +232,7 @@ uv run thunder-forge edge smoke \
 - invalid API key -> `401`;
 - valid API key -> `/v1/models` works;
 - valid API key -> `/v1/chat/completions` works through Olla;
-- per-user MVP keys live in ignored `.env` as one `TF_USERS` JSON hash mapping client ids to API keys;
+- per-client MVP keys live in ignored `.env` lines named `TF_USER_<CLIENT>`;
 - edge rewrites `/v1/*` to Olla provider path;
 - edge supplies or passes `X-Olla-Session-ID`;
 - edge logs a structured JSON access line with:
@@ -261,7 +261,7 @@ Generate the initial local keys with `make edge-keys EDGE_CLIENTS="client-a clie
 - Never log secrets.
 - Do not implement quotas, dynamic keys, UI, DB, or admin API.
 
-**Expected:** Edge can be run locally on `studio`, front Olla on `127.0.0.1:40115`, and pass Task 6 smoke.
+**Expected:** Edge can be run locally on `gateway-cache-01`, front Olla on `127.0.0.1:40115`, and pass Task 6 smoke.
 
 ## Task 8: Add optional Caddy ingress snippet
 
@@ -326,15 +326,15 @@ Expected:
 - ruff passes;
 - diff is reviewable;
 - no production `rock` files changed;
-- no `msm4`/Hindsight runtime changes;
+- no `infer-04`/Hindsight runtime changes;
 - no API keys in docs/configs/tests.
 
 ## MVP acceptance
 
 The Olla + TF edge MVP is accepted when:
 
-1. Direct oMLX on `msm3` is healthy.
-2. Generated Olla config routes to `msm3` and passes smoke.
+1. Direct oMLX on `infer-03` is healthy.
+2. Generated Olla config routes to `infer-03` and passes smoke.
 3. TF edge exposes root `/v1/*`, validates static API keys, injects/preserves sessions, and logs request accounting.
 4. Optional Caddy route reaches TF edge for external-style traffic.
 5. The whole path is reproducible from CLI commands and documented evidence, not from hand-edited `/tmp` artifacts.

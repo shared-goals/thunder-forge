@@ -139,14 +139,13 @@ def discover_link_local_fabric_host(
         return None
 
     for address in _extract_link_local_ipv4(remote_ifconfig, allowed_interfaces=remote_thunderbolt_devices):
-        if (
-            _route_uses_allowed_interface(address, allowed_interfaces=local_thunderbolt_devices, timeout=timeout)
-            and _ssh_hostname_check(
-                address,
-                node_user=node_user,
-                host_key_alias=management_host,
-                timeout=timeout,
-            )
+        if _route_uses_allowed_interface(
+            address, allowed_interfaces=local_thunderbolt_devices, timeout=timeout
+        ) and _ssh_hostname_check(
+            address,
+            node_user=node_user,
+            host_key_alias=management_host,
+            timeout=timeout,
         ):
             return address
     return None

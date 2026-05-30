@@ -1,6 +1,6 @@
 ---
 name: thunder-forge
-description: "Use when: working on Thunder Forge v2; operating or refactoring the local oMLX/Olla inference cluster; selecting HuggingFace MLX models; evaluating memory, coder, or agent roles; checking 128 GB Mac Studio no-swap budgets; planning staged migration from TF v1 to TF v2; managing artifacts, runtime smoke tests, Olla config, or TF edge."
+description: "Use when: working on Thunder Forge v2; operating or refactoring the local oMLX/Olla inference cluster; selecting HuggingFace MLX models; evaluating memory, coder, or agent roles; checking 128 GB Apple Silicon no-swap budgets; planning staged migration from TF v1 to TF v2; managing artifacts, runtime smoke tests, Olla config, or TF edge."
 ---
 
 # Thunder Forge
@@ -21,19 +21,19 @@ Run commands from the Thunder Forge repo root.
 uv sync
 uv run thunder-forge --help
 uv run thunder-forge artifact download --model <hf-repo> --apply
-uv run thunder-forge cluster sync msm3 --apply
-uv run thunder-forge runtime status --node msm3
-uv run thunder-forge runtime restart --node msm3 --apply
-uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply
-uv run thunder-forge runtime restart --node msm3 --manager daemon --apply
-uv run thunder-forge service restart --service omlx --node msm3 --manager daemon --apply
-uv run thunder-forge runtime smoke --node msm3 --model <model>
+uv run thunder-forge cluster sync infer-01 --apply
+uv run thunder-forge runtime status --node infer-01
+uv run thunder-forge runtime restart --node infer-01 --apply
+uv run thunder-forge runtime setup-daemon --node infer-01 --admin-user <admin> --apply
+uv run thunder-forge runtime restart --node infer-01 --manager daemon --apply
+uv run thunder-forge service restart --service omlx --node infer-01 --manager daemon --apply
+uv run thunder-forge runtime smoke --node infer-01 --model <model>
 make olla-install
 make olla-restart
-make bootstrap msm3
-make restart msm3
-make smoke msm3
-make sync msm3
+make bootstrap infer-01
+make restart infer-01
+make smoke infer-01
+make sync infer-01
 uv run thunder-forge service restart --service olla --binary .tmp/olla-bin/olla --config configs/olla-config.yaml --apply
 uv run thunder-forge service restart --service edge --apply
 uv run thunder-forge olla dev-smoke --binary .tmp/olla-bin/olla --model <model> --alias <alias>
@@ -47,11 +47,11 @@ make dev-check
 
 Use implemented Thunder Forge commands or Make targets for normal production work. Avoid manual `ssh`, `rsync`, `launchctl`, or direct file moves unless the TF command does not exist yet; when that happens, document the missing target and prefer adding it.
 
-`make sync <node>` is the preferred operator wrapper for model cache sync. It syncs every model assigned to the node by default and follows `operations.sync.restart_runtime` for the post-sync oMLX restart so the freshly synced cache is visible. Use `uv run thunder-forge cluster sync <node> --model mlx-community/<repo>` for a one-repo sync or `--no-restart-runtime` for a one-off skip. After changing `tfconfig.yaml` model placement or node topology, run `make restart studio` (or full `make restart`) so Olla and TF edge reload the generated router config before `make smoke <node>`.
+`make sync <node>` is the preferred operator wrapper for model cache sync. It syncs every model assigned to the node by default and follows `operations.sync.restart_runtime` for the post-sync oMLX restart so the freshly synced cache is visible. Use `uv run thunder-forge cluster sync <node> --model mlx-community/<repo>` for a one-repo sync or `--no-restart-runtime` for a one-off skip. After changing `tfconfig.yaml` model placement or node topology, run `make restart gateway-cache-01` (or full `make restart`) so Olla and TF edge reload the generated router config before `make smoke <node>`.
 
-TF edge MVP API keys live in one ignored `.env` JSON hash named `TF_USERS`, mapping client ids to API keys. Generate local clients with `make edge-keys EDGE_CLIENTS="client-a client-b"` or `uv run thunder-forge edge keys --client <client-id>`. Do not print key values. Edge JSONL accounting records include `client_id`, model, status, latency, and Olla endpoint but no API keys; summarize with `make edge-usage` or `uv run thunder-forge edge usage`.
+TF edge API keys live in ignored `.env` lines named `TF_USER_<CLIENT>`, mapping client ids to API keys. Generate local clients with `make edge-keys EDGE_CLIENTS="client-a client-b"` or `uv run thunder-forge edge keys --client <client-id>`. Do not print key values. Edge JSONL accounting records include `client_id`, model, status, latency, and Olla endpoint but no API keys; summarize with `make edge-usage` or `uv run thunder-forge edge usage`.
 
-Keep `.env` secrets-only. Non-secret local configuration lives in root `tfconfig.yaml` (ignored), mirrored by tracked `tfconfig.example.yaml`. Generated runtime configs live under ignored `configs/`. Service defaults live under `services:`: `services.olla.port` (`40115`), `services.olla.version`, `services.olla.bin_dir`, `services.edge.port` (`40116`), `services.omlx.port` (`8018`), `services.edge.access_log` (`logs/tf-edge-access.jsonl`), and optional `services.frontend.admin_user` (`serpo` on `studio`). Operator defaults live under `operations:` for smoke and sync behavior; do not put model IDs, client IDs, transport choices, or restart policy in the Makefile. Config node roles are `gateway`, `cache`, and `inference`; use `roles: [gateway, cache]` for `studio` and `role: inference` for oMLX-serving nodes. Explicit CLI `--port` flags and explicit `nodes.<node>.runtime.port` config values win over shared defaults.
+Keep `.env` secrets-only. Non-secret local configuration lives in root `tfconfig.yaml` (ignored), mirrored by tracked `tfconfig.example.yaml`. Generated runtime configs live under ignored `configs/`. Service defaults live under `services:`: `services.olla.port` (`40115`), `services.olla.version`, `services.olla.bin_dir`, `services.edge.port` (`40116`), `services.omlx.port` (`8018`), `services.edge.access_log` (`logs/tf-edge-access.jsonl`), and optional `services.frontend.admin_user` (`gateway-admin` on `gateway-cache-01`). Operator defaults live under `operations:` for smoke and sync behavior; do not put model IDs, client IDs, transport choices, or restart policy in the Makefile. Config node roles are `gateway`, `cache`, and `inference`; use `roles: [gateway, cache]` for `gateway-cache-01` and `role: inference` for oMLX-serving nodes. Explicit CLI `--port` flags and explicit `nodes.<node>.runtime.port` config values win over shared defaults.
 
 Runtime restart managers:
 
@@ -71,30 +71,29 @@ Thunder Forge v2 has three operational roles.
 - `cache/download`: artifact preparation under `~/.omlx/models/<owner>/<repo>` plus sync to inference nodes; this can be a script/CLI workflow, not a daemon.
 - `inference node`: oMLX node-level daemon serving the local model set.
 
-Current dev role placement:
+Example compact role placement:
 
-- `studio` (macOS): `frontend` and `cache/download`.
-- `msm1`-`msm4` (macOS): inference nodes, with `msm3` as current TF v2 dev node.
-- `rock`: production infra; do not touch for TF v2 dev.
+- `gateway-cache-01`: `frontend` and `cache/download`.
+- `infer-01`-`infer-04`: inference nodes, with `infer-03` as the first TF v2 proof node.
 
-Intended production split:
+Example split production placement:
 
-- `rock` (Armbian): `frontend`.
-- `studio` (macOS): `cache/download`, using oMLX/HF tooling and syncing through Thunderbolt fabric when available, Wi-Fi fallback otherwise.
-- `msm1`-`msm4` (macOS): inference nodes.
+- `gateway-01`: `frontend`.
+- `cache-01`: `cache/download`, using oMLX/HF tooling and syncing through Thunderbolt fabric when available, Wi-Fi fallback otherwise.
+- `infer-01`-`infer-04`: inference nodes.
 
 Thunder Forge v2 migration is staged.
 
-- `msm1`: current TF v1 production node.
-- `msm2`: current TF v1 production node.
-- `msm3`: dedicated TF v2 dev node.
-- `msm4`: direct oMLX node for Hindsight today.
+- `infer-01`: existing production inference node.
+- `infer-02`: existing production inference node.
+- `infer-03`: dedicated TF v2 proof node.
+- `infer-04`: reserved direct oMLX node until migration.
 
-Production migration order after `msm3` tests and real use cases are stable:
+Production migration order after `infer-03` tests and real use cases are stable:
 
-1. Move `msm1` into TF v2 and validate.
-2. Move `msm2` into TF v2 and validate.
-3. Move `msm4` from direct Hindsight oMLX into TF v2 and validate.
+1. Move `infer-01` into TF v2 and validate.
+2. Move `infer-02` into TF v2 and validate.
+3. Move `infer-04` from direct oMLX into TF v2 and validate.
 
 Validate each node before moving to the next one: artifact status/download/sync, runtime install/start/status/smoke, Olla config generation, Olla smoke, and TF edge smoke.
 
@@ -110,14 +109,14 @@ Temporary benchmark aliases such as `memory-bf16` may exist in `models` and `nod
 
 ## Target Role Spread
 
-All MSM nodes are 128 GB Mac Studio nodes. The role budget numbers are required runtime RAM on the node, not model names.
+All example inference nodes are 128 GB Apple Silicon nodes. The role budget numbers are required runtime RAM on the node, not model names.
 
 | Node | Roles | Budget Intent |
 |------|-------|---------------|
-| `msm1` | `memory`, `coder` | memory about 20 GB runtime RAM; coder about 40-90 GB runtime RAM |
-| `msm2` | `memory`, `coder` | memory about 20 GB runtime RAM; coder about 40-90 GB runtime RAM |
-| `msm3` | `memory`, `agent` | memory about 20 GB runtime RAM; agent about 40-90 GB runtime RAM |
-| `msm4` | `memory`, `agent` | memory about 20 GB runtime RAM; agent about 40-90 GB runtime RAM |
+| `infer-01` | `memory`, `coder` | memory about 20 GB runtime RAM; coder about 40-90 GB runtime RAM |
+| `infer-02` | `memory`, `coder` | memory about 20 GB runtime RAM; coder about 40-90 GB runtime RAM |
+| `infer-03` | `memory`, `agent` | memory about 20 GB runtime RAM; agent about 40-90 GB runtime RAM |
+| `infer-04` | `memory`, `agent` | memory about 20 GB runtime RAM; agent about 40-90 GB runtime RAM |
 
 Role placement must prevent swap. Account for model weights, KV cache, MLX overhead, OS headroom, and the node's paired heavy role.
 
@@ -129,9 +128,9 @@ Expected behavior:
 
 - Every major role should have ready capacity.
 - `memory` is replicated because Hindsight is important and relatively small.
-- `coder` capacity should be preserved on `msm1`/`msm2`.
-- `agent` capacity should be preserved on `msm3`/`msm4`.
-- If a memory request arrives while `msm1` is busy, routing should prefer a healthy memory replica on `msm3` or `msm4` when that keeps coder capacity available.
+- `coder` capacity should be preserved on `infer-01`/`infer-02`.
+- `agent` capacity should be preserved on `infer-03`/`infer-04`.
+- If a memory request arrives while `infer-01` is busy, routing should prefer a healthy memory replica on `infer-03` or `infer-04` when that keeps coder capacity available.
 
 Model recommendations and routing changes should mention the impact on the node's paired heavy role and on swap risk.
 
@@ -149,7 +148,7 @@ Example:
 ~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8
 ```
 
-Studio's `~/.omlx/models` is the cache hub for downloads and node sync. Do not use the old `hf--<namespace>--<repo>` direct-child layout in new TF code.
+The cache host's `~/.omlx/models` is the cache hub for downloads and node sync. Do not use the old `hf--<namespace>--<repo>` direct-child layout in new TF code.
 
 oMLX discovers nested `<namespace>/<repo-name>` directories and exposes the repo directory name as the runtime model id, for example `gpt-oss-20b-MXFP4-Q8`. Requests that include a provider prefix can still resolve because oMLX strips the prefix if needed, but TF `models.<id>.runtime_model_id` should use the visible runtime id.
 
@@ -310,7 +309,7 @@ Benchmark route:
 - Alias: `memory-bf16`
 - HF: `mlx-community/gpt-oss-20b-mxfp4-bf16`
 - Runtime model id: `gpt-oss-20b-mxfp4-bf16`
-- Purpose: compare quality/latency/RAM against the canonical Q8 `memory` route on `msm3`; do not promote until benchmarked.
+- Purpose: compare quality/latency/RAM against the canonical Q8 `memory` route on `infer-03`; do not promote until benchmarked.
 
 ### Original openai/gpt-oss-20b
 

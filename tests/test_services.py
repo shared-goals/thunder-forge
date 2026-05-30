@@ -183,8 +183,7 @@ def test_run_olla_service_restart_dry_run_describes_frontend_launch_agent(tmp_pa
     assert str(repo_root / "logs/olla-40115.stdout.log") in result.plist_content
     assert any("launchctl bootstrap gui/$(id -u)" in command for command in result.commands)
     assert any(
-        "launchctl kickstart -k gui/$(id -u)/com.thunder-forge.olla-40115" in command
-        for command in result.commands
+        "launchctl kickstart -k gui/$(id -u)/com.thunder-forge.olla-40115" in command for command in result.commands
     )
     assert not result.applied
 
@@ -206,7 +205,9 @@ def test_run_olla_service_restart_apply_writes_plist_then_starts(tmp_path: Path,
 
     monkeypatch.setattr(olla_module, "run_local_commands", fake_run_local_commands)
     monkeypatch.setattr(olla_module, "write_local_file", fake_write_local_file)
-    monkeypatch.setattr(olla_module, "_wait_olla_healthy", lambda base_url, **kwargs: base_url == "http://127.0.0.1:40115")
+    monkeypatch.setattr(
+        olla_module, "_wait_olla_healthy", lambda base_url, **kwargs: base_url == "http://127.0.0.1:40115"
+    )
 
     result = run_olla_service_restart(repo_root=tmp_path, apply=True, timeout=12, user="shag")
 
@@ -288,7 +289,9 @@ def test_run_edge_service_restart_daemon_apply_reinstalls_every_time(tmp_path: P
 
     monkeypatch.setattr(edge_module, "run_local_commands", fake_run_local_commands)
     monkeypatch.setattr(edge_module, "write_local_file", fake_write_local_file)
-    monkeypatch.setattr(edge_module, "_wait_edge_healthy", lambda base_url, **kwargs: base_url == "http://127.0.0.1:40116")
+    monkeypatch.setattr(
+        edge_module, "_wait_edge_healthy", lambda base_url, **kwargs: base_url == "http://127.0.0.1:40116"
+    )
 
     result = run_edge_service_restart(repo_root=tmp_path, apply=True, manager="daemon", timeout=12, user="shag")
 

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from thunder_forge.cluster.artifacts import studio_omlx_models_dir_from_env
+from thunder_forge.cluster.artifacts import cache_omlx_models_dir_from_env
 from thunder_forge.cluster.config import ClusterConfig, generate_olla_config, generated_olla_config_path
 
 Progress = Callable[[str], None]
@@ -103,7 +103,7 @@ def write_generated_olla_config(config: ClusterConfig, *, repo_root: Path, port:
 
 
 def ensure_cache_hub_dir(*, progress: Progress | None = None) -> Path:
-    cache_dir = Path(studio_omlx_models_dir_from_env()).expanduser()
+    cache_dir = Path(cache_omlx_models_dir_from_env()).expanduser()
     cache_dir.mkdir(parents=True, exist_ok=True)
     if progress:
         progress(f"cache: oMLX model hub ready at {cache_dir}")

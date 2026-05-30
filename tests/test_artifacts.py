@@ -22,40 +22,40 @@ def test_artifact_identity_uses_omlx_native_owner_model_dir() -> None:
     assert omlx_model_dir_name("mlx-community/gpt-oss-20b-MXFP4-Q8") == identity.model_dir_name
 
 
-def test_artifact_plan_downloads_to_studio_omlx_when_studio_model_dir_missing() -> None:
+def test_artifact_plan_downloads_to_cache_omlx_when_cache_model_dir_missing() -> None:
     plan = build_artifact_readiness_plan(
         repo_id="mlx-community/gpt-oss-20b-MXFP4-Q8",
-        node="msm3",
+        node="infer-01",
         node_home_dir="/Users/shag",
-        presence=ArtifactPresence(studio_omlx_model_dir=False, node_omlx_model_dir=False),
+        presence=ArtifactPresence(cache_omlx_model_dir=False, node_omlx_model_dir=False),
     )
 
     assert plan.ready is False
-    assert plan.actions == [ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX]
+    assert plan.actions == [ArtifactReadinessAction.DOWNLOAD_TO_CACHE_OMLX]
     assert plan.model_dir_name == "mlx-community/gpt-oss-20b-MXFP4-Q8"
     assert plan.runtime_model_id == "gpt-oss-20b-MXFP4-Q8"
-    assert plan.studio_omlx_model_dir == "~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8"
+    assert plan.cache_omlx_model_dir == "~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8"
     assert plan.node_omlx_model_dir == "/Users/shag/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8"
 
 
-def test_artifact_plan_syncs_to_node_when_studio_omlx_model_dir_exists() -> None:
+def test_artifact_plan_syncs_to_node_when_cache_omlx_model_dir_exists() -> None:
     plan = build_artifact_readiness_plan(
         repo_id="mlx-community/gpt-oss-20b-MXFP4-Q8",
-        node="msm3",
+        node="infer-01",
         node_home_dir="/Users/shag",
-        presence=ArtifactPresence(studio_omlx_model_dir=True, node_omlx_model_dir=False),
+        presence=ArtifactPresence(cache_omlx_model_dir=True, node_omlx_model_dir=False),
     )
 
     assert plan.ready is False
     assert plan.actions == [ArtifactReadinessAction.SYNC_TO_NODE_OMLX]
 
 
-def test_artifact_plan_ready_when_studio_and_node_omlx_model_dirs_exist() -> None:
+def test_artifact_plan_ready_when_cache_and_node_omlx_model_dirs_exist() -> None:
     plan = build_artifact_readiness_plan(
         repo_id="mlx-community/gpt-oss-20b-MXFP4-Q8",
-        node="msm3",
+        node="infer-01",
         node_home_dir="/Users/shag",
-        presence=ArtifactPresence(studio_omlx_model_dir=True, node_omlx_model_dir=True),
+        presence=ArtifactPresence(cache_omlx_model_dir=True, node_omlx_model_dir=True),
     )
 
     assert plan.ready is True
@@ -66,15 +66,15 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
     plan = build_artifact_sync_plan(
         repo_id="BAAI/bge-small-en-v1.5",
         node_user="shag",
-        node_host="msm3-wifi.lan",
+        node_host="infer-01.lan",
         node_home_dir="/Users/shag",
     )
 
     assert plan.model_dir_name == "BAAI/bge-small-en-v1.5"
     assert plan.runtime_model_id == "bge-small-en-v1.5"
     assert plan.source_path == "/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/"
-    assert plan.destination == "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/"
-    assert "shag@msm3-wifi.lan" in plan.command
+    assert plan.destination == "shag@infer-01.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/"
+    assert "shag@infer-01.lan" in plan.command
     assert "BAAI/bge-small-en-v1.5/" in plan.command
     assert ".cache/huggingface" not in plan.command
     assert plan.mkdir_args == [
@@ -83,7 +83,7 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=8",
-        "shag@msm3-wifi.lan",
+        "shag@infer-01.lan",
         "mkdir",
         "-p",
         "/Users/shag/.omlx/models/BAAI",
@@ -219,6 +219,7 @@ def test_local_artifact_complete_rejects_incomplete_download_marker(tmp_path) ->
 
     assert is_local_artifact_complete(model_dir) is False
 
+
 def test_local_artifact_complete_rejects_rsync_partial_dir(tmp_path) -> None:
     model_dir = tmp_path / "BAAI" / "model"
     model_dir.mkdir(parents=True)
@@ -235,13 +236,13 @@ def test_artifact_sync_plan_can_use_fabric_host() -> None:
         node_user="shag",
         node_host="169.254.251.195",
         node_home_dir="/Users/shag",
-        ssh_host_key_alias="msm3-wifi.lan",
+        ssh_host_key_alias="infer-01.lan",
     )
 
     assert plan.destination.startswith("shag@169.254.251.195:")
     assert "shag@169.254.251.195" in plan.mkdir_args
-    assert "HostKeyAlias=msm3-wifi.lan" in plan.mkdir_args
-    assert "HostKeyAlias=msm3-wifi.lan" in plan.rsync_args[5]
+    assert "HostKeyAlias=infer-01.lan" in plan.mkdir_args
+    assert "HostKeyAlias=infer-01.lan" in plan.rsync_args[5]
 
 
 def test_artifact_sync_plan_rejects_invalid_repo_id() -> None:
@@ -249,7 +250,7 @@ def test_artifact_sync_plan_rejects_invalid_repo_id() -> None:
         build_artifact_sync_plan(
             repo_id="BAAI/bge;touch /tmp/pwned",
             node_user="shag",
-            node_host="msm3-wifi.lan",
+            node_host="infer-01.lan",
             node_home_dir="/Users/shag",
         )
     except ValueError as exc:
