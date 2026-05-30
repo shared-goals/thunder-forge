@@ -717,7 +717,8 @@ def _build_omlx_daemon_setup_result(
         raise ValueError(msg)
 
     resolved_admin_user = admin_user or node.user
-    resolved_ssh_user = node.user  # always SSH as operator user; via_su/ssh-admin controls escalation method
+    # --via-su: SSH as operator then su to admin; --ssh-admin: SSH directly as admin
+    resolved_ssh_user = node.user if via_su else resolved_admin_user
     resolved_script_path = script_path or f"/tmp/thunder-forge-setup-{daemon_result.label}.sh"
     sudoers_path = daemon_sudoers_path_for_node(node)
     setup_result = OmlxDaemonSetupResult(
@@ -736,11 +737,9 @@ def _build_omlx_daemon_setup_result(
         return setup_result
 
     setup_result.script_content = generate_daemon_setup_script(node, sudoers_path=sudoers_path)
-    # In --ssh-admin mode shag does sudo directly; prompt should name shag not admin_user
-    prompt_user = resolved_admin_user if via_su else node.user
     run_command = _daemon_setup_run_command(
         resolved_script_path,
-        admin_user=prompt_user,
+        admin_user=resolved_admin_user,
         via_su=via_su,
         label=daemon_result.label,
         host=node.host,
@@ -906,7 +905,15 @@ def run_omlx_daemon_setup(
 
     copy_res = scp_content(result.ssh_user, node.host, result.script_content, result.script_path, shell=node.shell)
     if copy_res.returncode != 0:
-        result.errors.append(f"Failed to copy setup script: {(copy_res.stderr or '').strip()}")
+        err = (copy_res.stderr or "").strip()
+        if "Permission denied" in err or "publickey" in err or "authentication" in err.lower():
+            hint = (
+                f"SSH key auth failed for {result.ssh_user}@{node.host}. "
+                f"Run: ssh-copy-id {result.ssh_user}@{node.host}"
+            )
+            result.errors.append(hint)
+        else:
+            result.errors.append(f"Failed to copy setup script to {result.ssh_user}@{node.host}: {err}")
         return result
 
     run_command = _daemon_setup_run_command(
@@ -914,6 +921,7 @@ def run_omlx_daemon_setup(
         admin_user=result.admin_user,
         via_su=result.via_su,
         label=result.label,
+        host=node.host,
     )
     run_res = ssh_run(
         result.ssh_user,

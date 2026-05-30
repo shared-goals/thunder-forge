@@ -111,10 +111,9 @@ def scp_content(
     ssh_cmd = [
         "ssh",
         *_ssh_key_args(),
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=10",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
         f"{user}@{ip}",
         f"cat > {remote_path}",
     ]
@@ -123,5 +122,5 @@ def scp_content(
         input=content,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=30,
     )
