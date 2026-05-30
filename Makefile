@@ -58,25 +58,30 @@ _olla-install:
 		cd "$(OLLA_BIN_DIR)"; \
 		asset="$(OLLA_ASSET)"; \
 		base="$(OLLA_RELEASE_BASE)"; \
-		echo "Installing Olla $(OLLA_VERSION) to $(OLLA_BIN)"; \
-		curl -fsSLO "$$base/$$asset"; \
 		curl -fsSLO "$$base/checksums.txt"; \
 		expected=$$(awk -v asset="$$asset" '{ name=$$NF; sub("^\\\\./", "", name); if (name == asset) { print $$1; exit } }' checksums.txt); \
 		if [ -z "$$expected" ]; then \
 			echo "Error: checksum entry not found for $$asset" >&2; \
 			exit 1; \
 		fi; \
-		actual=$$(shasum -a 256 "$$asset" | awk '{ print $$1 }'); \
-		if [ "$$expected" != "$$actual" ]; then \
-			echo "Error: checksum mismatch for $$asset" >&2; \
-			exit 1; \
-		fi; \
-		tmpdir=$$(mktemp -d); \
-		trap 'rm -rf "$$tmpdir"' EXIT INT TERM; \
-		unzip -o -q "$$asset" -d "$$tmpdir"; \
-		install -m 755 "$$tmpdir/olla" olla.new; \
-		mv -f olla.new olla; \
-		echo "Olla installed: $(OLLA_BIN)"
+		if [ -x "olla" ] && [ -f ".olla.sha256" ] && [ "$$(cat .olla.sha256)" = "$$expected" ]; then \
+			echo "Olla $(OLLA_VERSION) already up to date: $(OLLA_BIN)"; \
+		else \
+			echo "Installing Olla $(OLLA_VERSION) to $(OLLA_BIN)"; \
+			curl -fsSLO "$$base/$$asset"; \
+			actual=$$(shasum -a 256 "$$asset" | awk '{ print $$1 }'); \
+			if [ "$$expected" != "$$actual" ]; then \
+				echo "Error: checksum mismatch for $$asset" >&2; \
+				exit 1; \
+			fi; \
+			tmpdir=$$(mktemp -d); \
+			trap 'rm -rf "$$tmpdir"' EXIT INT TERM; \
+			unzip -o -q "$$asset" -d "$$tmpdir"; \
+			install -m 755 "$$tmpdir/olla" olla.new; \
+			mv -f olla.new olla; \
+			echo "$$expected" > .olla.sha256; \
+			echo "Olla installed: $(OLLA_BIN)"; \
+		fi
 
 daemon-bootstrap:
 	@set -eu; \
