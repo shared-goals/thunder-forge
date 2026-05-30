@@ -37,6 +37,22 @@ That model keeps the Shared Goals self-hosting principles explicit:
 - Make agent activity auditable through command output, JSONL access logs, launchd state, and test/smoke results.
 - Expose OpenAI-compatible APIs through TF edge with client identity, not by exposing raw Olla or oMLX broadly.
 
+## Prerequisites
+
+The operator user (e.g. `shag`) must have **passwordless SSH access** to every node in the cluster before running any Thunder Forge setup or management commands:
+
+```bash
+# Verify access to each node
+ssh msm3 true && echo ok
+```
+
+If key auth is not yet configured:
+```bash
+ssh-copy-id msm3   # or ssh-copy-id user@host
+```
+
+Thunder Forge always SSHes as the operator user. Privilege escalation (via `su` or `sudo`) is performed on the remote node — the operator user is never required to SSH as the admin user directly.
+
 ## Quickstart
 
 ```bash
@@ -45,39 +61,27 @@ cd thunder-forge
 uv sync
 
 # Create local config/env files
-cp configs/node-assignments.yaml.example configs/node-assignments.yaml
-cp .env.example .env
+cp tfconfig.example.yaml tfconfig.yaml
+# edit tfconfig.yaml for your cluster
 
 # Generate Olla config from the TF cluster config
 uv run thunder-forge generate-olla-config
 
-# Install or update the pinned Olla binary into .tmp/olla-bin/olla
-make olla-install
+# One-time bootstrap: install gateway (Olla + Edge) and node (oMLX) LaunchDaemons
+# Operator user must have passwordless SSH to all nodes first (see Prerequisites)
+make daemon-bootstrap           # all nodes
+make daemon-bootstrap studio    # gateway only
+make daemon-bootstrap msm3      # inference node only
 
-# Install/update and restart Olla as a local launchd service on the frontend host
-uv run thunder-forge service restart --service olla --binary .tmp/olla-bin/olla --config configs/olla-config.yaml --apply
+# Restart daemons after config changes (passwordless via installed sudoers)
+make daemon-restart
 
-# Run dev smoke test
-uv run thunder-forge olla dev-smoke --binary .tmp/olla-bin/olla --model <model> --alias <alias>
+# Smoke-test the cluster
+make daemon-smoke
 
-# Generate local TF edge API keys for MVP clients in .env
-make edge-keys EDGE_CLIENTS="client-a client-b"
-
-# Run and smoke the TF edge with per-user API keys
-uv run thunder-forge edge serve
-uv run thunder-forge edge smoke --client-id <client-id> --model memory
-uv run thunder-forge edge usage
-
-# Restart a remote node runtime after artifact sync
-uv run thunder-forge runtime restart --node msm3 --apply
-
-# One-time durable no-GUI production setup through an admin account
-uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply
-
-# Durable production restart after setup
-uv run thunder-forge service restart --service omlx --node msm3 --manager daemon --apply
-
-# Reinstall/repair reboot-durable frontend and node daemons, then smoke them
+# Check node runtime status
+make runtime-status
+```
 make full-daemon-test EDGE_CLIENT=<client-id>
 ```
 
@@ -92,18 +96,24 @@ make full-daemon-test EDGE_CLIENT=<client-id>
 - `uv run thunder-forge service restart --service omlx --node <node> --manager daemon --apply` delegates to the existing node LaunchDaemon workflow after one-time setup.
 - Use `--dry-run` first to print the generated plist and shell commands without changing the host.
 
-For reboot-durable system daemons, bootstrap once, then use the reinstall path as often as needed. `make daemon-bootstrap DAEMON_NODES="msm3"` installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. After that, `make daemon-reinstall DAEMON_NODES="msm3"` regenerates Olla config and reinstalls/restarts frontend Olla, frontend Edge, and node oMLX with `sudo -n`; no password prompt is expected. `make full-daemon-test EDGE_CLIENT=<client-id>` runs that reinstall path first, then verifies node runtime status, Olla routing, and TF edge auth/proxy smoke.
+For reboot-durable system daemons, bootstrap once with `make daemon-bootstrap`, then use `make daemon-restart` for all subsequent updates. Bootstrap installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. After that, `make daemon-restart` regenerates Olla config and reinstalls/restarts all services with `sudo -n`; no password prompt is expected.
 
-Run system-daemon install targets from a real terminal, not the VS Code guarded terminal, because macOS sudo password prompts can be blocked by the editor guard:
+Run system-daemon install targets from a real terminal, not the VS Code guarded terminal, because macOS sudo/su password prompts can be blocked by the editor guard:
 
 ```bash
-cd /Users/shag/Work/thunder-forge
-make daemon-bootstrap
-make daemon-reinstall
-make daemon-smoke EDGE_CLIENT=<client-id>
+cd /path/to/thunder-forge
+make daemon-bootstrap          # first time: prompts for admin passwords
+make daemon-restart            # subsequent: passwordless via installed sudoers
+make daemon-smoke              # verify cluster health
 ```
 
-Gateway setup with `services.frontend.admin_user` uses one `su - <admin_user>` shell for both frontend services. The unlabeled `Password:` prompt is `su` asking for that admin account's local macOS login password; after that, Thunder Forge prints a labeled sudo prompt before running the root setup script. Node setup uses the configured node admin account over SSH by default; use `runtime setup-daemon --via-su` only when direct admin SSH is not available. Frontend and node reinstalls then use already-installed narrow `sudo -n` rules for the operator user and should not ask for a password. That means an `msm3` or gateway reinstall can succeed without prompting even though `shag` is not a full sudo user.
+**Bootstrap escalation modes** (operator user always SSHes, escalation runs on the remote):
+
+- **Gateway** (`studio`): operator SSHes, then `su - <admin_user>` so admin can `sudo` run the setup script. The unlabeled `Password:` prompt is `su` asking for the admin account's local macOS login password.
+- **Inference nodes** (default, `--ssh-admin`): operator SSHes, then `sudo` directly as the operator user. The labeled prompt names the operator user and the node.
+- **Inference nodes** (override, `DAEMON_ADMIN_USER=admin`): operator SSHes, then `su - admin` so admin can `sudo` run the setup script. Use this when the operator user lacks sudo on the node.
+
+After bootstrap, node restarts use already-installed narrow `sudo -n` rules for the operator user and should not ask for a password.
 
 For an agent-managed cluster, run these commands as the dedicated operator account. The account should exist on the frontend role, the cache/download host, and every node it manages. On the current dev setup, `studio` holds both frontend and cache/download roles; in production, `rock` should hold the frontend role while `studio` keeps cache/download work close to the Mac inference fabric.
 

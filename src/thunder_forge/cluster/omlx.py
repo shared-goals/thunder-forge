@@ -717,8 +717,8 @@ def _build_omlx_daemon_setup_result(
         raise ValueError(msg)
 
     resolved_admin_user = admin_user or node.user
-    # --via-su: SSH as operator then su to admin; --ssh-admin: SSH directly as admin
-    resolved_ssh_user = node.user if via_su else resolved_admin_user
+    # Always SSH/SCP as the operator user (node.user); escalation (su/sudo) is handled on the remote.
+    resolved_ssh_user = node.user
     resolved_script_path = script_path or f"/tmp/thunder-forge-setup-{daemon_result.label}.sh"
     sudoers_path = daemon_sudoers_path_for_node(node)
     setup_result = OmlxDaemonSetupResult(
@@ -737,9 +737,12 @@ def _build_omlx_daemon_setup_result(
         return setup_result
 
     setup_result.script_content = generate_daemon_setup_script(node, sudoers_path=sudoers_path)
+    # --via-su: shag SSHes → su to admin → admin sudos; prompt admin's password
+    # --ssh-admin: shag SSHes → shag sudos directly; prompt shag's password
+    prompt_user = resolved_admin_user if via_su else node.user
     run_command = _daemon_setup_run_command(
         resolved_script_path,
-        admin_user=resolved_admin_user,
+        admin_user=prompt_user,
         via_su=via_su,
         label=daemon_result.label,
         host=node.host,

@@ -1027,11 +1027,10 @@ def runtime_setup_daemon(
                 f"su will ask for {resolved_admin_user}'s macOS login password."
             )
         else:
-            ssh_user = resolved_admin_user or runtime_node.user
             typer.echo(
-                f"[{runtime_node.host}] Bootstrap: SSH as {ssh_user}, "
+                f"[{runtime_node.host}] Bootstrap: SSH as {runtime_node.user}, "
                 f"then sudo. "
-                f"sudo will prompt for {ssh_user}'s local password."
+                f"sudo will prompt for {runtime_node.user}'s local password."
             )
 
     result = run_omlx_daemon_setup(
