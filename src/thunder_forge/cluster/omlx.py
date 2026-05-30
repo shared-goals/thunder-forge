@@ -919,9 +919,11 @@ def run_omlx_daemon_setup(
             result.errors.append(f"Failed to copy setup script to {result.ssh_user}@{node.host}: {err}")
         return result
 
+    # prompt_user: --via-su escalates through admin (admin's password), --ssh-admin shag sudos directly
+    prompt_user = result.admin_user if result.via_su else node.user
     run_command = _daemon_setup_run_command(
         result.script_path,
-        admin_user=result.admin_user,
+        admin_user=prompt_user,
         via_su=result.via_su,
         label=result.label,
         host=node.host,
@@ -937,7 +939,26 @@ def run_omlx_daemon_setup(
     )
     result.applied = True
     if run_res.returncode != 0:
-        result.errors.append(f"Setup script failed with exit code {run_res.returncode}")
+        err_output = (run_res.stdout or "") + (run_res.stderr or "")
+        if "is not allowed to execute" in err_output or "not in the sudoers file" in err_output:
+            escalation = (
+                f"su: {result.admin_user}'s password (--via-su / DAEMON_ADMIN_USER={result.admin_user})"
+                if not result.via_su
+                else f"su to {result.admin_user}: ensure {node.user} is in the wheel or admin group"
+            )
+            result.errors.append(
+                f"{node.user} cannot sudo on {node.host}. "
+                f"Try: make daemon-bootstrap {node.name if hasattr(node, 'name') else ''} DAEMON_ADMIN_USER={result.admin_user} "
+                f"({escalation})"
+            )
+        elif "su: Sorry" in err_output:
+            result.errors.append(
+                f"{node.user} is not in the wheel/admin group on {node.host} — su to {result.admin_user} denied. "
+                f"Add {node.user} to the admin group on {node.host}: "
+                f"sudo dseditgroup -o edit -a {node.user} -t user admin"
+            )
+        else:
+            result.errors.append(f"Setup script failed with exit code {run_res.returncode}")
         return result
 
     verify_cmd = f"/usr/bin/sudo -n /bin/launchctl print system/{result.label} >/dev/null"
