@@ -1,7 +1,9 @@
 """Thunder Forge CLI — cluster management commands."""
 
+import base64
 import json
 import os
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -71,6 +73,8 @@ app.add_typer(olla_app, name="olla")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
 app.add_typer(cluster_app, name="cluster")
+
+DEFAULT_OPENCODE_API_KEY_ENV = "TF_USER_OPENCODE"
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
@@ -198,7 +202,7 @@ def _opencode_config_from_catalog(
     provider_id: str,
     provider_name: str,
     base_url: str,
-    api_key_env: str,
+    api_key: str,
     model: str | None = None,
     small_model: str | None = None,
 ) -> dict[str, object]:
@@ -216,7 +220,7 @@ def _opencode_config_from_catalog(
         "name": provider_name,
         "options": {
             "baseURL": base_url,
-            "apiKey": f"{{env:{api_key_env}}}",
+            "apiKey": api_key,
         },
         "models": models,
     }
@@ -242,7 +246,8 @@ def _opencode_config_jsonc_from_catalog(
     provider_id: str,
     provider_name: str,
     base_url: str,
-    api_key_env: str,
+    api_key: str,
+    api_key_comment: str = "",
     model: str | None = None,
     small_model: str | None = None,
 ) -> str:
@@ -261,6 +266,12 @@ def _opencode_config_jsonc_from_catalog(
         properties.append(f'  "model": {json.dumps(f"{provider_id}/{model}")}')
     if small_model:
         properties.append(f'  "small_model": {json.dumps(f"{provider_id}/{small_model}")}')
+    api_key_lines = [
+        f'        "baseURL": {json.dumps(base_url)},',
+    ]
+    if api_key_comment:
+        api_key_lines.append(f"        // {api_key_comment}")
+    api_key_lines.append(f'        "apiKey": {json.dumps(api_key)}')
     properties.append(
         "\n".join(
             [
@@ -269,8 +280,7 @@ def _opencode_config_jsonc_from_catalog(
                 '      "npm": "@ai-sdk/openai-compatible",',
                 f'      "name": {json.dumps(provider_name)},',
                 '      "options": {',
-                f'        "baseURL": {json.dumps(base_url)},',
-                f'        "apiKey": {json.dumps(f"{{env:{api_key_env}}}")}',
+                "\n".join(api_key_lines),
                 "      },",
                 '      "models": {',
                 ",\n".join(model_blocks),
@@ -283,14 +293,125 @@ def _opencode_config_jsonc_from_catalog(
     return "{\n" + ",\n".join(properties) + "\n}\n"
 
 
+def _opencode_api_key_comment(*, client_id: str | None, api_key_env: str | None) -> str:
+    resolved_env = api_key_env or DEFAULT_OPENCODE_API_KEY_ENV
+    if client_id:
+        resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
+    return f"{resolved_env}: check .env"
+
+
+def _dotenv_value(env_file: Path, env_name: str) -> str:
+    from dotenv import dotenv_values
+
+    value = dotenv_values(env_file).get(env_name)
+    return str(value or "").strip()
+
+
+def _confirm_create_edge_key(env_name: str, env_file: Path) -> bool:
+    if not sys.stdin.isatty():
+        typer.echo(f"Error: {env_name} is not set; rerun with --yes to create it in {env_file}", err=True)
+        raise typer.Exit(1)
+    print(f"{env_name} is not set. Create it in {env_file}? [Y/n] ", end="", file=sys.stderr, flush=True)
+    answer = sys.stdin.readline().strip().lower()
+    return answer in {"", "y", "yes"}
+
+
+def _osc52_clipboard_sequence(text: str) -> str:
+    return _multiplexer_aware_osc52_sequence(text, env=os.environ)
+
+
+def _raw_osc52_clipboard_sequence(text: str) -> str:
+    encoded = base64.b64encode(text.encode()).decode("ascii")
+    return f"\033]52;c;{encoded}\a"
+
+
+def _tmux_passthrough_sequence(sequence: str) -> str:
+    escape = "\033"
+    escaped_sequence = sequence.replace(escape, escape * 2)
+    return f"{escape}Ptmux;{escaped_sequence}{escape}\\"
+
+
+def _screen_passthrough_sequence(sequence: str) -> str:
+    return f"\033P{sequence}\033\\"
+
+
+def _multiplexer_aware_osc52_sequence(text: str, *, env: dict[str, str]) -> str:
+    sequence = _raw_osc52_clipboard_sequence(text)
+    term = env.get("TERM", "").lower()
+    if env.get("TMUX") or term.startswith("tmux") or (term.startswith("screen") and not env.get("STY")):
+        return _tmux_passthrough_sequence(sequence)
+    if env.get("STY") or term.startswith("screen"):
+        return _screen_passthrough_sequence(sequence)
+    return sequence
+
+
+def _copy_to_clipboard(text: str) -> None:
+    try:
+        with Path("/dev/tty").open("w") as terminal:
+            terminal.write(_osc52_clipboard_sequence(text))
+            terminal.flush()
+            return
+    except OSError:
+        pass
+
+    if not sys.stderr.isatty():
+        typer.echo("Error: no terminal available for OSC52 clipboard copy", err=True)
+        raise typer.Exit(2)
+    sys.stderr.write(_osc52_clipboard_sequence(text))
+    sys.stderr.flush()
+
+
+def _resolve_opencode_api_key(
+    *,
+    client_id: str | None,
+    api_key_env: str | None,
+    inject_api_key: bool,
+    create_missing_key: bool,
+    yes: bool,
+) -> str:
+    resolved_env = api_key_env or DEFAULT_OPENCODE_API_KEY_ENV
+    if client_id:
+        resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
+
+    if not inject_api_key:
+        return f"{{env:{resolved_env}}}"
+
+    _repo_root, env_file = _load_repo_dotenv()
+    if client_id:
+        resolved_env, api_key = edge_api_key_from_env(client_id=client_id, users_env=EDGE_USER_PREFIX)
+    else:
+        api_key = os.environ.get(resolved_env, "").strip()
+    if not api_key:
+        api_key = _dotenv_value(env_file, resolved_env)
+
+    if api_key:
+        return api_key
+    if not client_id or not create_missing_key:
+        typer.echo(f"Error: {resolved_env} is not set", err=True)
+        raise typer.Exit(1)
+
+    if not yes and not _confirm_create_edge_key(resolved_env, env_file):
+        typer.echo(f"Error: {resolved_env} was not created", err=True)
+        raise typer.Exit(1)
+
+    result = ensure_edge_api_keys(env_file=env_file, clients=[client_id], users_env=EDGE_USER_PREFIX)
+    api_key = _dotenv_value(env_file, resolved_env)
+    if not api_key:
+        typer.echo(f"Error: failed to create {resolved_env} in {env_file}", err=True)
+        raise typer.Exit(1)
+    status = result.keys[0].status if result.keys else "present"
+    typer.echo(f"{resolved_env}: {status} in {env_file}", err=True)
+    return api_key
+
+
 def _gateway_restart_notice(config: ClusterConfig) -> str:
     try:
         gateway_name = config.gateway_name
     except ValueError:
         return ""
     return (
-        "notice: if model placement or node topology changed, "
-        f"restart gateway routes with `make restart {gateway_name}`"
+        "gateway_routes: unchanged; run "
+        f"`make restart {gateway_name}` only after changing model placement or node topology"
     )
 
 
@@ -814,10 +935,12 @@ def cluster_sync(
         if dry_run:
             typer.echo(f"would: restart {target} oMLX runtime after sync")
         else:
+            if runtime_node.home_dir is None:
+                runtime_node.home_dir = f"/Users/{runtime_node.user}"
             typer.echo("")
             typer.echo("== Runtime Restart ==")
             result = run_omlx_daemon_restart(runtime_node, apply=True, timeout=300)
-            typer.echo(f"  omlx: {result.label}")
+            typer.echo(f"  omlx: restarted {result.label}")
             if _service_result_failed(result):
                 _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
     else:
@@ -1437,6 +1560,10 @@ def edge_serve(
 
 @edge_app.command("opencode-config")
 def edge_opencode_config(
+    client_id: str | None = typer.Argument(
+        None,
+        help="Optional TF edge client id. When used with --inject-api-key, injects that client's API key.",
+    ),
     base_url: str | None = typer.Option(
         None,
         "--base-url",
@@ -1444,8 +1571,10 @@ def edge_opencode_config(
     ),
     provider_id: str = typer.Option("thunder-forge", "--provider-id", help="OpenCode provider id."),
     provider_name: str = typer.Option("Thunder Forge", "--provider-name", help="OpenCode provider display name."),
-    api_key_env: str = typer.Option(
-        "TF_USER_OPENCODE", "--api-key-env", help="Env var used by OpenCode for the TF edge API key."
+    api_key_env: str | None = typer.Option(
+        None,
+        "--api-key-env",
+        help="Env var placeholder used by OpenCode when no client API key is injected.",
     ),
     model: str | None = typer.Option(None, "--model", help="Optional default TF alias for top-level OpenCode model."),
     small_model: str | None = typer.Option(
@@ -1454,6 +1583,19 @@ def edge_opencode_config(
         help="Optional default TF alias for top-level OpenCode small_model.",
     ),
     output_format: str = typer.Option("jsonc", "--format", help="Output format: jsonc or json."),
+    copy: bool = typer.Option(False, "--copy", help="Copy the generated config to the terminal clipboard via OSC52."),
+    output: Path | None = typer.Option(None, "--output", help="Optional file path to write the generated config."),
+    inject_api_key: bool = typer.Option(
+        False,
+        "--inject-api-key",
+        help="Write the actual API key into the OpenCode config instead of an env placeholder.",
+    ),
+    create_missing_key: bool = typer.Option(
+        False,
+        "--create-missing-key",
+        help="When injecting a client API key, prompt to create it in .env if missing.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Create a missing injected client key without prompting."),
 ) -> None:
     """Print an OpenCode config generated from assigned TF model aliases."""
     config, _ = _load_config()
@@ -1469,36 +1611,48 @@ def edge_opencode_config(
             raise typer.Exit(1)
 
     resolved_base_url = base_url or _edge_base_url_from_config(config)
+    resolved_api_key = _resolve_opencode_api_key(
+        client_id=client_id,
+        api_key_env=api_key_env,
+        inject_api_key=inject_api_key,
+        create_missing_key=create_missing_key,
+        yes=yes,
+    )
     normalized_format = output_format.strip().lower()
     if normalized_format == "jsonc":
-        typer.echo(
-            _opencode_config_jsonc_from_catalog(
-                model_catalog=model_catalog,
-                provider_id=provider_id,
-                provider_name=provider_name,
-                base_url=resolved_base_url,
-                api_key_env=api_key_env,
-                model=model,
-                small_model=small_model,
-            ),
-            nl=False,
+        output_text = _opencode_config_jsonc_from_catalog(
+            model_catalog=model_catalog,
+            provider_id=provider_id,
+            provider_name=provider_name,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_key_comment=_opencode_api_key_comment(client_id=client_id, api_key_env=api_key_env),
+            model=model,
+            small_model=small_model,
         )
-        return
-    if normalized_format == "json":
+    elif normalized_format == "json":
         payload = _opencode_config_from_catalog(
             model_catalog=model_catalog,
             provider_id=provider_id,
             provider_name=provider_name,
             base_url=resolved_base_url,
-            api_key_env=api_key_env,
+            api_key=resolved_api_key,
             model=model,
             small_model=small_model,
         )
-        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-        return
+        output_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    else:
+        typer.echo("Error: --format must be jsonc or json", err=True)
+        raise typer.Exit(1)
 
-    typer.echo("Error: --format must be jsonc or json", err=True)
-    raise typer.Exit(1)
+    typer.echo(output_text, nl=False)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(output_text)
+        typer.echo(f"wrote {output}", err=True)
+    if copy:
+        _copy_to_clipboard(output_text)
+        typer.echo("copied OpenCode config to clipboard", err=True)
 
 
 @artifact_app.command("status")

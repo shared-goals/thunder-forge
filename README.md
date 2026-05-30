@@ -278,6 +278,7 @@ OpenCode custom providers require a `provider.<id>.models` map for the `/models`
 			"name": "Thunder Forge",
 			"options": {
 				"baseURL": "http://gateway-01.lan:40116/v1",
+				// TF_USER_OPENCODE: check .env
 				"apiKey": "{env:TF_USER_OPENCODE}"
 			},
 			"models": {
@@ -312,14 +313,24 @@ OpenCode custom providers require a `provider.<id>.models` map for the `/models`
 }
 ```
 
-Generate or refresh `opencode.json` from `tfconfig.yaml` after changing model placement:
+Generate or refresh the OpenCode config from `tfconfig.yaml` after changing model placement. The `client` target prints the generated config and copies the same payload to the terminal clipboard through OSC52. In tmux and screen-like terminals it wraps OSC52 with multiplexer passthrough sequences so remote iTerm2/tmux sessions can forward the copy to the local clipboard:
 
 ```bash
-make opencode-config OPENCODE_BASE_URL=http://gateway-01.lan:40116/v1
-make opencode-config OPENCODE_BASE_URL=http://gateway-01.lan:40116/v1 OPENCODE_OUTPUT=$HOME/.config/opencode/opencode.jsonc
+make client
 ```
 
-The target defaults to JSONC so it can include comments. Use `OPENCODE_CONFIG_FORMAT=json` when strict JSON is needed for another tool.
+Pass a TF edge client id to inject that client's API key directly into the generated config. If the key is missing, the command creates `TF_USER_<CLIENT>` in `.env`, then prints and copies the config:
+
+```bash
+make client gnezim
+```
+
+Omit the client id to keep the safer `{env:TF_USER_OPENCODE}` placeholder. The CLI defaults to JSONC so it can include comments. Use the direct command when strict JSON, a custom base URL, or an output file is needed:
+
+```bash
+uv run thunder-forge edge opencode-config gnezim --inject-api-key --create-missing-key --yes --copy --base-url http://gateway-01.lan:40116/v1 --output $HOME/.config/opencode/opencode.jsonc
+uv run thunder-forge edge opencode-config --format json
+```
 
 You can also inspect the live TF edge catalog directly:
 

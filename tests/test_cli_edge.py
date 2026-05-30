@@ -22,6 +22,39 @@ from thunder_forge.cluster.edge import EdgeProxyConfig, EdgeSmokeResult
 runner = CliRunner()
 
 
+def test_osc52_clipboard_sequence_encodes_payload() -> None:
+    from thunder_forge.cli import _multiplexer_aware_osc52_sequence
+
+    assert _multiplexer_aware_osc52_sequence("hello", env={}) == "\033]52;c;aGVsbG8=\a"
+
+
+def test_osc52_clipboard_sequence_wraps_tmux_passthrough() -> None:
+    from thunder_forge.cli import _multiplexer_aware_osc52_sequence
+
+    assert (
+        _multiplexer_aware_osc52_sequence("hello", env={"TMUX": "/tmp/tmux-501/default,1,0"})
+        == "\033Ptmux;\033\033]52;c;aGVsbG8=\a\033\\"
+    )
+
+
+def test_osc52_clipboard_sequence_wraps_tmux_when_su_keeps_only_term() -> None:
+    from thunder_forge.cli import _multiplexer_aware_osc52_sequence
+
+    assert (
+        _multiplexer_aware_osc52_sequence("hello", env={"TERM": "screen-256color"})
+        == "\033Ptmux;\033\033]52;c;aGVsbG8=\a\033\\"
+    )
+
+
+def test_osc52_clipboard_sequence_wraps_screen_passthrough() -> None:
+    from thunder_forge.cli import _multiplexer_aware_osc52_sequence
+
+    assert (
+        _multiplexer_aware_osc52_sequence("hello", env={"TERM": "screen-256color", "STY": "123.session"})
+        == "\033P\033]52;c;aGVsbG8=\a\033\\"
+    )
+
+
 def _cluster_config(
     *,
     edge_port: int = 40116,
@@ -307,6 +340,178 @@ def test_edge_opencode_config_prints_assigned_aliases(monkeypatch) -> None:
     assert provider["models"]["memory"]["name"] == "memory"
     assert provider["models"]["memory-bf16"]["name"] == "memory-bf16"
     assert provider["models"]["memory-bf16"]["status"] == "beta"
+
+
+def test_edge_opencode_config_client_uses_env_placeholder(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            Path.cwd(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["edge", "opencode-config", "gnezim", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    provider = payload["provider"]["thunder-forge"]
+    assert provider["options"]["apiKey"] == "{env:TF_USER_GNEZIM}"
+
+
+def test_edge_opencode_config_jsonc_comments_api_key_client(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            Path.cwd(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["edge", "opencode-config", "gnezim"])
+
+    assert result.exit_code == 0
+    assert '        // TF_USER_GNEZIM: check .env\n        "apiKey": "{env:TF_USER_GNEZIM}"' in result.stdout
+
+
+def test_edge_opencode_config_client_injects_created_key(monkeypatch, tmp_path) -> None:
+    import thunder_forge.cli as cli_module
+
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("TF_USER_GNEZIM", raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_repo_dotenv",
+        lambda: (tmp_path, env_file),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            tmp_path,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "edge",
+            "opencode-config",
+            "gnezim",
+            "--inject-api-key",
+            "--create-missing-key",
+            "--yes",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    env_text = env_file.read_text()
+    env_prefix = "TF_USER_GNEZIM="
+    assert env_prefix in env_text
+    api_key = next(line.removeprefix(env_prefix) for line in env_text.splitlines() if line.startswith(env_prefix))
+    payload = json.loads(result.stdout)
+    provider = payload["provider"]["thunder-forge"]
+    assert provider["options"]["apiKey"] == api_key
+    assert "{env:" not in provider["options"]["apiKey"]
+
+
+def test_edge_opencode_config_copy_uses_generated_payload(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    copied: list[str] = []
+    monkeypatch.setattr(cli_module, "_copy_to_clipboard", copied.append, raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            Path.cwd(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["edge", "opencode-config", "--copy", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert copied == [result.stdout]
+    assert "copied OpenCode config to clipboard" in result.stderr
 
 
 def test_edge_opencode_config_jsonc_comments_show_backing_models(monkeypatch) -> None:

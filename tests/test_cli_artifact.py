@@ -571,7 +571,7 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
     timeout: 123
     restart_runtime: true
 """
-        + config_body
+        + config_body.replace("        home_dir: /Users/shag\n", "")
     )
     calls = []
     restarts = []
@@ -596,7 +596,7 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
         return subprocess.CompletedProcess(args=plan.rsync_args, returncode=0)
 
     def fake_run_omlx_daemon_restart(runtime_node, *, apply, timeout):
-        restarts.append((runtime_node.host, apply, timeout))
+        restarts.append((runtime_node.host, runtime_node.home_dir, apply, timeout))
         return LaunchdServiceResult(
             service="omlx",
             label="com.thunder-forge.omlx-8018",
@@ -616,11 +616,13 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
         ("mlx-community/gpt-oss-20b-MXFP4-Q8", 123),
         ("mlx-community/Qwen3-Coder-Next-4bit", 123),
     ]
-    assert restarts == [("infer-01.lan", True, 300)]
+    assert restarts == [("infer-01.lan", "/Users/shag", True, 300)]
     assert "Thunder Forge cluster sync" in result.stdout
     assert "transport_host: infer-01.lan" in result.stdout
     assert "== Runtime Restart ==" in result.stdout
-    assert "notice: if model placement or node topology changed" in result.stdout
+    assert "omlx: restarted com.thunder-forge.omlx-8018" in result.stdout
+    assert "gateway_routes: unchanged" in result.stdout
+    assert "run `make restart gateway-cache-01` only after changing model placement or node topology" in result.stdout
 
 
 def test_artifact_download_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None:
