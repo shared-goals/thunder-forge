@@ -184,13 +184,17 @@ def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_oll
     assert invalid.body == b'{"error":"unauthorized"}'
 
 
-def test_proxy_edge_request_rejects_streaming_chat_without_calling_olla_or_logging_secrets() -> None:
+def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() -> None:
     forwarded: list[httpx.Request] = []
     logs: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         forwarded.append(request)
-        return httpx.Response(200, json={"unexpected": True})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream", "X-Olla-Endpoint": "msm3-omlx-live"},
+            content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+        )
 
     config = EdgeProxyConfig(
         olla_base_url="http://olla.local:40115",
@@ -213,14 +217,20 @@ def test_proxy_edge_request_rejects_streaming_chat_without_calling_olla_or_loggi
         transport=httpx.MockTransport(handler),
     )
 
-    assert result.status_code == 501
-    assert json.loads(result.body) == {
-        "error": "streaming_not_implemented",
-        "message": "TF edge is a non-streaming proxy; send stream=false or omit stream.",
-    }
-    assert forwarded == []
+    assert result.status_code == 200
+    assert result.headers["Content-Type"] == "text/event-stream"
+    assert result.headers["X-Olla-Endpoint"] == "msm3-omlx-live"
+    assert b"data:" in result.body
+    assert len(forwarded) == 1
+    assert forwarded[0].url == "http://olla.local:40115/olla/openai-compatible/v1/chat/completions"
+    assert json.loads(forwarded[0].content)["stream"] is True
     assert all("dev-secret" not in entry for entry in logs)
     assert all("do not log me" not in entry for entry in logs)
+    assert len(logs) == 1
+    logged = json.loads(logs[0])
+    assert logged["client_id"] == "client-a"
+    assert logged["model"] == "qwen3-1.7b-omlx-msm3-test"
+    assert logged["status_code"] == 200
 
 
 def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secret() -> None:

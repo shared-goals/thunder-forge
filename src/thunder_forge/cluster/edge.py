@@ -94,6 +94,18 @@ class EdgeProxyResponse:
     body: bytes
 
 
+@dataclass(frozen=True)
+class EdgeProxyUpstreamRequest:
+    """Prepared authenticated request data for forwarding to Olla."""
+
+    olla_path: str
+    forwarded_headers: dict[str, str]
+    request_id: str
+    client_id: str
+    model: str
+    started: float
+
+
 @dataclass
 class EdgeSmokeResult:
     """Result of a black-box smoke test against a running TF edge."""
@@ -577,16 +589,23 @@ def _json_response(status_code: int, payload: dict[str, str]) -> EdgeProxyRespon
     )
 
 
-def proxy_edge_request(
+def _proxy_response_headers(headers: httpx.Headers) -> dict[str, str]:
+    proxy_headers: dict[str, str] = {}
+    if content_type := headers.get("Content-Type"):
+        proxy_headers["Content-Type"] = content_type
+    if olla_endpoint := headers.get("X-Olla-Endpoint"):
+        proxy_headers["X-Olla-Endpoint"] = olla_endpoint
+    return proxy_headers
+
+
+def _prepare_edge_upstream_request(
     *,
     method: str,
     path: str,
     headers: dict[str, str],
     body: bytes,
     config: EdgeProxyConfig,
-    transport: httpx.BaseTransport | None = None,
-) -> EdgeProxyResponse:
-    """Authenticate, rewrite, and proxy a single non-streaming edge request."""
+) -> EdgeProxyUpstreamRequest | EdgeProxyResponse:
     started = time.perf_counter()
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
@@ -596,15 +615,6 @@ def proxy_edge_request(
         olla_path = rewrite_openai_path(path)
     except ValueError:
         return _json_response(404, {"error": "not_found"})
-
-    if _requests_streaming_response(method, body):
-        return _json_response(
-            501,
-            {
-                "error": "streaming_not_implemented",
-                "message": "TF edge is a non-streaming proxy; send stream=false or omit stream.",
-            },
-        )
 
     request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
     session = ensure_olla_session_id(headers, request_id=request_id, client_id=auth.client_id)
@@ -616,6 +626,59 @@ def proxy_edge_request(
     if content_type:
         forwarded_headers["Content-Type"] = content_type
 
+    return EdgeProxyUpstreamRequest(
+        olla_path=olla_path,
+        forwarded_headers=forwarded_headers,
+        request_id=request_id,
+        client_id=auth.client_id,
+        model=_extract_model(body),
+        started=started,
+    )
+
+
+def _record_edge_access(
+    config: EdgeProxyConfig,
+    *,
+    upstream: EdgeProxyUpstreamRequest,
+    path: str,
+    status_code: int,
+    olla_endpoint: str = "",
+) -> None:
+    if config.access_log_sink is None:
+        return
+    latency_ms = int((time.perf_counter() - upstream.started) * 1000)
+    log_record = build_edge_access_log(
+        request_id=upstream.request_id,
+        client_id=upstream.client_id,
+        path=path,
+        model=upstream.model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        olla_endpoint=olla_endpoint,
+    )
+    config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
+
+
+def proxy_edge_request(
+    *,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    body: bytes,
+    config: EdgeProxyConfig,
+    transport: httpx.BaseTransport | None = None,
+) -> EdgeProxyResponse:
+    """Authenticate, rewrite, and proxy a single buffered edge request."""
+    upstream = _prepare_edge_upstream_request(
+        method=method,
+        path=path,
+        headers=headers,
+        body=body,
+        config=config,
+    )
+    if isinstance(upstream, EdgeProxyResponse):
+        return upstream
+
     normalized_base_url = config.olla_base_url.rstrip("/")
     with httpx.Client(
         base_url=normalized_base_url,
@@ -624,34 +687,27 @@ def proxy_edge_request(
         trust_env=False,
     ) as client:
         try:
-            response = client.request(method, olla_path, headers=forwarded_headers, content=body)
+            response = client.request(method, upstream.olla_path, headers=upstream.forwarded_headers, content=body)
         except httpx.HTTPError as exc:
             return _json_response(502, {"error": f"upstream_failed: {exc}"})
 
-    proxy_headers: dict[str, str] = {}
-    if content_type := response.headers.get("Content-Type"):
-        proxy_headers["Content-Type"] = content_type
-    if olla_endpoint := response.headers.get("X-Olla-Endpoint"):
-        proxy_headers["X-Olla-Endpoint"] = olla_endpoint
-    latency_ms = int((time.perf_counter() - started) * 1000)
-    model = _extract_model(body)
-    log_record = build_edge_access_log(
-        request_id=request_id,
-        client_id=auth.client_id,
+    _record_edge_access(
+        config,
+        upstream=upstream,
         path=path,
-        model=model,
         status_code=response.status_code,
-        latency_ms=latency_ms,
         olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
     )
-    if config.access_log_sink is not None:
-        config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
-    return EdgeProxyResponse(status_code=response.status_code, headers=proxy_headers, body=response.content)
+    return EdgeProxyResponse(
+        status_code=response.status_code,
+        headers=_proxy_response_headers(response.headers),
+        body=response.content,
+    )
 
 
 def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
-    """Serve the minimal non-streaming TF edge with stdlib HTTP server."""
+    """Serve the minimal TF edge proxy with OpenAI-compatible buffered and streaming responses."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -666,6 +722,9 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
         def _handle_edge_request(self) -> None:
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(length) if length else b""
+            if _requests_streaming_response(self.command, body):
+                self._handle_streaming_edge_request(body)
+                return
             result = proxy_edge_request(
                 method=self.command,
                 path=self.path,
@@ -673,6 +732,55 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 body=body,
                 config=config,
             )
+            self.send_response(result.status_code)
+            for name, value in result.headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(result.body)))
+            self.end_headers()
+            self.wfile.write(result.body)
+
+        def _handle_streaming_edge_request(self, body: bytes) -> None:
+            upstream = _prepare_edge_upstream_request(
+                method=self.command,
+                path=self.path,
+                headers=dict(self.headers.items()),
+                body=body,
+                config=config,
+            )
+            if isinstance(upstream, EdgeProxyResponse):
+                self._send_edge_response(upstream)
+                return
+
+            normalized_base_url = config.olla_base_url.rstrip("/")
+            try:
+                with httpx.Client(base_url=normalized_base_url, timeout=config.timeout, trust_env=False) as client:
+                    with client.stream(
+                        self.command,
+                        upstream.olla_path,
+                        headers=upstream.forwarded_headers,
+                        content=body,
+                    ) as response:
+                        self.send_response(response.status_code)
+                        response_headers = _proxy_response_headers(response.headers)
+                        response_headers.setdefault("Content-Type", "text/event-stream")
+                        for name, value in response_headers.items():
+                            self.send_header(name, value)
+                        self.end_headers()
+                        for chunk in response.iter_bytes():
+                            if chunk:
+                                self.wfile.write(chunk)
+                                self.wfile.flush()
+                        _record_edge_access(
+                            config,
+                            upstream=upstream,
+                            path=self.path,
+                            status_code=response.status_code,
+                            olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
+                        )
+            except httpx.HTTPError as exc:
+                self._send_edge_response(_json_response(502, {"error": f"upstream_failed: {exc}"}))
+
+        def _send_edge_response(self, result: EdgeProxyResponse) -> None:
             self.send_response(result.status_code)
             for name, value in result.headers.items():
                 self.send_header(name, value)

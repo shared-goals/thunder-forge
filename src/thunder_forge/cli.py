@@ -1122,7 +1122,7 @@ def edge_serve(
         help="JSONL access log path. Defaults to tfconfig services.edge.access_log.",
     ),
 ) -> None:
-    """Run the minimal non-streaming TF edge proxy."""
+    """Run the minimal TF edge proxy."""
     config, repo_root = _load_config()
     resolved_port = resolve_port(port, default=config.services.edge_port)
     resolved_olla_base_url = olla_base_url or local_base_url(config.services.olla_port)
