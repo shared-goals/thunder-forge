@@ -340,11 +340,16 @@ def run_gateway_daemon_setup(
     if not ok:
         result.errors.append(error)
 
+    print("waiting for gateway services to become healthy...")
     olla_ok = _wait_olla_healthy(olla_health_url, retries=30, interval=1.0, timeout=5.0)
-    edge_ok = _wait_edge_healthy(edge_health_url, retries=30, interval=1.0, timeout=5.0)
-    result.health_ok = olla_ok and edge_ok
     if not olla_ok:
         result.errors.append(f"Olla health check failed at {olla_health_url}")
+    else:
+        print(f"health: olla ok ({olla_health_url})")
+    edge_ok = _wait_edge_healthy(edge_health_url, retries=30, interval=1.0, timeout=5.0)
     if not edge_ok:
         result.errors.append(f"TF edge health check failed at {edge_health_url}")
+    else:
+        print(f"health: edge ok ({edge_health_url})")
+    result.health_ok = olla_ok and edge_ok
     return result

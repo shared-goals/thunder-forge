@@ -659,9 +659,11 @@ run_root /bin/mkdir -p "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs" "$SUDOER
 run_root /usr/sbin/chown -R "$NODE_USER":staff "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs"
 run_root /usr/sbin/visudo -cf "$TMP_SUDOERS"
 # Remove any legacy per-port sudoers files so they don't cause duplicate-alias warnings
+setopt nullglob 2>/dev/null || true
 for legacy in "$SUDOERS_DIR"/thunder-forge-omlx-*; do
-    [[ -f "$legacy" ]] && run_root /bin/rm -f "$legacy"
+    run_root /bin/rm -f "$legacy"
 done
+unsetopt nullglob 2>/dev/null || true
 run_root /usr/bin/install -o "$NODE_USER" -g staff -m 644 "$TMP_PLIST" "$STAGING_PLIST_PATH"
 run_root /usr/bin/install -o root -g wheel -m 644 "$TMP_PLIST" "$PLIST_PATH"
 run_root /usr/bin/install -o root -g wheel -m 440 "$TMP_SUDOERS" "$SUDOERS_PATH"
