@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from thunder_forge.cli import app
 from thunder_forge.cluster.artifacts import STUDIO_OMLX_MODELS_DIR_ENV, ArtifactPresence
+from thunder_forge.cluster.services import LaunchdServiceResult
 
 runner = CliRunner()
 
@@ -30,6 +31,35 @@ def _write_runtime_config(repo: Path, *, fabric_host: bool = True) -> None:
                   port: 8018
         """)
     )
+
+
+def _write_runtime_config_with_models(repo: Path, *, fabric_host: bool = False) -> None:
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    fabric_line = "        fabric_host: true\n" if fabric_host else ""
+    (repo / "tfconfig.yaml").write_text(
+        f"""models:
+    memory:
+        source:
+            repo: mlx-community/gpt-oss-20b-MXFP4-Q8
+    coder:
+        source:
+            repo: mlx-community/Qwen3-Coder-Next-4bit
+nodes:
+    msm3:
+        host: msm3-wifi.lan
+{fabric_line}        ram_gb: 128
+        user: shag
+        roles: [inference]
+        home_dir: /Users/shag
+        runtime:
+            type: omlx
+            port: 8018
+        models:
+            - memory
+            - coder
+"""
+            )
 
 
 def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> None:
@@ -177,6 +207,43 @@ def test_artifact_sync_dry_run_prints_studio_to_node_plan(tmp_path: Path, monkey
     assert "/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
     assert "shag@msm3-wifi.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
     assert ".cache/huggingface" not in result.stdout
+
+
+def test_artifact_sync_without_model_syncs_all_node_models(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_models(repo)
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
+            studio_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--node",
+            "msm3",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "sync_scope: node" in result.stdout
+    assert "models: 2" in result.stdout
+    assert "model: mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
+    assert "model: mlx-community/Qwen3-Coder-Next-4bit" in result.stdout
+    assert result.stdout.count("mode: dry-run") == 2
+    assert "status: node sync dry-run complete" in result.stdout
 
 
 def test_artifact_sync_dry_run_uses_studio_omlx_dir_env(tmp_path: Path, monkeypatch) -> None:
@@ -429,6 +496,131 @@ def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None
     assert result.exit_code == 0
     assert "status: synced" in result.stdout
     assert calls[0][1] == 123
+
+
+def test_artifact_sync_apply_without_model_invokes_runner_for_each_node_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_models(repo)
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
+            studio_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+
+    def fake_run_artifact_sync(plan, *, timeout):
+        calls.append((plan.repo_id, timeout))
+        return subprocess.CompletedProcess(args=plan.rsync_args, returncode=0)
+
+    monkeypatch.setattr(cli_module, "run_artifact_sync", fake_run_artifact_sync)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--node",
+            "msm3",
+            "--apply",
+            "--timeout",
+            "123",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("mlx-community/gpt-oss-20b-MXFP4-Q8", 123),
+        ("mlx-community/Qwen3-Coder-Next-4bit", 123),
+    ]
+    assert result.stdout.count("status: synced") == 2
+    assert "status: node sync complete" in result.stdout
+
+
+def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_models(repo)
+    config_path = repo / "tfconfig.yaml"
+    config_body = config_path.read_text().replace(
+        "nodes:\n",
+        """nodes:
+    studio:
+        host: studio.lan
+        ram_gb: 64
+        user: shag
+        roles: [gateway, cache]
+""",
+        1,
+    )
+    config_path.write_text(
+        """operations:
+  sync:
+    transport: management
+    timeout: 123
+    restart_runtime: true
+"""
+        + config_body
+    )
+    calls = []
+    restarts = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir, studio_omlx_models_dir=None: ArtifactPresence(
+            studio_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+
+    def fake_run_artifact_sync(plan, *, timeout):
+        calls.append((plan.repo_id, timeout))
+        return subprocess.CompletedProcess(args=plan.rsync_args, returncode=0)
+
+    def fake_run_omlx_daemon_restart(runtime_node, *, apply, timeout):
+        restarts.append((runtime_node.host, apply, timeout))
+        return LaunchdServiceResult(
+            service="omlx",
+            label="com.thunder-forge.omlx-8018",
+            plist_path="/Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist",
+            applied=True,
+            service_label_verified=True,
+            health_ok=True,
+        )
+
+    monkeypatch.setattr(cli_module, "run_artifact_sync", fake_run_artifact_sync)
+    monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_run_omlx_daemon_restart)
+
+    result = runner.invoke(app, ["cluster", "sync", "msm3", "--apply"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("mlx-community/gpt-oss-20b-MXFP4-Q8", 123),
+        ("mlx-community/Qwen3-Coder-Next-4bit", 123),
+    ]
+    assert restarts == [("msm3-wifi.lan", True, 300)]
+    assert "Thunder Forge cluster sync" in result.stdout
+    assert "transport_host: msm3-wifi.lan" in result.stdout
+    assert "== Runtime Restart ==" in result.stdout
+    assert "notice: if model placement or node topology changed" in result.stdout
 
 
 def test_artifact_download_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None:

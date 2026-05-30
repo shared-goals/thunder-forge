@@ -21,7 +21,7 @@ Run commands from the Thunder Forge repo root.
 uv sync
 uv run thunder-forge --help
 uv run thunder-forge artifact download --model <hf-repo> --apply
-uv run thunder-forge artifact sync --model <hf-repo> --node msm3 --apply
+uv run thunder-forge cluster sync msm3 --apply
 uv run thunder-forge runtime status --node msm3
 uv run thunder-forge runtime restart --node msm3 --apply
 uv run thunder-forge runtime setup-daemon --node msm3 --admin-user <admin> --apply
@@ -30,9 +30,10 @@ uv run thunder-forge service restart --service omlx --node msm3 --manager daemon
 uv run thunder-forge runtime smoke --node msm3 --model <model>
 make olla-install
 make olla-restart
-make daemon-bootstrap DAEMON_NODES="msm3"
-make daemon-reinstall DAEMON_NODES="msm3"
-make full-daemon-test EDGE_CLIENT=<client-id>
+make bootstrap msm3
+make restart msm3
+make smoke msm3
+make sync msm3
 uv run thunder-forge service restart --service olla --binary .tmp/olla-bin/olla --config configs/olla-config.yaml --apply
 uv run thunder-forge service restart --service edge --apply
 uv run thunder-forge olla dev-smoke --binary .tmp/olla-bin/olla --model <model> --alias <alias>
@@ -41,15 +42,16 @@ uv run thunder-forge generate-olla-config
 uv run thunder-forge edge serve
 uv run thunder-forge edge smoke --client-id <client-id> --model memory
 uv run thunder-forge edge usage
-uv run pytest --tb=short -q
-uv run ruff check .
+make dev-check
 ```
 
 Use implemented Thunder Forge commands or Make targets for normal production work. Avoid manual `ssh`, `rsync`, `launchctl`, or direct file moves unless the TF command does not exist yet; when that happens, document the missing target and prefer adding it.
 
+`make sync <node>` is the preferred operator wrapper for model cache sync. It syncs every model assigned to the node by default and follows `operations.sync.restart_runtime` for the post-sync oMLX restart so the freshly synced cache is visible. Use `uv run thunder-forge cluster sync <node> --model mlx-community/<repo>` for a one-repo sync or `--no-restart-runtime` for a one-off skip. After changing `tfconfig.yaml` model placement or node topology, run `make restart studio` (or full `make restart`) so Olla and TF edge reload the generated router config before `make smoke <node>`.
+
 TF edge MVP API keys live in one ignored `.env` JSON hash named `TF_USERS`, mapping client ids to API keys. Generate local clients with `make edge-keys EDGE_CLIENTS="client-a client-b"` or `uv run thunder-forge edge keys --client <client-id>`. Do not print key values. Edge JSONL accounting records include `client_id`, model, status, latency, and Olla endpoint but no API keys; summarize with `make edge-usage` or `uv run thunder-forge edge usage`.
 
-Keep `.env` secrets-only. Non-secret local configuration lives in root `tfconfig.yaml` (ignored), mirrored by tracked `tfconfig.example.yaml`. Generated runtime configs live under ignored `configs/`. Service defaults live under `services:`: `services.olla.port` (`40115`), `services.edge.port` (`40116`), `services.omlx.port` (`8018`), `services.edge.access_log` (`logs/tf-edge-access.jsonl`), and optional `services.frontend.admin_user` (`serpo` on `studio`). Config node roles are `gateway`, `cache`, and `inference`; use `roles: [gateway, cache]` for `studio` and `role: inference` for oMLX-serving nodes. Explicit CLI `--port` flags and explicit `nodes.<node>.runtime.port` config values win over shared defaults.
+Keep `.env` secrets-only. Non-secret local configuration lives in root `tfconfig.yaml` (ignored), mirrored by tracked `tfconfig.example.yaml`. Generated runtime configs live under ignored `configs/`. Service defaults live under `services:`: `services.olla.port` (`40115`), `services.olla.version`, `services.olla.bin_dir`, `services.edge.port` (`40116`), `services.omlx.port` (`8018`), `services.edge.access_log` (`logs/tf-edge-access.jsonl`), and optional `services.frontend.admin_user` (`serpo` on `studio`). Operator defaults live under `operations:` for smoke and sync behavior; do not put model IDs, client IDs, transport choices, or restart policy in the Makefile. Config node roles are `gateway`, `cache`, and `inference`; use `roles: [gateway, cache]` for `studio` and `role: inference` for oMLX-serving nodes. Explicit CLI `--port` flags and explicit `nodes.<node>.runtime.port` config values win over shared defaults.
 
 Runtime restart managers:
 
@@ -59,7 +61,7 @@ Runtime restart managers:
 
 Use `service setup-daemon --apply --allow-sudo-prompt` for one-time gateway setup. It installs frontend Olla/Edge system LaunchDaemons through `services.frontend.admin_user`, validates sudoers with `visudo -cf`, and writes `/etc/sudoers.d/thunder-forge` with only the exact install/launchctl rights needed by future no-prompt gateway repairs. Use `runtime setup-daemon --node <node>` for one-time inference node setup; it defaults to configured `nodes.<node>.admin_user` over direct admin SSH, generates a node-side admin script, validates sudoers with `visudo -cf`, installs the system LaunchDaemon, and writes the same `/etc/sudoers.d/thunder-forge` path on that node. Add `--via-su` only when direct admin SSH is not available and SSH must connect as the node user before running `su - <admin> -c 'sudo /bin/zsh <script>'` on the node.
 
-Use `service restart` as the unified operator command when managing full TF services. `service restart --service olla --apply` and `service restart --service edge --apply` manage frontend LaunchAgents locally as the current user; `--manager daemon` reinstalls/restarts reboot-durable system LaunchDaemons through preinstalled narrow sudoers and should not prompt. `service restart --service omlx --node <node> --manager daemon --apply` delegates to the durable oMLX node daemon path and also expects existing narrow sudoers. `make daemon-bootstrap` is the first-install/admin path for gateway + nodes; `make daemon-reinstall` is the repeatable reinstall/restart path and should be no-prompt once bootstrap has run. Run password-prompting system-daemon setup from a real terminal, not through VS Code guarded execution.
+Use `service restart` as the unified operator command when managing full TF services. `service restart --service olla --apply` and `service restart --service edge --apply` manage frontend LaunchAgents locally as the current user; `--manager daemon` reinstalls/restarts reboot-durable system LaunchDaemons through preinstalled narrow sudoers and should not prompt. `service restart --service omlx --node <node> --manager daemon --apply` delegates to the durable oMLX node daemon path and also expects existing narrow sudoers. `make bootstrap` is the first-install/admin path for gateway + nodes; `make restart` is the repeatable reinstall/restart path and should be no-prompt once bootstrap has run. Run password-prompting system-daemon setup from a real terminal, not through VS Code guarded execution.
 
 ## Current Topology
 

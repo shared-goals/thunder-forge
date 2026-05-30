@@ -64,7 +64,14 @@ def test_load_cluster_config(cluster_yaml: Path) -> None:
 def test_parse_config_admin_users() -> None:
     config = parse_cluster_config(
         {
-            "services": {"frontend": {"admin_user": "serpo"}},
+            "services": {
+                "frontend": {"admin_user": "serpo"},
+                "olla": {"version": "v9.9.9", "bin_dir": ".tmp/custom-olla"},
+            },
+            "operations": {
+                "smoke": {"alias": "memory", "client_id": "admin", "timeout": 12},
+                "sync": {"transport": "management", "timeout": 123, "restart_runtime": False},
+            },
             "models": {},
             "nodes": {
                 "studio": {
@@ -86,6 +93,14 @@ def test_parse_config_admin_users() -> None:
     )
 
     assert config.services.frontend_admin_user == "serpo"
+    assert config.services.olla_version == "v9.9.9"
+    assert config.services.olla_bin_dir == ".tmp/custom-olla"
+    assert config.operations.smoke.alias == "memory"
+    assert config.operations.smoke.client_id == "admin"
+    assert config.operations.smoke.timeout == 12
+    assert config.operations.sync.transport == "management"
+    assert config.operations.sync.timeout == 123
+    assert config.operations.sync.restart_runtime is False
     assert config.nodes["studio"].roles == ["gateway", "cache"]
     assert config.nodes["studio"].admin_user == "serpo"
     assert config.nodes["msm3"].user == "shag"

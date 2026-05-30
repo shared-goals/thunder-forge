@@ -34,6 +34,7 @@ from thunder_forge.cluster.gateway import GatewayDaemonSetupResult, run_gateway_
 from thunder_forge.cluster.olla import dev_smoke_olla, run_olla_service_restart, smoke_olla_router
 from thunder_forge.cluster.omlx import (
     check_omlx_health,
+    ensure_omlx_tooling,
     run_omlx_daemon_restart,
     run_omlx_daemon_setup,
     run_omlx_install,
@@ -68,12 +69,6 @@ app.add_typer(olla_app, name="olla")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
 app.add_typer(cluster_app, name="cluster")
-
-DEFAULT_OLLA_VERSION = "v0.0.27"
-DEFAULT_OLLA_OS = "macos"
-DEFAULT_OLLA_ARCH = "arm64"
-DEFAULT_OLLA_BIN_DIR = Path(".tmp/olla-bin")
-
 
 def _load_config() -> tuple[ClusterConfig, Path]:
     """Load the TF cluster config. Returns (ClusterConfig, repo_root Path)."""
@@ -152,6 +147,51 @@ def _format_bytes(size_bytes: int) -> str:
 
 def _runtime(runtime_node: Node) -> NodeRuntime:
     return cast(NodeRuntime, runtime_node.runtime)
+
+
+def _gateway_restart_notice(config: ClusterConfig) -> str:
+    try:
+        gateway_name = config.gateway_name
+    except ValueError:
+        return ""
+    return (
+        "notice: if model placement or node topology changed, "
+        f"restart gateway routes with `make restart {gateway_name}`"
+    )
+
+
+def _resolve_cluster_smoke_inputs(
+    config: ClusterConfig,
+    *,
+    model: str | None,
+    alias: str | None,
+    client_id: str | None,
+    timeout: float | None,
+) -> tuple[str, str, str, float]:
+    resolved_alias = alias or config.operations.smoke.alias
+    resolved_model = model or config.operations.smoke.model
+    resolved_client_id = client_id or config.operations.smoke.client_id
+    resolved_timeout = timeout or config.operations.smoke.timeout
+
+    if not resolved_alias:
+        typer.echo("Error: --alias is required unless operations.smoke.alias is set", err=True)
+        raise typer.Exit(1)
+    if not resolved_model:
+        configured_model = config.models.get(resolved_alias)
+        if configured_model is not None:
+            resolved_model = configured_model.runtime_model_id
+    if not resolved_model:
+        typer.echo(
+            "Error: --model is required unless operations.smoke.model is set "
+            "or operations.smoke.alias names a configured model",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if not resolved_client_id:
+        typer.echo("Error: --client-id is required unless operations.smoke.client_id is set", err=True)
+        raise typer.Exit(1)
+
+    return resolved_model, resolved_alias, resolved_client_id, resolved_timeout
 
 
 def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
@@ -333,13 +373,17 @@ def cluster_prepare(
         help="Override the inference admin account used for remote su/sudo bootstrap.",
     ),
     timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for daemon setup commands."),
-    olla_version: str = typer.Option(DEFAULT_OLLA_VERSION, "--olla-version", help="Pinned Olla release version."),
-    olla_os: str = typer.Option(DEFAULT_OLLA_OS, "--olla-os", help="Olla release OS segment."),
-    olla_arch: str = typer.Option(DEFAULT_OLLA_ARCH, "--olla-arch", help="Olla release architecture segment."),
-    olla_bin_dir: Path = typer.Option(DEFAULT_OLLA_BIN_DIR, "--olla-bin-dir", help="Local Olla binary directory."),
+    olla_version: str | None = typer.Option(None, "--olla-version", help="Pinned Olla release version."),
+    olla_os: str | None = typer.Option(None, "--olla-os", help="Olla release OS segment."),
+    olla_arch: str | None = typer.Option(None, "--olla-arch", help="Olla release architecture segment."),
+    olla_bin_dir: Path | None = typer.Option(None, "--olla-bin-dir", help="Local Olla binary directory."),
 ) -> None:
     """Prepare the gateway, cache/download hub, and inference daemons as one cluster."""
     config, repo_root = _load_config()
+    resolved_olla_version = olla_version or config.services.olla_version
+    resolved_olla_os = olla_os or config.services.olla_os
+    resolved_olla_arch = olla_arch or config.services.olla_arch
+    resolved_olla_bin_dir = olla_bin_dir or Path(config.services.olla_bin_dir)
     gateway_names, cache_names, inference_names = _resolve_prepare_targets(config, target)
     _print_prepare_plan(
         target=target,
@@ -352,8 +396,8 @@ def cluster_prepare(
 
     if dry_run:
         if gateway_names:
-            preview_olla_path = olla_bin_dir / "olla"
-            typer.echo(f"would: ensure Olla {olla_version} at {preview_olla_path}")
+            preview_olla_path = resolved_olla_bin_dir / "olla"
+            typer.echo(f"would: ensure Olla {resolved_olla_version} at {preview_olla_path}")
             typer.echo("would: generate configs/olla-config.yaml")
         if cache_names:
             typer.echo(f"would: ensure cache hub {studio_omlx_models_dir_from_env()}")
@@ -361,18 +405,20 @@ def cluster_prepare(
             node = config.nodes[name]
             resolved_admin_user = admin_user or node.admin_user
             escalation = f"su={resolved_admin_user}" if resolved_admin_user else f"sudo={node.user}"
+            home_dir = node.home_dir or f"/Users/{node.user}"
+            typer.echo(f"would: ensure oMLX CLI at {home_dir}/.local/bin/omlx")
             typer.echo(f"would: bootstrap {name} ssh={node.user}@{node.host} {escalation}")
         return
 
-    binary_path = _repo_relative_path(repo_root, olla_bin_dir) / "olla"
+    binary_path = _repo_relative_path(repo_root, resolved_olla_bin_dir) / "olla"
     if gateway_names:
         typer.echo("")
         typer.echo("== Gateway Tooling ==")
         olla_result = ensure_olla_binary(
-            version=olla_version,
-            os_name=olla_os,
-            arch=olla_arch,
-            bin_dir=_repo_relative_path(repo_root, olla_bin_dir),
+            version=resolved_olla_version,
+            os_name=resolved_olla_os,
+            arch=resolved_olla_arch,
+            bin_dir=_repo_relative_path(repo_root, resolved_olla_bin_dir),
             progress=_progress,
         )
         binary_path = olla_result.binary_path
@@ -439,6 +485,16 @@ def cluster_prepare(
                 f"ssh={runtime_node.user}@{runtime_node.host} method=sudo user={runtime_node.user} "
                 "reason=install oMLX LaunchDaemon"
             )
+        tooling_result = ensure_omlx_tooling(
+            runtime_node,
+            apply=True,
+            timeout=timeout,
+            progress=_progress,
+        )
+        _fail_on_setup_errors(tooling_result.errors)
+        if not tooling_result.ok:
+            typer.echo("Error: oMLX tooling setup did not verify cleanly", err=True)
+            raise typer.Exit(1)
         result = run_omlx_daemon_setup(
             runtime_node,
             admin_user=resolved_admin_user or None,
@@ -469,10 +525,11 @@ def cluster_restart(
         help="Print the restart plan without changing hosts by default.",
     ),
     timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for daemon restart commands."),
-    binary: Path = typer.Option(DEFAULT_OLLA_BIN_DIR / "olla", "--binary", help="Local Olla binary path."),
+    binary: Path | None = typer.Option(None, "--binary", help="Local Olla binary path."),
 ) -> None:
     """Restart gateway and inference daemons through the configured managers."""
     config, repo_root = _load_config()
+    resolved_binary = binary or Path(config.services.olla_bin_dir) / "olla"
     gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
     typer.echo("Thunder Forge cluster restart")
     typer.echo(f"target: {target or 'all'}")
@@ -489,7 +546,7 @@ def cluster_restart(
 
         olla_result = run_olla_service_restart(
             repo_root=repo_root,
-            binary=binary,
+            binary=resolved_binary,
             config_path=repo_root / "configs" / "olla-config.yaml",
             port=resolve_port(None, default=config.services.olla_port),
             manager="daemon",
@@ -568,19 +625,94 @@ def cluster_status(
         raise typer.Exit(1)
 
 
+@cluster_app.command("sync")
+def cluster_sync(
+    target: str = typer.Argument(..., help="Inference node name to sync."),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Optional Hugging Face model repo id. Omit to sync every model assigned to the node.",
+    ),
+    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print sync commands without executing by default."),
+    transport: str | None = typer.Option(
+        None,
+        "--transport",
+        help="Transport selection: auto, fabric, or management. Defaults to operations.sync.transport.",
+    ),
+    management: bool = typer.Option(
+        False,
+        "--management",
+        help="Force management host even when fabric_host probing is enabled.",
+    ),
+    timeout: int | None = typer.Option(None, "--timeout", help="Timeout in seconds for rsync when applying."),
+    restart_runtime: bool = typer.Option(False, "--restart-runtime", help="Restart node runtime after sync."),
+    no_restart_runtime: bool = typer.Option(False, "--no-restart-runtime", help="Skip node runtime restart."),
+) -> None:
+    """Sync configured model artifacts to a node and optionally restart its runtime."""
+    if restart_runtime and no_restart_runtime:
+        typer.echo("Error: use only one of --restart-runtime or --no-restart-runtime", err=True)
+        raise typer.Exit(1)
+
+    config, _ = _load_config()
+    runtime_node = _get_runtime_node(config, target)
+    resolved_transport = transport or config.operations.sync.transport
+    resolved_timeout = timeout or config.operations.sync.timeout
+    resolved_restart = config.operations.sync.restart_runtime
+    if restart_runtime:
+        resolved_restart = True
+    if no_restart_runtime:
+        resolved_restart = False
+
+    typer.echo("Thunder Forge cluster sync")
+    typer.echo(f"target: {target}")
+    typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    _run_artifact_sync_workflow(
+        config=config,
+        node=target,
+        model=model,
+        dry_run=dry_run,
+        transport=resolved_transport,
+        management=management,
+        timeout=resolved_timeout,
+    )
+
+    if resolved_restart:
+        if dry_run:
+            typer.echo(f"would: restart {target} oMLX runtime after sync")
+        else:
+            typer.echo("")
+            typer.echo("== Runtime Restart ==")
+            result = run_omlx_daemon_restart(runtime_node, apply=True, timeout=300)
+            typer.echo(f"  omlx: {result.label}")
+            if _service_result_failed(result):
+                _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
+    else:
+        typer.echo("runtime_restart: skipped")
+
+    if notice := _gateway_restart_notice(config):
+        typer.echo(notice)
+
+
 @cluster_app.command("smoke")
 def cluster_smoke(
     target: str | None = typer.Argument(
         None,
         help="Optional node name. Omit for all inference nodes plus gateway smoke.",
     ),
-    model: str = typer.Option(..., "--model", help="Backend runtime model id to verify."),
-    alias: str = typer.Option(..., "--alias", help="Public alias routed by Olla to the backend model."),
-    client_id: str = typer.Option(..., "--client-id", help="TF edge client id whose API key should be used."),
-    timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
+    model: str | None = typer.Option(None, "--model", help="Backend runtime model id to verify."),
+    alias: str | None = typer.Option(None, "--alias", help="Public alias routed by Olla to the backend model."),
+    client_id: str | None = typer.Option(None, "--client-id", help="TF edge client id whose API key should be used."),
+    timeout: float | None = typer.Option(None, "--timeout", help="HTTP timeout in seconds."),
 ) -> None:
     """Smoke inference node health, Olla routing, and TF edge auth/proxy."""
     config, _ = _load_config()
+    model, alias, client_id, timeout = _resolve_cluster_smoke_inputs(
+        config,
+        model=model,
+        alias=alias,
+        client_id=client_id,
+        timeout=timeout,
+    )
     _gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
     typer.echo("Thunder Forge cluster smoke")
     typer.echo(f"target: {target or 'all'}")
@@ -591,14 +723,22 @@ def cluster_smoke(
         base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
         health = check_omlx_health(base_url)
         health_status = "ok" if health.health_ok else "fail"
-        models_status = "ok" if health.models_ok else "fail"
-        typer.echo(f"runtime {node_name}: health={health_status} models={models_status}")
-        failed = failed or not (health.health_ok and health.models_ok)
+        model_visible = model in health.models
+        models_status = "ok" if health.models_ok and model_visible else "fail"
+        typer.echo(
+            f"runtime {node_name}: health={health_status} "
+            f"models={models_status} model_visible={'yes' if model_visible else 'no'}"
+        )
+        if health.models_ok and not model_visible:
+            typer.echo(f"Error: {node_name}: model '{model}' is not visible", err=True)
+        failed = failed or not (health.health_ok and health.models_ok and model_visible)
 
+    expected_endpoint = f"{inference_names[0]}-omlx-live" if target and len(inference_names) == 1 else None
     olla_result = smoke_olla_router(
         base_url=local_base_url(config.services.olla_port),
         model=model,
         alias=alias,
+        expected_endpoint=expected_endpoint,
         timeout=timeout,
     )
     typer.echo(
@@ -1036,6 +1176,8 @@ def olla_smoke(
     typer.echo(f"latency_ms: {result.latency_ms}")
     if result.olla_endpoint:
         typer.echo(f"olla_endpoint: {result.olla_endpoint}")
+    if result.alias_endpoint:
+        typer.echo(f"alias_endpoint: {result.alias_endpoint}")
     for error in result.errors:
         typer.echo(f"Error: {error}", err=True)
     if not result.ok:
@@ -1089,6 +1231,8 @@ def olla_dev_smoke(
         typer.echo(f"latency_ms: {sr.latency_ms}")
         if sr.olla_endpoint:
             typer.echo(f"olla_endpoint: {sr.olla_endpoint}")
+        if sr.alias_endpoint:
+            typer.echo(f"alias_endpoint: {sr.alias_endpoint}")
         for error in sr.errors:
             typer.echo(f"Error: {error}", err=True)
     typer.echo(f"olla_terminated: {'yes' if result.olla_terminated else 'no'}")
@@ -1259,28 +1403,36 @@ def artifact_download(
     typer.echo("status: downloaded")
 
 
-@artifact_app.command("sync")
-def artifact_sync(
-    model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
-    node: str = typer.Option(..., "--node", help="Node name to sync artifact to (e.g. msm3)."),
-    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print sync command without executing by default."),
-    transport: str = typer.Option(
-        "auto",
-        "--transport",
-        help="Transport selection: auto, fabric, or management. Auto probes fabric only when fabric_host is true.",
-    ),
-    management: bool = typer.Option(
-        False,
-        "--management",
-        help="Force management host even when fabric_host probing is enabled.",
-    ),
-    timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for rsync when applying."),
+def _run_artifact_sync_workflow(
+    *,
+    config: ClusterConfig,
+    node: str,
+    model: str | None,
+    dry_run: bool,
+    transport: str,
+    management: bool,
+    timeout: int,
 ) -> None:
-    """Sync an oMLX model directory from studio to a node."""
-    config, _ = _load_config()
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
     studio_omlx_models_dir = studio_omlx_models_dir_from_env()
+    repo_ids = [model] if model else []
+    if not repo_ids:
+        if not runtime_node.models:
+            typer.echo(f"Error: node '{node}' has no models configured", err=True)
+            raise typer.Exit(1)
+        for model_id in runtime_node.models:
+            configured_model = config.models.get(model_id)
+            if configured_model is None:
+                typer.echo(f"Error: node '{node}' references unknown model '{model_id}'", err=True)
+                raise typer.Exit(1)
+            repo_id = configured_model.source.repo.strip()
+            if not repo_id:
+                typer.echo(f"Error: models.{model_id}.source.repo is required for full node sync", err=True)
+                raise typer.Exit(1)
+            if repo_id not in repo_ids:
+                repo_ids.append(repo_id)
+
     requested_transport = "management" if management else transport
     transport_plan = build_transport_plan(
         requested_transport=requested_transport,
@@ -1291,62 +1443,109 @@ def artifact_sync(
     if not transport_plan.ok:
         typer.echo(f"Error: {transport_plan.error}", err=True)
         raise typer.Exit(1)
-    presence = probe_artifact_presence(
-        repo_id=model,
-        node_host=runtime_node.host,
-        node_home_dir=node_home_dir,
-        studio_omlx_models_dir=studio_omlx_models_dir,
-    )
-    readiness_plan = build_artifact_readiness_plan(
-        repo_id=model,
-        node=node,
-        node_home_dir=node_home_dir,
-        presence=presence,
-        studio_omlx_models_dir=studio_omlx_models_dir,
-    )
-    sync_plan = build_artifact_sync_plan(
-        repo_id=model,
-        node_user=runtime_node.user,
-        node_host=transport_plan.resolved_transport_host,
-        node_home_dir=node_home_dir,
-        studio_omlx_models_dir=studio_omlx_models_dir,
-        ssh_host_key_alias=runtime_node.host if transport_plan.uses_fabric else None,
-    )
 
-    typer.echo(f"model: {model}")
-    typer.echo(f"model_dir_name: {sync_plan.model_dir_name}")
-    typer.echo(f"runtime_model_id: {sync_plan.runtime_model_id}")
-    _print_runtime_node_header(node, runtime_node)
-    typer.echo("source: studio")
-    typer.echo(f"transport_host: {transport_plan.transport_host}")
-    if transport_plan.resolved_transport_host != transport_plan.transport_host:
-        typer.echo(f"resolved_transport_host: {transport_plan.resolved_transport_host}")
-    if transport_plan.fabric_fallback:
-        typer.echo(f"fabric_fallback: {transport_plan.fabric_fallback}")
-    typer.echo(f"source_path: {sync_plan.source_path}")
-    typer.echo(f"destination: {sync_plan.destination}")
-    typer.echo("action: sync_to_node_omlx")
-    typer.echo(f"command: {sync_plan.command}")
+    if len(repo_ids) > 1:
+        typer.echo("sync_scope: node")
+        typer.echo(f"models: {len(repo_ids)}")
 
-    if ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX in readiness_plan.actions:
-        typer.echo(
-            "Error: studio oMLX model directory is missing or incomplete; "
-            "download the model to studio oMLX models first",
-            err=True,
+    for index, repo_id in enumerate(repo_ids, start=1):
+        if len(repo_ids) > 1:
+            typer.echo("")
+            typer.echo(f"== Model {index}/{len(repo_ids)} ==")
+        presence = probe_artifact_presence(
+            repo_id=repo_id,
+            node_host=runtime_node.host,
+            node_home_dir=node_home_dir,
+            studio_omlx_models_dir=studio_omlx_models_dir,
         )
-        raise typer.Exit(1)
-    if ArtifactReadinessAction.SYNC_TO_NODE_OMLX not in readiness_plan.actions:
-        typer.echo("status: sync not needed")
-        return
-    if dry_run:
-        typer.echo("mode: dry-run")
-        return
+        readiness_plan = build_artifact_readiness_plan(
+            repo_id=repo_id,
+            node=node,
+            node_home_dir=node_home_dir,
+            presence=presence,
+            studio_omlx_models_dir=studio_omlx_models_dir,
+        )
+        sync_plan = build_artifact_sync_plan(
+            repo_id=repo_id,
+            node_user=runtime_node.user,
+            node_host=transport_plan.resolved_transport_host,
+            node_home_dir=node_home_dir,
+            studio_omlx_models_dir=studio_omlx_models_dir,
+            ssh_host_key_alias=runtime_node.host if transport_plan.uses_fabric else None,
+        )
 
-    result = run_artifact_sync(sync_plan, timeout=timeout)
-    if result.returncode != 0:
-        typer.echo(f"Error: sync failed with exit code {result.returncode}", err=True)
-        raise typer.Exit(result.returncode)
-    typer.echo("status: synced")
+        typer.echo(f"model: {repo_id}")
+        typer.echo(f"model_dir_name: {sync_plan.model_dir_name}")
+        typer.echo(f"runtime_model_id: {sync_plan.runtime_model_id}")
+        _print_runtime_node_header(node, runtime_node)
+        typer.echo("source: studio")
+        typer.echo(f"transport_host: {transport_plan.transport_host}")
+        if transport_plan.resolved_transport_host != transport_plan.transport_host:
+            typer.echo(f"resolved_transport_host: {transport_plan.resolved_transport_host}")
+        if transport_plan.fabric_fallback:
+            typer.echo(f"fabric_fallback: {transport_plan.fabric_fallback}")
+        typer.echo(f"source_path: {sync_plan.source_path}")
+        typer.echo(f"destination: {sync_plan.destination}")
+        typer.echo("action: sync_to_node_omlx")
+        typer.echo(f"command: {sync_plan.command}")
+
+        if ArtifactReadinessAction.DOWNLOAD_TO_STUDIO_OMLX in readiness_plan.actions:
+            typer.echo(
+                "Error: studio oMLX model directory is missing or incomplete; "
+                "download the model to studio oMLX models first",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if ArtifactReadinessAction.SYNC_TO_NODE_OMLX not in readiness_plan.actions:
+            typer.echo("status: sync not needed")
+            continue
+        if dry_run:
+            typer.echo("mode: dry-run")
+            continue
+
+        result = run_artifact_sync(sync_plan, timeout=timeout)
+        if result.returncode != 0:
+            typer.echo(f"Error: sync failed with exit code {result.returncode}", err=True)
+            raise typer.Exit(result.returncode)
+        typer.echo("status: synced")
+
+    if len(repo_ids) > 1:
+        status = "node sync dry-run complete" if dry_run else "node sync complete"
+        typer.echo(f"status: {status}")
+
+
+@artifact_app.command("sync")
+def artifact_sync(
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Optional Hugging Face model repo id. Omit to sync every model assigned to the node.",
+    ),
+    node: str = typer.Option(..., "--node", help="Node name to sync artifact to (e.g. msm3)."),
+    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Print sync command without executing by default."),
+    transport: str | None = typer.Option(
+        None,
+        "--transport",
+        help="Transport selection: auto, fabric, or management. Defaults to operations.sync.transport.",
+    ),
+    management: bool = typer.Option(
+        False,
+        "--management",
+        help="Force management host even when fabric_host probing is enabled.",
+    ),
+    timeout: int | None = typer.Option(None, "--timeout", help="Timeout in seconds for rsync when applying."),
+) -> None:
+    """Sync oMLX model directories from studio to a node."""
+    config, _ = _load_config()
+    _run_artifact_sync_workflow(
+        config=config,
+        node=node,
+        model=model,
+        dry_run=dry_run,
+        transport=transport or config.operations.sync.transport,
+        management=management,
+        timeout=timeout or config.operations.sync.timeout,
+    )
 
 
 @runtime_app.command("start")

@@ -29,6 +29,7 @@ from thunder_forge.cluster.services import (
 from thunder_forge.cluster.ssh import scp_content, ssh_run
 
 LAUNCHD_LABEL_PREFIX = "com.thunder-forge.omlx"
+DEFAULT_OMLX_TOOL_SPEC = "git+https://github.com/jundot/omlx.git"
 
 
 def launchd_label_for_node(node: Node) -> str:
@@ -402,11 +403,121 @@ class OmlxDaemonSetupResult:
         )
 
 
+@dataclass
+class OmlxToolingResult:
+    node: str
+    uv_path: str
+    omlx_path: str
+    tool_spec: str
+    command: str = ""
+    applied: bool = False
+    verified: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.applied and self.verified and not self.errors
+
+
 def _omlx_binary_path(node: Node) -> str:
     if node.home_dir is None:
         msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
         raise ValueError(msg)
     return f"{node.home_dir}/.local/bin/omlx"
+
+
+def _uv_binary_path(node: Node) -> str:
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+    return f"{node.home_dir}/.local/bin/uv"
+
+
+def _omlx_tooling_command(node: Node, *, tool_spec: str = DEFAULT_OMLX_TOOL_SPEC) -> str:
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+
+    uv_binary = _uv_binary_path(node)
+    omlx_binary = _omlx_binary_path(node)
+    return f"""set -euo pipefail
+
+NODE_HOME={shlex.quote(node.home_dir)}
+UV_BINARY={shlex.quote(uv_binary)}
+OMLX_BINARY={shlex.quote(omlx_binary)}
+OMLX_TOOL_SPEC={shlex.quote(tool_spec)}
+
+export HOME="$NODE_HOME"
+export PATH="$NODE_HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+/bin/mkdir -p "$NODE_HOME/.local/bin"
+
+if [[ ! -x "$UV_BINARY" ]]; then
+    echo "uv: installing user-local uv at $UV_BINARY"
+    /usr/bin/curl -LsSf https://astral.sh/uv/install.sh | /bin/sh
+else
+    echo "uv: already installed at $UV_BINARY"
+fi
+
+if [[ ! -x "$UV_BINARY" ]]; then
+    echo "uv binary is missing or not executable: $UV_BINARY" >&2
+    exit 1
+fi
+
+if [[ ! -x "$OMLX_BINARY" ]]; then
+    echo "oMLX: installing $OMLX_TOOL_SPEC"
+    "$UV_BINARY" tool install "$OMLX_TOOL_SPEC"
+else
+    echo "oMLX: already installed at $OMLX_BINARY"
+fi
+
+if [[ ! -x "$OMLX_BINARY" ]]; then
+    echo "oMLX binary is missing or not executable after install: $OMLX_BINARY" >&2
+    exit 1
+fi
+
+"$OMLX_BINARY" --help >/dev/null
+echo "oMLX: ready at $OMLX_BINARY"
+"""
+
+
+def ensure_omlx_tooling(
+    node: Node,
+    *,
+    apply: bool = True,
+    timeout: int = 300,
+    tool_spec: str = DEFAULT_OMLX_TOOL_SPEC,
+    progress: Callable[[str], None] | None = None,
+) -> OmlxToolingResult:
+    """Ensure the node user has uv and the oMLX CLI before daemon setup."""
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+
+    result = OmlxToolingResult(
+        node=node.host,
+        uv_path=_uv_binary_path(node),
+        omlx_path=_omlx_binary_path(node),
+        tool_spec=tool_spec,
+        command=_omlx_tooling_command(node, tool_spec=tool_spec),
+    )
+    if not apply:
+        return result
+
+    if progress:
+        progress(f"tooling: ensuring uv + oMLX for {node.user}@{node.host}")
+    run_res = ssh_run(node.user, node.host, result.command, timeout=timeout, stream=True, shell=node.shell)
+    result.applied = True
+    if run_res.returncode != 0:
+        err_output = ((run_res.stdout or "") + (run_res.stderr or "")).strip()
+        suffix = f": {err_output}" if err_output else ""
+        result.errors.append(f"oMLX tooling setup failed with exit code {run_res.returncode}{suffix}")
+        return result
+
+    result.verified = True
+    if progress:
+        progress(f"tooling: oMLX CLI ready at {result.omlx_path}")
+    return result
 
 
 def generate_launchd_plist(node: Node, *, system_daemon: bool = False) -> str:
@@ -638,6 +749,11 @@ set -euo pipefail
 
 NODE_USER={shlex.quote(node.user)}
 NODE_HOME={shlex.quote(node.home_dir)}
+OMLX_HOME="$NODE_HOME/.omlx"
+OMLX_RUN_DIR="$OMLX_HOME/run"
+OMLX_CACHE_DIR="$OMLX_HOME/cache"
+OMLX_MODELS_DIR="$OMLX_HOME/models"
+LOG_DIR="$NODE_HOME/Library/Logs"
 OMLX_BINARY={shlex.quote(_omlx_binary_path(node))}
 LABEL={shlex.quote(label)}
 PLIST_PATH={shlex.quote(daemon_result.plist_path)}
@@ -684,8 +800,9 @@ THUNDER_FORGE_PLIST
 {sudoers_content}
 THUNDER_FORGE_SUDOERS
 
-run_root /bin/mkdir -p "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs" "$SUDOERS_DIR"
-run_root /usr/sbin/chown -R "$NODE_USER":staff "$NODE_HOME/.omlx/run" "$NODE_HOME/Library/Logs"
+run_root /bin/mkdir -p "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$OMLX_MODELS_DIR" "$LOG_DIR" "$SUDOERS_DIR"
+run_root /usr/sbin/chown "$NODE_USER":staff "$OMLX_HOME" "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$OMLX_MODELS_DIR" "$LOG_DIR"
+run_root /usr/sbin/chown -R "$NODE_USER":staff "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$LOG_DIR"
 run_root /usr/sbin/visudo -cf "$TMP_SUDOERS"
 
 NODE_UID="$(/usr/bin/id -u "$NODE_USER")"
@@ -974,14 +1091,15 @@ def run_omlx_daemon_setup(
         err_output = (run_res.stdout or "") + (run_res.stderr or "")
         if "is not allowed to execute" in err_output or "not in the sudoers file" in err_output:
             node_label = node.name if hasattr(node, "name") else ""
+            node_ref = node_label or "<node>"
             escalation = (
-                f"su: {result.admin_user}'s password (--via-su / DAEMON_ADMIN_USER={result.admin_user})"
+                f"su: {result.admin_user}'s password (set nodes.{node_ref}.admin_user in tfconfig.yaml)"
                 if not result.via_su
                 else f"su to {result.admin_user}: ensure {node.user} is in the wheel or admin group"
             )
             result.errors.append(
                 f"{node.user} cannot sudo on {node.host}. "
-                f"Try: make prepare {node_label} DAEMON_ADMIN_USER={result.admin_user} "
+                f"Set nodes.{node_ref}.admin_user in tfconfig.yaml, then run make bootstrap {node_ref} "
                 f"({escalation})"
             )
         elif "su: Sorry" in err_output:

@@ -9,6 +9,7 @@ from thunder_forge.cluster.omlx import (
     Node,
     OmlxHealthResult,
     OmlxInstallResult,
+    ensure_omlx_tooling,
     generate_daemon_setup_script,
     generate_daemon_sudoers,
     generate_launchd_plist,
@@ -202,9 +203,42 @@ def test_generate_daemon_setup_script_installs_sudoers_and_daemon() -> None:
     assert "THUNDER_FORGE_PLIST" in script
     assert "<key>UserName</key>" in script
     assert "run_root /usr/sbin/visudo -cf" in script
+    assert 'OMLX_CACHE_DIR="$OMLX_HOME/cache"' in script
+    assert 'OMLX_MODELS_DIR="$OMLX_HOME/models"' in script
+    assert 'run_root /usr/sbin/chown "$NODE_USER":staff "$OMLX_HOME"' in script
     assert "run_root /usr/bin/install -o root -g wheel -m 440" in script
     assert "run_root /bin/launchctl bootstrap system" in script
     assert "\nTHUNDER_FORGE_PLIST\n\n/bin/cat" in script
+
+
+def test_ensure_omlx_tooling_dry_run_installs_user_local_uv_and_omlx() -> None:
+    result = ensure_omlx_tooling(_make_runtime_node(), apply=False)
+
+    assert result.uv_path == "/Users/shag/.local/bin/uv"
+    assert result.omlx_path == "/Users/shag/.local/bin/omlx"
+    assert result.tool_spec == "git+https://github.com/jundot/omlx.git"
+    assert "https://astral.sh/uv/install.sh" in result.command
+    assert '"$UV_BINARY" tool install "$OMLX_TOOL_SPEC"' in result.command
+    assert '"$OMLX_BINARY" --help >/dev/null' in result.command
+
+
+def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
+    node = _make_runtime_node()
+    calls: list[tuple[str, str, str, bool]] = []
+
+    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_name=None, tty=False):
+        calls.append((user, ip, cmd, stream))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    import thunder_forge.cluster.omlx as omlx_module
+
+    monkeypatch.setattr(omlx_module, "ssh_run", fake_ssh_run)
+
+    result = ensure_omlx_tooling(node, apply=True, timeout=120)
+
+    assert result.ok
+    assert calls == [("shag", "msm3-wifi.lan", result.command, True)]
+    assert "NODE_HOME=/Users/shag" in result.command
 
 
 def test_run_omlx_daemon_setup_dry_run_describes_admin_script() -> None:

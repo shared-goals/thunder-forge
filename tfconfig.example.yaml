@@ -6,6 +6,10 @@ services:
     admin_user: admin
   olla:
     port: 40115
+    version: v0.0.27
+    os: macos
+    arch: arm64
+    bin_dir: .tmp/olla-bin
   edge:
     # Authenticated TF edge is the LAN-facing API. Keep raw Olla loopback-only.
     host: "0.0.0.0"
@@ -13,6 +17,18 @@ services:
     access_log: logs/tf-edge-access.jsonl
   omlx:
     port: 8018
+
+# ── Operator workflow defaults ──────────────────────────────────
+# Non-secret command defaults used by `make smoke` and `make sync`.
+operations:
+  smoke:
+    alias: memory
+    client_id: admin
+    timeout: 30
+  sync:
+    transport: auto
+    timeout: 7200
+    restart_runtime: true
 
 # ── Model registry ──────────────────────────────────
 # Add new models here. Model ids are public aliases by default.
@@ -36,7 +52,7 @@ models:
     source:
       repo: "mlx-community/Qwen3-Coder-Next-mxfp8"
     runtime_model_id: Qwen3-Coder-Next-mxfp8
-    disk_gb: 79.7
+    disk_gb: 82.2
     kv_per_32k_gb: 0.75
     active_params: "3B of 80B"
     max_context: 262144
@@ -56,21 +72,21 @@ models:
     source:
       repo: "mlx-community/Qwen3.6-35B-A3B-mxfp8"
     runtime_model_id: Qwen3.6-35B-A3B-mxfp8
-    disk_gb: 10.2
+    disk_gb: 36.6
     kv_per_32k_gb: 0.5
     active_params: "3B of 35B"
     max_context: 262144
-    notes: "MXFP8 Qwen3.6 35B A3B candidate for higher-quality agent routing."
+    notes: "MXFP8 Qwen3.6 35B A3B candidate for higher-quality agent routing. Higher fidelity than 4bit; heavier disk/RAM budget."
 
-  agent-heavy:
-    source:
-      repo: "mlx-community/Qwen3.5-122B-A10B-4bit"
-    runtime_model_id: Qwen3.5-122B-A10B-4bit
-    disk_gb: 65.0
-    kv_per_32k_gb: 1.2
-    active_params: "10B of 122B"
-    max_context: 131072
-    notes: "Heavy agent. 122B MoE with VLM support. Thinking mode."
+  # agent-heavy:
+  #   source:
+  #     repo: "mlx-community/Qwen3.5-122B-A10B-4bit"
+  #   runtime_model_id: Qwen3.5-122B-A10B-4bit
+  #   disk_gb: 65.0
+  #   kv_per_32k_gb: 1.2
+  #   active_params: "10B of 122B"
+  #   max_context: 131072
+  #   notes: "Heavy agent. 122B MoE with VLM support. Thinking mode."
 
   memory:
     source:
@@ -98,11 +114,11 @@ models:
 # Model registry keys are public aliases; runtime_model_id is the oMLX model id.
 # Canonical public aliases: memory, coder, agent.
 # Use memory for the Hindsight LLM; do not add a second Hindsight memory alias.
-# Target spread: Memory + Coder (msm1, msm2) or Memory + Agent (msm3, msm4).
+# Current dev mirror: msm1/msm2/msm3 expose memory, coder, and agent variants.
+# Future production spread can narrow back to memory+coder or memory+agent after burn-in.
 # Olla LRU manages active model loading — not all models loaded simultaneously.
 # Each node has 128GB RAM. Budget memory at ~20GB runtime RAM and coder/agent
 # at ~40-90GB runtime RAM, leaving OS/MLX/KV-cache headroom to prevent swap.
-# Stage migrations after msm3 is stable: msm1, then msm2, then msm4.
 
 # ── Nodes ──────────────────────────────────────────
 # Per-node host may be a DNS name or IP address. Prefer .lan FQDNs.
@@ -125,35 +141,46 @@ nodes:
     admin_user: admin
 
   # Current rollout state:
-  # - msm1/msm2 are TF v1 production nodes and migrate after msm3 is stable.
-  # - msm3 is the dedicated TF v2 dev node.
+  # - msm1/msm2/msm3 are TF v2 inference nodes with mirrored model sets.
   # - msm4 is direct oMLX for Hindsight today and migrates last.
 
-  # msm1:
-  #   host: "msm1-wifi.lan"
-  #   ram_gb: 128
-  #   roles: [inference]
-  #   user: user1
-  #   admin_user: admin
-  #   runtime:
-  #     type: omlx
-  #   models:
-  #     - memory
-  #     - coder
-  #     - coder-better
+  msm1:
+    host: "msm1-wifi.lan"
+    # Boolean: probe Thunderbolt/fabric dynamically from the management host.
+    fabric_host: true
+    ram_gb: 128
+    roles: [inference]
+    user: user1
+    admin_user: admin
+    runtime:
+      type: omlx
+      trusted_network: true
+    models:
+      - memory
+      - memory-bf16
+      - agent
+      - agent-better
+      - coder
+      - coder-better
 
-  # msm2:
-  #   host: "msm2-wifi.lan"
-  #   ram_gb: 128
-  #   roles: [inference]
-  #   user: user1
-  #   admin_user: admin
-  #   runtime:
-  #     type: omlx
-  #   models:
-  #     - memory
-  #     - coder
-  #     - coder-better
+  msm2:
+    host: "msm2-wifi.lan"
+    # Boolean: probe Thunderbolt/fabric dynamically from the management host.
+    fabric_host: true
+    ram_gb: 128
+    roles: [inference]
+    user: user1
+    admin_user: admin
+    runtime:
+      type: omlx
+      trusted_network: true
+    models:
+      - memory
+      - memory-bf16
+      - agent
+      - agent-better
+      - coder
+      - coder-better
 
   msm3:
     host: "msm3-wifi.lan"
@@ -165,11 +192,14 @@ nodes:
     admin_user: admin
     runtime:
       type: omlx
+      trusted_network: true
     models:
       - memory
       - memory-bf16
       - agent
       - agent-better
+      - coder
+      - coder-better
 
   # msm4: enable when migrating direct Hindsight oMLX into TF v2.
   # host: "msm4-wifi.lan"

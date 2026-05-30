@@ -67,30 +67,31 @@ cp tfconfig.example.yaml tfconfig.yaml
 # Generate Olla config from the TF cluster config
 uv run thunder-forge generate-olla-config
 
-# One-time prepare: install gateway (Olla + Edge), cache hub, and node (oMLX) LaunchDaemons
+# One-time bootstrap: install gateway (Olla + Edge), cache hub, and node (oMLX) LaunchDaemons
 # Operator user must have passwordless SSH to all nodes first (see Prerequisites)
-make prepare           # gateway + cache + inference nodes
-make prepare studio    # gateway/cache host only
-make prepare msm3      # inference node only
+make bootstrap           # gateway + cache + inference nodes
+make bootstrap studio    # gateway/cache host only
+make bootstrap msm3      # inference node only
 
 # Restart daemons after config changes (passwordless via installed sudoers)
-make daemon-restart
+make restart
 
 # Smoke-test the cluster
-make daemon-smoke
+make smoke
 
 # Check node runtime status
-make runtime-status
+make status
 ```
 
 ## Service Management
 
 The Makefile is a thin dispatcher for cluster-level CLI commands:
 
-- `make prepare [node]` -> `uv run thunder-forge cluster prepare [node] --apply`
-- `make daemon-restart [node]` -> `uv run thunder-forge cluster restart [node] --apply`
-- `make daemon-smoke [node]` -> `uv run thunder-forge cluster smoke [node] ...`
-- `make runtime-status [node]` -> `uv run thunder-forge cluster status [node]`
+- `make bootstrap [node]` -> `uv run thunder-forge cluster prepare [node] --apply`
+- `make restart [node]` -> `uv run thunder-forge cluster restart [node] --apply`
+- `make smoke [node]` -> `uv run thunder-forge cluster smoke [node] ...`
+- `make status [node]` -> `uv run thunder-forge cluster status [node]`
+- `make sync [node]` -> `uv run thunder-forge cluster sync [node] --apply`, syncing configured models and following `operations.sync.restart_runtime` for the post-sync oMLX restart.
 
 `service restart` remains the lower-level per-service path for managed Thunder Forge daemons:
 
@@ -99,20 +100,22 @@ The Makefile is a thin dispatcher for cluster-level CLI commands:
 - `uv run thunder-forge service restart --service omlx --node <node> --manager daemon --apply` delegates to the existing node LaunchDaemon workflow after one-time setup.
 - Use `--dry-run` first to print the generated plist and shell commands without changing the host.
 
-For reboot-durable system daemons, prepare once with `make prepare`, then use `make daemon-restart` for all subsequent updates. Prepare installs the pinned Olla binary, generates Olla config, prepares the local oMLX model cache hub, installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. After that, `make daemon-restart` regenerates Olla config and reinstalls/restarts all services with `sudo -n`; no password prompt is expected.
+For reboot-durable system daemons, bootstrap once with `make bootstrap`, then use `make restart` for all subsequent updates. Bootstrap installs the pinned Olla binary, generates Olla config, prepares the local oMLX model cache hub, installs user-local `uv`/oMLX tooling on inference nodes when missing, installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. After that, `make restart` regenerates Olla config and reinstalls/restarts all services with `sudo -n`; no password prompt is expected.
 
-Prepare verifies minimal service readiness only: Olla `/internal/health`, TF edge auth boundary health, and direct oMLX `/health`. It does not require inference models or chat to be ready; use `make daemon-smoke` for model visibility, routing, and chat checks after the cluster has warmed up.
+After changing model placement or node topology in `tfconfig.yaml`, run `make restart studio` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
+
+Bootstrap verifies minimal service readiness only: Olla `/internal/health`, TF edge auth boundary health, and direct oMLX `/health`. It does not require inference models or chat to be ready; use `make smoke` for model visibility, routing, and chat checks after the cluster has warmed up.
 
 Run system-daemon install targets from a real terminal, not the VS Code guarded terminal, because macOS sudo/su password prompts can be blocked by the editor guard:
 
 ```bash
 cd /path/to/thunder-forge
-make prepare                   # first time: prompts for admin passwords
-make daemon-restart            # subsequent: passwordless via installed sudoers
-make daemon-smoke              # verify cluster health
+make bootstrap                 # first time: prompts for admin passwords
+make restart                   # subsequent: passwordless via installed sudoers
+make smoke                     # verify cluster health
 ```
 
-**Prepare escalation modes** (operator user always SSHes, escalation runs on the remote):
+**Bootstrap escalation modes** (operator user always SSHes, escalation runs on the remote):
 
 - **Gateway** (`studio`): the local operator runs `su - <admin_user>`, then admin uses `sudo` to run the setup script.
 - **Inference nodes**: Thunder Forge SSHes as `nodes.<node>.user`, then uses `su - nodes.<node>.admin_user` so admin can `sudo` run the setup script. If a node has no admin user configured, setup falls back to direct sudo as the operator user.
@@ -124,7 +127,7 @@ Every password notice is printed before macOS asks for input and includes `host`
 [%h] password: user=admin reason=install Thunder Forge oMLX daemon com.thunder-forge.omlx-8018:
 ```
 
-After prepare, node restarts use already-installed narrow `sudo -n` rules for the operator user and should not ask for a password.
+After bootstrap, node restarts use already-installed narrow `sudo -n` rules for the operator user and should not ask for a password.
 
 For an agent-managed cluster, run these commands as the dedicated operator account. The account should exist on the frontend role, the cache/download host, and every node it manages. On the current dev setup, `studio` holds both frontend and cache/download roles; in production, `rock` should hold the frontend role while `studio` keeps cache/download work close to the Mac inference fabric.
 
@@ -135,7 +138,7 @@ Daemon installation intentionally separates the operator user from the admin use
 Thunder Forge keeps secrets and operational config separate:
 
 - `.env` is ignored and secrets-only. Keep `HF_TOKEN`, `TF_USERS`, and similar credentials there.
-- `tfconfig.yaml` is ignored and is the local source of truth for services, model registry, and node placement.
+- `tfconfig.yaml` is ignored and is the local source of truth for services, operator defaults, model registry, and node placement.
 - `tfconfig.example.yaml` is tracked as the schema/example mirror.
 - `configs/` is ignored generated output, currently including `configs/olla-config.yaml`.
 - Config node roles are `gateway`, `cache`, and `inference`. Use `roles: [gateway, cache]` for multi-role hosts such as `studio`; use `role: inference` for oMLX-serving nodes.
@@ -149,6 +152,8 @@ Thunder Forge service ports live in `tfconfig.yaml` under `services:`:
 | Config key | Default | Service |
 |------------|---------|---------|
 | `services.olla.port` | `40115` | Local Olla router on the frontend host |
+| `services.olla.version` | `v0.0.27` | Olla release used by `cluster prepare` |
+| `services.olla.bin_dir` | `.tmp/olla-bin` | Local Olla binary install directory |
 | `services.edge.host` | `0.0.0.0` | TF edge bind address; use `0.0.0.0` for LAN clients, keep raw Olla private |
 | `services.edge.port` | `40116` | Local TF edge OpenAI-compatible proxy |
 | `services.omlx.port` | `8018` | Default oMLX node runtime port when a node runtime omits `port` |
@@ -156,6 +161,10 @@ Thunder Forge service ports live in `tfconfig.yaml` under `services:`:
 | `services.frontend.admin_user` | empty | Admin account used for frontend system-daemon sudo operations |
 
 Explicit CLI flags such as `--port` still win over config defaults, and explicit `nodes.<node>.runtime.port` values still win over the shared oMLX default.
+
+## Operator Defaults
+
+Non-secret Make/CLI defaults live in `tfconfig.yaml` under `operations:`. `operations.smoke.alias` and `operations.smoke.client_id` let `make smoke <node>` run without model IDs in the Makefile; when `operations.smoke.model` is omitted, Thunder Forge resolves the backend runtime model id from the configured alias. `operations.sync.transport`, `operations.sync.timeout`, and `operations.sync.restart_runtime` drive `make sync <node>`.
 
 ## Runtime Management
 

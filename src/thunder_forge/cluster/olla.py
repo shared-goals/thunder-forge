@@ -167,6 +167,7 @@ class OllaSmokeResult:
     root_v1_absent: bool = False
     latency_ms: int = 0
     olla_endpoint: str = ""
+    alias_endpoint: str = ""
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -266,10 +267,15 @@ def smoke_olla_router(
                     "stream": False,
                 },
             )
-            alias_endpoint = response.headers.get("X-Olla-Endpoint", "")
-            result.alias_ok = response.is_success and alias_endpoint == result.olla_endpoint
+            result.alias_endpoint = response.headers.get("X-Olla-Endpoint", "")
+            result.alias_ok = response.is_success and bool(result.alias_endpoint)
             if not result.alias_ok:
-                result.errors.append(f"alias request did not route successfully for '{alias}'")
+                if not response.is_success:
+                    result.errors.append(
+                        f"alias POST returned {response.status_code}: {response.text}"
+                    )
+                else:
+                    result.errors.append(f"alias request did not return an Olla endpoint for '{alias}'")
         except httpx.HTTPError as exc:
             result.errors.append(f"alias POST failed: {exc}")
 

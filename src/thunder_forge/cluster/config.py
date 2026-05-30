@@ -25,6 +25,14 @@ GENERATED_CONFIG_DIR = "configs"
 GENERATED_OLLA_CONFIG_FILENAME = "olla-config.yaml"
 DEFAULT_EDGE_ACCESS_LOG = "logs/tf-edge-access.jsonl"
 DEFAULT_EDGE_HOST = "0.0.0.0"
+DEFAULT_OLLA_VERSION = "v0.0.27"
+DEFAULT_OLLA_OS = "macos"
+DEFAULT_OLLA_ARCH = "arm64"
+DEFAULT_OLLA_BIN_DIR = ".tmp/olla-bin"
+DEFAULT_SYNC_TRANSPORT = "auto"
+DEFAULT_SYNC_TIMEOUT = 7200
+DEFAULT_SYNC_RESTART_RUNTIME = True
+DEFAULT_SMOKE_TIMEOUT = 30.0
 
 
 class ServingMode(StrEnum):
@@ -151,9 +159,34 @@ class ServiceConfig:
     edge_host: str = DEFAULT_EDGE_HOST
     edge_port: int = DEFAULT_EDGE_PORT
     olla_port: int = DEFAULT_OLLA_PORT
+    olla_version: str = DEFAULT_OLLA_VERSION
+    olla_os: str = DEFAULT_OLLA_OS
+    olla_arch: str = DEFAULT_OLLA_ARCH
+    olla_bin_dir: str = DEFAULT_OLLA_BIN_DIR
     omlx_port: int = DEFAULT_OMLX_PORT
     edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
     frontend_admin_user: str = ""
+
+
+@dataclass
+class OperationSmokeConfig:
+    alias: str = ""
+    model: str = ""
+    client_id: str = ""
+    timeout: float = DEFAULT_SMOKE_TIMEOUT
+
+
+@dataclass
+class OperationSyncConfig:
+    transport: str = DEFAULT_SYNC_TRANSPORT
+    timeout: int = DEFAULT_SYNC_TIMEOUT
+    restart_runtime: bool = DEFAULT_SYNC_RESTART_RUNTIME
+
+
+@dataclass
+class OperationConfig:
+    smoke: OperationSmokeConfig = field(default_factory=OperationSmokeConfig)
+    sync: OperationSyncConfig = field(default_factory=OperationSyncConfig)
 
 
 @dataclass(init=False)
@@ -216,6 +249,7 @@ class ClusterConfig:
     models: dict[str, Model] = field(default_factory=dict)
     nodes: dict[str, Node] = field(default_factory=dict)
     services: ServiceConfig = field(default_factory=ServiceConfig)
+    operations: OperationConfig = field(default_factory=OperationConfig)
 
     @property
     def compute_nodes(self) -> dict[str, Node]:
@@ -286,6 +320,51 @@ def _parse_service_port(raw: dict, service_name: str, default: int) -> int:
     return parse_port(service_raw.get("port", default), name=f"services.{service_name}.port")
 
 
+def _parse_positive_int(raw: object, *, name: str, default: int) -> int:
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        msg = f"{name} must be an integer"
+        raise ValueError(msg) from exc
+    if value <= 0:
+        msg = f"{name} must be positive"
+        raise ValueError(msg)
+    return value
+
+
+def _parse_positive_float(raw: object, *, name: str, default: float) -> float:
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        msg = f"{name} must be a number"
+        raise ValueError(msg) from exc
+    if value <= 0:
+        msg = f"{name} must be positive"
+        raise ValueError(msg)
+    return value
+
+
+def _parse_bool(raw: object, *, name: str, default: bool) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    msg = f"{name} must be boolean true/false"
+    raise ValueError(msg)
+
+
+def _parse_transport(raw: object, *, name: str, default: str) -> str:
+    value = str(raw or default).strip()
+    if value not in {"auto", "fabric", "management"}:
+        msg = f"{name} must be one of: auto, fabric, management"
+        raise ValueError(msg)
+    return value
+
+
 def _parse_services(raw: object) -> ServiceConfig:
     if raw is None:
         raw = {}
@@ -309,13 +388,66 @@ def _parse_services(raw: object) -> ServiceConfig:
         msg = "services.frontend must be a mapping"
         raise ValueError(msg)
     frontend_admin_user = str(frontend_raw.get("admin_user", "")).strip()
+    olla_raw = raw.get("olla", {}) or {}
+    if not isinstance(olla_raw, dict):
+        msg = "services.olla must be a mapping"
+        raise ValueError(msg)
     return ServiceConfig(
         edge_host=edge_host,
         edge_port=_parse_service_port(raw, "edge", DEFAULT_EDGE_PORT),
         olla_port=_parse_service_port(raw, "olla", DEFAULT_OLLA_PORT),
+        olla_version=str(olla_raw.get("version", DEFAULT_OLLA_VERSION)).strip() or DEFAULT_OLLA_VERSION,
+        olla_os=str(olla_raw.get("os", DEFAULT_OLLA_OS)).strip() or DEFAULT_OLLA_OS,
+        olla_arch=str(olla_raw.get("arch", DEFAULT_OLLA_ARCH)).strip() or DEFAULT_OLLA_ARCH,
+        olla_bin_dir=str(olla_raw.get("bin_dir", DEFAULT_OLLA_BIN_DIR)).strip() or DEFAULT_OLLA_BIN_DIR,
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
         edge_access_log=edge_access_log,
         frontend_admin_user=frontend_admin_user,
+    )
+
+
+def _parse_operations(raw: object) -> OperationConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        msg = "operations must be a mapping"
+        raise ValueError(msg)
+    smoke_raw = raw.get("smoke", {}) or {}
+    if not isinstance(smoke_raw, dict):
+        msg = "operations.smoke must be a mapping"
+        raise ValueError(msg)
+    sync_raw = raw.get("sync", {}) or {}
+    if not isinstance(sync_raw, dict):
+        msg = "operations.sync must be a mapping"
+        raise ValueError(msg)
+    return OperationConfig(
+        smoke=OperationSmokeConfig(
+            alias=str(smoke_raw.get("alias", "")).strip(),
+            model=str(smoke_raw.get("model", "")).strip(),
+            client_id=str(smoke_raw.get("client_id", "")).strip(),
+            timeout=_parse_positive_float(
+                smoke_raw.get("timeout"),
+                name="operations.smoke.timeout",
+                default=DEFAULT_SMOKE_TIMEOUT,
+            ),
+        ),
+        sync=OperationSyncConfig(
+            transport=_parse_transport(
+                sync_raw.get("transport"),
+                name="operations.sync.transport",
+                default=DEFAULT_SYNC_TRANSPORT,
+            ),
+            timeout=_parse_positive_int(
+                sync_raw.get("timeout"),
+                name="operations.sync.timeout",
+                default=DEFAULT_SYNC_TIMEOUT,
+            ),
+            restart_runtime=_parse_bool(
+                sync_raw.get("restart_runtime"),
+                name="operations.sync.restart_runtime",
+                default=DEFAULT_SYNC_RESTART_RUNTIME,
+            ),
+        ),
     )
 
 
@@ -403,6 +535,7 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
     The user field is stored as-is from the raw dict (empty string if unset).
     """
     services = _parse_services(raw.get("services", {}))
+    operations = _parse_operations(raw.get("operations", {}))
     models = {k: _parse_model(k, v) for k, v in raw.get("models", {}).items()}
 
     nodes = {}
@@ -430,6 +563,7 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
         models=models,
         nodes=nodes,
         services=services,
+        operations=operations,
     )
 
 
