@@ -24,7 +24,7 @@ def test_config_lint_reports_errors_and_warnings(tmp_path: Path, monkeypatch) ->
                 host: infer-03.lan
                 ram_gb: 128
                 user: shag
-                roles: [node]
+                roles: [inference]
                 runtime:
                   type: omlx
                   port: 8018
@@ -60,7 +60,7 @@ def test_config_lint_passes_clean_config(tmp_path: Path, monkeypatch) -> None:
                 host: infer-03.lan
                 ram_gb: 128
                 user: shag
-                roles: [node]
+                roles: [inference]
                 runtime:
                   type: omlx
                   port: 8018

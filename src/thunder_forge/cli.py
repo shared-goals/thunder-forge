@@ -626,7 +626,7 @@ def _resolve_prepare_targets(config: ClusterConfig, target: str | None) -> tuple
         node = config.nodes[target]
         gateway_names = [target] if node.has_role(NodeRole.GATEWAY) else []
         cache_names = [target] if node.has_role(NodeRole.CACHE) else []
-        inference_names = [target] if node.has_role(NodeRole.INFERENCE) or node.has_role(NodeRole.NODE) else []
+        inference_names = [target] if node.has_role(NodeRole.INFERENCE) else []
         if not gateway_names and not cache_names and not inference_names:
             typer.echo(f"Error: node '{target}' has no prepare role", err=True)
             raise typer.Exit(1)

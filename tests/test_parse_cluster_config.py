@@ -65,16 +65,23 @@ def test_parse_cluster_config_user_stored_as_is():
     assert config.nodes["n1"].user == ""
 
 
-def test_parse_cluster_config_rejects_legacy_roles():
-    """Deprecated role names are rejected instead of migrated."""
+def test_parse_cluster_config_rejects_node_role():
     raw = {
         "models": {},
         "nodes": {
             "n1": {"host": "n1.lan", "ram_gb": 64, "roles": ["node"]},
-            "gw": {"host": "gw.lan", "ram_gb": 32, "roles": ["infra"]},
         },
     }
     with pytest.raises(ValueError, match="not a valid"):
+        parse_cluster_config(raw)
+
+
+def test_parse_cluster_config_rejects_scalar_roles():
+    raw = {
+        "models": {},
+        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "roles": "inference"}},
+    }
+    with pytest.raises(ValueError, match="roles must be a non-empty list"):
         parse_cluster_config(raw)
 
 

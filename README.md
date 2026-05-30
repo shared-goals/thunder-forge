@@ -141,7 +141,7 @@ Thunder Forge keeps secrets and operational config separate:
 - `tfconfig.yaml` is ignored and is the local source of truth for services, operator defaults, model registry, and node placement.
 - `tfconfig.example.yaml` is tracked as the schema/example mirror.
 - `configs/` is ignored generated output, currently including `configs/olla-config.yaml`.
-- Config node roles are `gateway`, `cache`, and `inference`. Use `roles: [gateway, cache]` for multi-role hosts such as `gateway-cache-01`; use `role: inference` for oMLX-serving nodes such as `infer-01`.
+- Config node roles are `gateway`, `cache`, and `inference`. Use `roles: [gateway, cache]` for multi-role hosts such as `gateway-cache-01`; use `roles: [inference]` for oMLX-serving nodes such as `infer-01`.
 
 Create a local config with `cp tfconfig.example.yaml tfconfig.yaml`, then edit the local file for this host.
 

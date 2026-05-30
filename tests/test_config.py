@@ -148,21 +148,31 @@ def test_load_cluster_config_user_defaults(tmp_path: Path, monkeypatch: pytest.M
     assert config.nodes["rock"].user == "testuser"
 
 
-def test_load_cluster_config_rejects_legacy_roles(tmp_path: Path) -> None:
-    """Old role names are rejected instead of migrated."""
+def test_load_cluster_config_rejects_node_role(tmp_path: Path) -> None:
     content = dedent("""\
         models:
           coder:
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", roles: [infra] }
           infer-01: { host: "infer-01.lan", ram_gb: 128, user: "admin", roles: [node] }
     """)
     path = tmp_path / "tfconfig.yaml"
     path.write_text(content)
     with pytest.raises(ValueError, match="not a valid"):
         load_cluster_config(path)
+
+
+def test_load_cluster_config_rejects_scalar_roles(tmp_path: Path) -> None:
+        content = dedent("""\
+                models: {}
+                nodes:
+                    infer-01: { host: "infer-01.lan", ram_gb: 128, user: "admin", roles: inference }
+        """)
+        path = tmp_path / "tfconfig.yaml"
+        path.write_text(content)
+        with pytest.raises(ValueError, match="roles must be a non-empty list"):
+                load_cluster_config(path)
 
 
 def test_node_resolved_fields_default_to_none(cluster_yaml: Path) -> None:
@@ -215,7 +225,7 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
             host: infer-03.lan
             ram_gb: 128
             user: shag
-            roles: [node]
+            roles: [inference]
             runtime:
               type: omlx
               port: 8018
@@ -461,7 +471,7 @@ def test_lint_cluster_config_reports_unknown_models_and_exposure_warnings(tmp_pa
             host: infer-03.lan
             ram_gb: 128
             user: shag
-            roles: [node]
+            roles: [inference]
             runtime:
               type: omlx
               port: 8018
@@ -511,10 +521,10 @@ def test_load_cluster_config_loads_dotenv(cluster_yaml: Path, monkeypatch: pytes
     assert os.environ.get("HF_HOME") == "/test/hf/cache"
 
 
-def test_find_repo_root_ignores_legacy_node_assignments(monkeypatch, tmp_path: Path) -> None:
-    legacy_dir = tmp_path / "configs"
-    legacy_dir.mkdir()
-    (legacy_dir / "node-assignments.yaml").write_text("models: {}\nnodes: {}\n")
+def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text("models: {}\nnodes: {}\n")
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(FileNotFoundError, match="tfconfig.yaml"):

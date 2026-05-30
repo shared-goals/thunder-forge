@@ -47,10 +47,9 @@ class RuntimeType(StrEnum):
 
 
 class NodeRole(StrEnum):
-    NODE = "node"
     GATEWAY = "gateway"
     CACHE = "cache"
-    INFERENCE = "inference"  # legacy alias; prefer node
+    INFERENCE = "inference"
 
 
 def _represent_float(dumper: yaml.Dumper, value: float) -> yaml.ScalarNode:
@@ -195,7 +194,7 @@ class Node:
     ram_gb: int
     user: str
     admin_user: str
-    roles: list[NodeRole | str]
+    roles: list[NodeRole]
     fabric_host: bool
     runtime: NodeRuntime | None
     models: list[str]
@@ -211,7 +210,7 @@ class Node:
         ram_gb: int = 0,
         user: str = "",
         admin_user: str = "",
-        roles: list[NodeRole | str] | None = None,
+        roles: list[NodeRole] | None = None,
         *,
         fabric_host: bool = False,
         runtime: NodeRuntime | None = None,
@@ -238,10 +237,10 @@ class Node:
         self.homebrew_prefix = homebrew_prefix
 
     @property
-    def role(self) -> NodeRole | str:
+    def role(self) -> NodeRole:
         return self.roles[0]
 
-    def has_role(self, role: NodeRole | str) -> bool:
+    def has_role(self, role: NodeRole) -> bool:
         return role in self.roles
 
 
@@ -254,7 +253,7 @@ class ClusterConfig:
 
     @property
     def compute_nodes(self) -> dict[str, Node]:
-        return {k: v for k, v in self.nodes.items() if v.has_role(NodeRole.INFERENCE) or v.has_role(NodeRole.NODE)}
+        return {k: v for k, v in self.nodes.items() if v.has_role(NodeRole.INFERENCE)}
 
     @property
     def gateway_name(self) -> str:
@@ -489,8 +488,6 @@ def _parse_node_roles(raw: dict, *, node_name: str) -> list[NodeRole]:
         msg = f"Node '{node_name}': 'role' is not supported; use 'roles: [...]'"
         raise ValueError(msg)
     roles_raw: object = raw.get("roles", [NodeRole.INFERENCE])
-    if isinstance(roles_raw, str):
-        roles_raw = [roles_raw]
     if not isinstance(roles_raw, list) or not roles_raw:
         msg = f"Node '{node_name}': roles must be a non-empty list"
         raise ValueError(msg)
