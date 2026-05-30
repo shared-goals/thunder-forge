@@ -7,6 +7,8 @@ services:
   olla:
     port: 40115
   edge:
+    # Authenticated TF edge is the LAN-facing API. Keep raw Olla loopback-only.
+    host: "0.0.0.0"
     port: 40116
     access_log: logs/tf-edge-access.jsonl
   omlx:

@@ -393,7 +393,7 @@ def cluster_prepare(
             repo_root=repo_root,
             binary=binary_path,
             config_path=repo_root / "configs" / "olla-config.yaml",
-            edge_host="127.0.0.1",
+            edge_host=config.services.edge_host,
             olla_port=resolve_port(None, default=config.services.olla_port),
             edge_port=resolve_port(None, default=config.services.edge_port),
             olla_base_url=local_base_url(config.services.olla_port),
@@ -503,6 +503,7 @@ def cluster_restart(
 
         edge_result = run_edge_service_restart(
             repo_root=repo_root,
+            host=config.services.edge_host,
             port=resolve_port(None, default=config.services.edge_port),
             manager="daemon",
             apply=not dry_run,
@@ -660,7 +661,11 @@ def service_setup_daemon(
     ),
     binary: Path = typer.Option(Path(".tmp/olla-bin/olla"), "--binary", help="Olla binary path."),
     config_path: Path = typer.Option(Path("configs/olla-config.yaml"), "--config", help="Olla config path."),
-    edge_host: str = typer.Option("127.0.0.1", "--host", help="Host/interface for TF edge."),
+    edge_host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Host/interface for TF edge. Defaults to tfconfig services.edge.host.",
+    ),
     olla_port: int | None = typer.Option(
         None,
         "--olla-port",
@@ -706,7 +711,7 @@ def service_setup_daemon(
         "repo_root": repo_root,
         "binary": binary,
         "config_path": config_path,
-        "edge_host": edge_host,
+        "edge_host": edge_host or config.services.edge_host,
         "olla_port": resolve_port(olla_port, default=config.services.olla_port),
         "edge_port": resolve_port(edge_port, default=config.services.edge_port),
         "olla_base_url": olla_base_url or local_base_url(config.services.olla_port),
@@ -749,7 +754,11 @@ def service_restart(
         "--port",
         help="Service port. Defaults to the matching tfconfig services.*.port value.",
     ),
-    host: str = typer.Option("127.0.0.1", "--host", help="Host/interface for frontend services such as edge."),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Host/interface for frontend services such as edge. Defaults to tfconfig services.edge.host.",
+    ),
     olla_base_url: str | None = typer.Option(
         None,
         "--olla-base-url",
@@ -801,7 +810,7 @@ def service_restart(
         access_log_path = _edge_access_log_path(repo_root, config, access_log)
         result = run_edge_service_restart(
             repo_root=repo_root,
-            host=host,
+            host=host or config.services.edge_host,
             port=resolved_port,
             olla_base_url=resolved_olla_base_url,
             users_env=users_env,

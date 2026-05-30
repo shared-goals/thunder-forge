@@ -24,6 +24,7 @@ TF_CONFIG_EXAMPLE_FILENAME = "tfconfig.example.yaml"
 GENERATED_CONFIG_DIR = "configs"
 GENERATED_OLLA_CONFIG_FILENAME = "olla-config.yaml"
 DEFAULT_EDGE_ACCESS_LOG = "logs/tf-edge-access.jsonl"
+DEFAULT_EDGE_HOST = "0.0.0.0"
 
 
 class ServingMode(StrEnum):
@@ -145,6 +146,7 @@ class ConfigLintIssue:
 
 @dataclass
 class ServiceConfig:
+    edge_host: str = DEFAULT_EDGE_HOST
     edge_port: int = DEFAULT_EDGE_PORT
     olla_port: int = DEFAULT_OLLA_PORT
     omlx_port: int = DEFAULT_OMLX_PORT
@@ -296,12 +298,17 @@ def _parse_services(raw: object) -> ServiceConfig:
     if not edge_access_log:
         msg = "services.edge.access_log must not be empty"
         raise ValueError(msg)
+    edge_host = str(edge_raw.get("host", DEFAULT_EDGE_HOST)).strip()
+    if not edge_host:
+        msg = "services.edge.host must not be empty"
+        raise ValueError(msg)
     frontend_raw = raw.get("frontend", {}) or {}
     if not isinstance(frontend_raw, dict):
         msg = "services.frontend must be a mapping"
         raise ValueError(msg)
     frontend_admin_user = str(frontend_raw.get("admin_user", "")).strip()
     return ServiceConfig(
+        edge_host=edge_host,
         edge_port=_parse_service_port(raw, "edge", DEFAULT_EDGE_PORT),
         olla_port=_parse_service_port(raw, "olla", DEFAULT_OLLA_PORT),
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),

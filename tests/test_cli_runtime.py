@@ -320,6 +320,7 @@ def test_service_setup_daemon_dry_run_prints_gateway_plan(tmp_path: Path, monkey
               olla:
                 port: 45115
               edge:
+                host: 0.0.0.0
                 port: 45116
                 access_log: logs/custom-edge.jsonl
             models: {}
@@ -368,6 +369,7 @@ def test_service_setup_daemon_dry_run_prints_gateway_plan(tmp_path: Path, monkey
     assert calls[0]["repo_root"] == repo
     assert calls[0]["user"] == "shag"
     assert calls[0]["admin_user"] == "serpo"
+    assert calls[0]["edge_host"] == "0.0.0.0"
     assert calls[0]["olla_port"] == 45115
     assert calls[0]["edge_port"] == 45116
     assert calls[0]["access_log_path"] == repo / "logs/custom-edge.jsonl"
@@ -412,6 +414,8 @@ def test_cluster_prepare_dry_run_prints_unified_plan(tmp_path: Path, monkeypatch
                         services:
                             frontend:
                                 admin_user: serpo
+                            edge:
+                                host: 0.0.0.0
                         models: {}
                         nodes:
                             studio:
@@ -472,6 +476,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
                 """)
         )
         calls: list[str] = []
+        gateway_calls: list[dict] = []
 
         def fake_ensure_olla_binary(**kwargs):
                 calls.append("olla")
@@ -484,6 +489,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
 
         def fake_run_gateway_daemon_setup(**kwargs):
                 calls.append("gateway")
+                gateway_calls.append(kwargs)
                 kwargs["progress"]("health: gateway ok")
                 return GatewayDaemonSetupResult(
                         user=kwargs["user"],
@@ -531,6 +537,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
 
         assert result.exit_code == 0
         assert calls == ["olla", "config", "gateway", "cache", "inference"]
+        assert gateway_calls[0]["edge_host"] == "0.0.0.0"
         assert "== Gateway: studio (studio.lan) ==" in result.stdout
         assert "auth: operator=shag admin=serpo reason=install Olla + TF edge LaunchDaemons" in result.stdout
         assert "== Cache Hub: studio (studio.lan) ==" in result.stdout
@@ -550,6 +557,7 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
               olla:
                 port: 45115
               edge:
+                host: 0.0.0.0
                 port: 45116
             models: {}
             nodes:
@@ -568,6 +576,7 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
         """)
     )
     calls: list[str] = []
+    edge_calls: list[dict] = []
 
     def fake_write_generated_olla_config(config, *, repo_root, port=None):
         calls.append("config")
@@ -587,13 +596,19 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
     monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
     monkeypatch.setattr(cli_module, "run_olla_service_restart", lambda **kwargs: fake_service(service="olla", **kwargs))
-    monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
+
+    def fake_edge_restart(**kwargs):
+        edge_calls.append(kwargs)
+        return fake_service(service="edge", **kwargs)
+
+    monkeypatch.setattr(cli_module, "run_edge_service_restart", fake_edge_restart)
     monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", lambda *args, **kwargs: fake_service(service="omlx"))
 
     result = runner.invoke(app, ["cluster", "restart", "--apply"])
 
     assert result.exit_code == 0
     assert calls == ["config", "olla", "edge", "omlx"]
+    assert edge_calls[0]["host"] == "0.0.0.0"
     assert "Thunder Forge cluster restart" in result.stdout
     assert "status: cluster restart complete" in result.stdout
 

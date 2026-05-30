@@ -8,6 +8,7 @@ import yaml as yaml_lib
 
 from thunder_forge.cluster.config import (
     DEFAULT_EDGE_ACCESS_LOG,
+    DEFAULT_EDGE_HOST,
     find_repo_root,
     generate_olla_config,
     lint_cluster_config,
@@ -383,17 +384,19 @@ def test_runtime_port_defaults_to_shared_omlx_service_port() -> None:
     assert config.nodes["msm3"].runtime.port == 8818
 
 
-def test_edge_access_log_defaults_and_overrides() -> None:
+def test_edge_defaults_and_overrides() -> None:
     default_config = parse_cluster_config({"models": {}, "nodes": {}})
+    assert default_config.services.edge_host == DEFAULT_EDGE_HOST
     assert default_config.services.edge_access_log == DEFAULT_EDGE_ACCESS_LOG
 
     configured = parse_cluster_config(
         {
-            "services": {"edge": {"access_log": "logs/custom-edge.jsonl"}},
+            "services": {"edge": {"host": "127.0.0.1", "access_log": "logs/custom-edge.jsonl"}},
             "models": {},
             "nodes": {},
         }
     )
+    assert configured.services.edge_host == "127.0.0.1"
     assert configured.services.edge_access_log == "logs/custom-edge.jsonl"
 
 

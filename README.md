@@ -149,6 +149,7 @@ Thunder Forge service ports live in `tfconfig.yaml` under `services:`:
 | Config key | Default | Service |
 |------------|---------|---------|
 | `services.olla.port` | `40115` | Local Olla router on the frontend host |
+| `services.edge.host` | `0.0.0.0` | TF edge bind address; use `0.0.0.0` for LAN clients, keep raw Olla private |
 | `services.edge.port` | `40116` | Local TF edge OpenAI-compatible proxy |
 | `services.omlx.port` | `8018` | Default oMLX node runtime port when a node runtime omits `port` |
 | `services.edge.access_log` | `logs/tf-edge-access.jsonl` | TF edge JSONL accounting log |

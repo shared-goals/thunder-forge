@@ -1,6 +1,7 @@
 """CLI tests for Thunder Forge edge smoke commands."""
 
 import json
+import os
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -103,9 +104,13 @@ def test_edge_serve_cli_builds_proxy_config_from_env_without_printing_key(monkey
     import thunder_forge.cli as cli_module
 
     captured: dict[str, object] = {}
+    for env_name in list(os.environ):
+        if env_name.startswith("TF_USER_"):
+            monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setenv("TF_USER_CLIENT_A", "secret-a")
     monkeypatch.setenv("TF_USER_CLIENT_B", "secret-b")
     monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (Path.cwd(), Path.cwd() / ".env"), raising=False)
 
     def fake_serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
         captured["host"] = host
