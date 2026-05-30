@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,24 +79,23 @@ def _gateway_setup_run_command(
     admin_user: str,
     interactive_sudo: bool,
 ) -> list[str]:
+    host = socket.gethostname()
+    host_tag = f"[{host}] " if host else ""
     quoted_script = shlex.quote(script_path)
     if admin_user:
-        sudo_prompt = f"Password for {admin_user} on %h to set up Thunder Forge gateway daemons: "
+        sudo_prompt = f"[%h] Password for {admin_user} — Thunder Forge gateway daemons: "
         sudo_command = (
             f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} /bin/zsh {quoted_script}"
             if interactive_sudo
             else f"/usr/bin/sudo -n /bin/zsh {quoted_script}"
         )
-        notice = (
-            f"Next prompt 'Password:' is su asking for admin user {admin_user}'s local macOS login password "
-            "so Thunder Forge can install gateway daemon sudoers."
-        )
+        notice = f"{host_tag}su: {admin_user}'s macOS login password needed to install Thunder Forge gateway daemons."
         return [
             f"printf '%s\\n' {shlex.quote(notice)}",
             f"/usr/bin/su - {shlex.quote(admin_user)} -c {shlex.quote(sudo_command)}",
         ]
 
-    sudo_prompt = "Password for %p on %h to set up Thunder Forge gateway daemons: "
+    sudo_prompt = "[%h] Password for %p — Thunder Forge gateway daemons: "
     sudo_command = (
         f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} /bin/zsh {quoted_script}"
         if interactive_sudo
@@ -103,7 +103,7 @@ def _gateway_setup_run_command(
     )
     if not interactive_sudo:
         return [sudo_command]
-    notice = "sudo needs the local macOS login password for a sudo-capable gateway admin account."
+    notice = f"{host_tag}sudo: local macOS admin password needed to set up Thunder Forge gateway daemons."
     return [f"printf '%s\\n' {shlex.quote(notice)}", sudo_command]
 
 

@@ -681,21 +681,17 @@ echo "label: $LABEL"
 """
 
 
-def _daemon_setup_run_command(script_path: str, *, admin_user: str, via_su: bool, label: str = "") -> str:
+def _daemon_setup_run_command(script_path: str, *, admin_user: str, via_su: bool, label: str = "", host: str = "") -> str:
     quoted_script = shlex.quote(script_path)
     target = f"Thunder Forge oMLX daemon {label}" if label else "Thunder Forge oMLX daemon"
-    sudo_prompt = f"Password for {admin_user or '%p'} on %h to set up {target}: "
+    host_tag = f"[{host}] " if host else ""
+    sudo_prompt = f"[%h] Password for {admin_user or '%p'} — {target}: "
     if not via_su:
-        notice = f"sudo may ask for the admin password to bootstrap {target}."
+        notice = f"{host_tag}sudo: {admin_user or 'your'}'s local password needed to set up {target}."
         sudo_command = f"/usr/bin/sudo -p {shlex.quote(sudo_prompt)} /bin/zsh {quoted_script}"
         return f"chmod 700 {quoted_script} && printf '%s\\n' {shlex.quote(notice)} && {sudo_command}"
-    su_notice = (
-        f"Next prompt 'Password:' is su asking for admin user {admin_user}'s local macOS login password "
-        f"on the node so Thunder Forge can bootstrap {target}."
-    )
-    sudo_notice = (
-        f"After su succeeds, sudo may ask once for admin user {admin_user}'s password to install/restart {target}."
-    )
+    su_notice = f"{host_tag}su: {admin_user}'s macOS login password needed to bootstrap {target}."
+    sudo_notice = f"{host_tag}sudo: {admin_user}'s password needed to install {target}."
     admin_shell = "; ".join(
         [
             f"printf '%s\\n' {shlex.quote(sudo_notice)}",
@@ -721,7 +717,7 @@ def _build_omlx_daemon_setup_result(
         raise ValueError(msg)
 
     resolved_admin_user = admin_user or node.user
-    resolved_ssh_user = node.user if via_su else resolved_admin_user
+    resolved_ssh_user = node.user  # always SSH as operator user; via_su/ssh-admin controls escalation method
     resolved_script_path = script_path or f"/tmp/thunder-forge-setup-{daemon_result.label}.sh"
     sudoers_path = daemon_sudoers_path_for_node(node)
     setup_result = OmlxDaemonSetupResult(
@@ -740,11 +736,14 @@ def _build_omlx_daemon_setup_result(
         return setup_result
 
     setup_result.script_content = generate_daemon_setup_script(node, sudoers_path=sudoers_path)
+    # In --ssh-admin mode shag does sudo directly; prompt should name shag not admin_user
+    prompt_user = resolved_admin_user if via_su else node.user
     run_command = _daemon_setup_run_command(
         resolved_script_path,
-        admin_user=resolved_admin_user,
+        admin_user=prompt_user,
         via_su=via_su,
         label=daemon_result.label,
+        host=node.host,
     )
     setup_result.commands = [
         f"copy setup script to {resolved_ssh_user}@{node.host}:{resolved_script_path}",

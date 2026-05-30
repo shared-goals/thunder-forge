@@ -84,19 +84,21 @@ daemon-bootstrap:
 		if [ -z "$$node_arg" ] || [ "$$node_arg" = "$(GATEWAY_NODE)" ]; then \
 			$(MAKE) -s _olla-install; \
 			$(MAKE) -s config; \
-			echo "Bootstrapping gateway daemons on $(GATEWAY_NODE); expect password prompts"; \
+			echo ""; \
+			echo "--- Gateway: $(GATEWAY_NODE) ---"; \
 			uv run thunder-forge service setup-daemon --binary "$(OLLA_BIN)" --config configs/olla-config.yaml --timeout 300 --allow-sudo-prompt --apply; \
+			echo ""; \
 		fi; \
 		if [ -z "$$node_arg" ] || [ "$$node_arg" != "$(GATEWAY_NODE)" ]; then \
 			if [ -n "$$node_arg" ]; then infer_nodes="$$node_arg"; else infer_nodes="$(DAEMON_NODES)"; fi; \
 			for n in $$infer_nodes; do \
+				echo "--- Inference: $$n ---"; \
 				if [ -n "$(DAEMON_ADMIN_USER)" ]; then \
-					echo "Bootstrapping oMLX daemon on $$n (su to $(DAEMON_ADMIN_USER)); expect password prompts"; \
 					uv run thunder-forge runtime setup-daemon --node "$$n" --admin-user "$(DAEMON_ADMIN_USER)" --via-su --apply; \
 				else \
-					echo "Bootstrapping oMLX daemon on $$n (sudo as shag); expect shag sudo password prompt"; \
 					uv run thunder-forge runtime setup-daemon --node "$$n" --ssh-admin --apply; \
 				fi; \
+				echo ""; \
 			done; \
 		fi
 
@@ -106,15 +108,18 @@ daemon-restart:
 		if [ -z "$$node_arg" ] || [ "$$node_arg" = "$(GATEWAY_NODE)" ]; then \
 			$(MAKE) -s _olla-install; \
 			$(MAKE) -s config; \
-			echo "Restarting gateway services (olla + edge) on $(GATEWAY_NODE)"; \
+			echo ""; \
+			echo "--- Gateway: $(GATEWAY_NODE) ---"; \
 			uv run thunder-forge service restart --service olla --manager daemon --binary "$(OLLA_BIN)" --config configs/olla-config.yaml --timeout 300 --apply; \
 			uv run thunder-forge service restart --service edge --manager daemon --timeout 300 --apply; \
+			echo ""; \
 		fi; \
 		if [ -z "$$node_arg" ] || [ "$$node_arg" != "$(GATEWAY_NODE)" ]; then \
 			if [ -n "$$node_arg" ]; then infer_nodes="$$node_arg"; else infer_nodes="$(DAEMON_NODES)"; fi; \
 			for n in $$infer_nodes; do \
-				echo "Restarting oMLX daemon on $$n"; \
+				echo "--- Inference: $$n ---"; \
 				uv run thunder-forge service restart --service omlx --node "$$n" --manager daemon --apply; \
+				echo ""; \
 			done; \
 		fi
 

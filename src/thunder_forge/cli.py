@@ -1020,16 +1020,17 @@ def runtime_setup_daemon(
         raise typer.Exit(1)
 
     if not dry_run:
-        typer.echo(f"Bootstrapping oMLX daemon on {node} with admin_user: {resolved_admin_user or runtime_node.user}")
         if via_su:
             typer.echo(
-                "SSH will connect as the node operator user, then su to the admin user. "
-                "The next raw 'Password:' prompt is the admin user's local node password."
+                f"[{runtime_node.host}] Bootstrap: SSH as {runtime_node.user}, "
+                f"then su to {resolved_admin_user}. "
+                f"su will ask for {resolved_admin_user}'s macOS login password."
             )
         else:
             typer.echo(
-                "SSH will connect as the admin user directly. "
-                "If sudo needs a password, Thunder Forge will use a labeled sudo prompt."
+                f"[{runtime_node.host}] Bootstrap: SSH as {runtime_node.user}, "
+                f"then sudo. "
+                f"sudo will prompt for {runtime_node.user}'s local password."
             )
 
     result = run_omlx_daemon_setup(
@@ -1041,6 +1042,7 @@ def runtime_setup_daemon(
         timeout=timeout,
     )
 
+    typer.echo("")
     _print_runtime_node_header(node, runtime_node)
     typer.echo("manager: daemon")
     typer.echo(f"admin_user: {result.admin_user}")
