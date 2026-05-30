@@ -664,16 +664,26 @@ for legacy in "$SUDOERS_DIR"/thunder-forge-omlx-*; do
     run_root /bin/rm -f "$legacy"
 done
 unsetopt nullglob 2>/dev/null || true
-run_root /usr/bin/install -o "$NODE_USER" -g staff -m 644 "$TMP_PLIST" "$STAGING_PLIST_PATH"
-run_root /usr/bin/install -o root -g wheel -m 644 "$TMP_PLIST" "$PLIST_PATH"
-run_root /usr/bin/install -o root -g wheel -m 440 "$TMP_SUDOERS" "$SUDOERS_PATH"
 
+# Bootout before touching the plist on disk to avoid launchd state conflicts
 NODE_UID="$(/usr/bin/id -u "$NODE_USER")"
 run_root /bin/launchctl bootout "user/$NODE_UID/$LABEL" 2>/dev/null || true
 run_root /bin/launchctl bootout "gui/$NODE_UID/$LABEL" 2>/dev/null || true
 run_root /bin/launchctl bootout "system/$LABEL" 2>/dev/null || true
 run_root /usr/bin/pkill -f "$PROCESS_PATTERN" 2>/dev/null || true
-run_root /bin/launchctl bootstrap system "$PLIST_PATH"
+
+run_root /usr/bin/install -o "$NODE_USER" -g staff -m 644 "$TMP_PLIST" "$STAGING_PLIST_PATH"
+run_root /usr/bin/install -o root -g wheel -m 644 "$TMP_PLIST" "$PLIST_PATH"
+run_root /usr/bin/install -o root -g wheel -m 440 "$TMP_SUDOERS" "$SUDOERS_PATH"
+
+# Enable clears any "disabled" override left by prior failed bootstrap attempts
+run_root /bin/launchctl enable "system/$LABEL" 2>/dev/null || true
+if ! run_root /bin/launchctl bootstrap system "$PLIST_PATH" 2>&1; then
+    echo "Bootstrap failed; diagnosing..." >&2
+    echo "plist: $PLIST_PATH" >&2
+    run_root /bin/launchctl print "system/$LABEL" 2>&1 || true
+    exit 1
+fi
 run_root /bin/launchctl kickstart -k "system/$LABEL"
 run_root /bin/launchctl print "system/$LABEL" >/dev/null
 
