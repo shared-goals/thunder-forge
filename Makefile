@@ -101,7 +101,7 @@ daemon-bootstrap:
 				if [ -n "$(DAEMON_ADMIN_USER)" ]; then \
 					uv run thunder-forge runtime setup-daemon --node "$$n" --admin-user "$(DAEMON_ADMIN_USER)" --via-su --apply; \
 				else \
-					uv run thunder-forge runtime setup-daemon --node "$$n" --ssh-admin --apply; \
+					uv run thunder-forge runtime setup-daemon --node "$$n" --via-su --apply; \
 				fi; \
 				echo ""; \
 			done; \
