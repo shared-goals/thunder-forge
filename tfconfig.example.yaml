@@ -32,6 +32,16 @@ models:
     max_context: 262144
     notes: "SOTA agentic coding. Tool calling, error recovery, 262K context."
 
+  coder-better:
+    source:
+      repo: "mlx-community/Qwen3-Coder-Next-mxfp8"
+    runtime_model_id: Qwen3-Coder-Next-mxfp8
+    disk_gb: 79.7
+    kv_per_32k_gb: 0.75
+    active_params: "3B of 80B"
+    max_context: 262144
+    notes: "MXFP8 Qwen3 Coder Next candidate. Higher fidelity than 4bit; heavier disk/RAM budget."
+
   agent:
     source:
       repo: "mlx-community/Qwen3.6-35B-A3B-4bit"
@@ -41,6 +51,16 @@ models:
     active_params: "3B of 35B"
     max_context: 262144
     notes: "Fast agent. 73.4% SWE-bench. Thinking mode by default."
+
+  agent-better:
+    source:
+      repo: "mlx-community/Qwen3.6-35B-A3B-mxfp8"
+    runtime_model_id: Qwen3.6-35B-A3B-mxfp8
+    disk_gb: 10.2
+    kv_per_32k_gb: 0.5
+    active_params: "3B of 35B"
+    max_context: 262144
+    notes: "MXFP8 Qwen3.6 35B A3B candidate for higher-quality agent routing."
 
   agent-heavy:
     source:
@@ -120,6 +140,7 @@ nodes:
   #   models:
   #     - memory
   #     - coder
+  #     - coder-better
 
   # msm2:
   #   host: "msm2-wifi.lan"
@@ -132,6 +153,7 @@ nodes:
   #   models:
   #     - memory
   #     - coder
+  #     - coder-better
 
   msm3:
     host: "msm3-wifi.lan"
@@ -147,6 +169,7 @@ nodes:
       - memory
       - memory-bf16
       - agent
+      - agent-better
       - agent-heavy
 
   # msm4: enable when migrating direct Hindsight oMLX into TF v2.
@@ -160,3 +183,4 @@ nodes:
   # models:
   #   - memory
   #   - agent
+  #   - agent-better
