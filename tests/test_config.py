@@ -207,6 +207,8 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
               bind_host: 127.0.0.1
               base_path: /Users/shag/.omlx-tf
               log_level: warning
+              max_model_memory: 90GB
+              max_process_memory: auto
               max_concurrent_requests: 4
               paged_ssd_cache_dir: /Users/shag/.omlx/cache
               paged_ssd_cache_max_size: 50GB
@@ -226,6 +228,8 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
     assert runtime.bind_host == "127.0.0.1"
     assert runtime.base_path == "/Users/shag/.omlx-tf"
     assert runtime.log_level == "warning"
+    assert runtime.max_model_memory == "90GB"
+    assert runtime.max_process_memory == "auto"
     assert runtime.max_concurrent_requests == 4
     assert runtime.paged_ssd_cache_dir == "/Users/shag/.omlx/cache"
     assert runtime.paged_ssd_cache_max_size == "50GB"

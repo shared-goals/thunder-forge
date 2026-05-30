@@ -120,6 +120,10 @@ def _omlx_program_arguments(node: Node) -> list[str]:
         args.extend(["--base-path", runtime.base_path])
     if runtime.log_level is not None:
         args.extend(["--log-level", runtime.log_level])
+    if runtime.max_model_memory is not None:
+        args.extend(["--max-model-memory", runtime.max_model_memory])
+    if runtime.max_process_memory is not None:
+        args.extend(["--max-process-memory", runtime.max_process_memory])
     if runtime.max_concurrent_requests is not None:
         args.extend(["--max-concurrent-requests", str(runtime.max_concurrent_requests)])
     if runtime.paged_ssd_cache_dir is not None:

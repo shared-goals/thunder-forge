@@ -127,6 +127,8 @@ class NodeRuntime:
     bind_host: str = "0.0.0.0"
     base_path: str | None = None
     log_level: str | None = None
+    max_model_memory: str | None = None
+    max_process_memory: str | None = None
     max_concurrent_requests: int | None = None
     paged_ssd_cache_dir: str | None = None
     paged_ssd_cache_max_size: str | None = None
@@ -327,6 +329,8 @@ def _parse_node_runtime(raw: dict | None, *, default_port: int = DEFAULT_OMLX_PO
         bind_host=raw.get("bind_host", "0.0.0.0"),
         base_path=raw.get("base_path"),
         log_level=raw.get("log_level"),
+        max_model_memory=raw.get("max_model_memory"),
+        max_process_memory=raw.get("max_process_memory"),
         max_concurrent_requests=raw.get("max_concurrent_requests"),
         paged_ssd_cache_dir=raw.get("paged_ssd_cache_dir"),
         paged_ssd_cache_max_size=raw.get("paged_ssd_cache_max_size"),

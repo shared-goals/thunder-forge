@@ -170,7 +170,6 @@ nodes:
       - memory-bf16
       - agent
       - agent-better
-      - agent-heavy
 
   # msm4: enable when migrating direct Hindsight oMLX into TF v2.
   # host: "msm4-wifi.lan"
