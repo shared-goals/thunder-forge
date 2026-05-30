@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync config client
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync config opencode hermes
 ARG ?= $(word 2,$(MAKECMDGOALS))
 
 ifneq ($(ARG),)
@@ -21,7 +21,8 @@ help:
 	@printf "  %-24s %s\n" "status [node]" "check oMLX health on inference nodes"
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
 	@printf "  %-24s %s\n" "config" "generate configs/olla-config.yaml"
-	@printf "  %-24s %s\n" "client [id]" "create client key and print/copy OpenCode config"
+	@printf "  %-24s %s\n" "opencode [id]" "create client key and print/copy OpenCode config"
+	@printf "  %-24s %s\n" "hermes [id]" "create client key and print/copy Hermes config"
 	@echo ""
 	@echo "Developer:"
 	@printf "  %-24s %s\n" "dev-sync" "update the uv environment"
@@ -70,8 +71,11 @@ sync:
 config:
 	$(UV) thunder-forge generate-olla-config
 
-client:
-	@$(UV) thunder-forge edge opencode-config --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key --yes "$(ARG)")
+opencode:
+	@$(UV) thunder-forge edge client-config opencode --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key --yes "$(ARG)")
+
+hermes:
+	@$(UV) thunder-forge edge client-config hermes --copy $(if $(strip $(ARG)),--create-missing-key --yes "$(ARG)")
 
 .PHONY: $(_TARGETS)
 .DEFAULT_GOAL := help

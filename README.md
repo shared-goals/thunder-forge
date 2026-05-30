@@ -313,23 +313,23 @@ OpenCode custom providers require a `provider.<id>.models` map for the `/models`
 }
 ```
 
-Generate or refresh the OpenCode config from `tfconfig.yaml` after changing model placement. The `client` target prints the generated config and copies the same payload to the terminal clipboard through OSC52. In tmux and screen-like terminals it wraps OSC52 with multiplexer passthrough sequences so remote iTerm2/tmux sessions can forward the copy to the local clipboard:
+Generate or refresh the OpenCode config from `tfconfig.yaml` after changing model placement. The `opencode` target prints the generated config and copies the same payload to the terminal clipboard through OSC52. In tmux and screen-like terminals it wraps OSC52 with multiplexer passthrough sequences so remote iTerm2/tmux sessions can forward the copy to the local clipboard:
 
 ```bash
-make client
+make opencode
 ```
 
 Pass a TF edge client id to inject that client's API key directly into the generated config. If the key is missing, the command creates `TF_USER_<CLIENT>` in `.env`, then prints and copies the config:
 
 ```bash
-make client gnezim
+make opencode shag
 ```
 
 Omit the client id to keep the safer `{env:TF_USER_OPENCODE}` placeholder. The CLI defaults to JSONC so it can include comments. Use the direct command when strict JSON, a custom base URL, or an output file is needed:
 
 ```bash
-uv run thunder-forge edge opencode-config gnezim --inject-api-key --create-missing-key --yes --copy --base-url http://gateway-01.lan:40116/v1 --output $HOME/.config/opencode/opencode.jsonc
-uv run thunder-forge edge opencode-config --format json
+uv run thunder-forge edge client-config opencode shag --inject-api-key --create-missing-key --yes --copy --base-url http://gateway-01.lan:40116/v1 --output $HOME/.config/opencode/opencode.jsonc
+uv run thunder-forge edge client-config opencode --format json
 ```
 
 You can also inspect the live TF edge catalog directly:
@@ -338,6 +338,94 @@ You can also inspect the live TF edge catalog directly:
 curl -sS -H "Authorization: Bearer $TF_USER_OPENCODE" http://gateway-01.lan:40116/v1/models \
 	| jq '.data[] | {alias: .id, model: (.tf_source_repo // .tf_runtime_model_id)}'
 ```
+
+### Hermes Provider
+
+Hermes Agent uses named custom providers for OpenAI-compatible endpoints. Keep the existing Hermes default provider in its top-level `model:` block unless Thunder Forge should become the default. Add Thunder Forge under `custom_providers` so it is available for explicit model switches.
+
+For the `shag` client, keep the API key in the Hermes env file:
+
+```dotenv
+# ~/.hermes/.env
+TF_USER_SHAG=replace-with-generated-key
+```
+
+Then add or merge this provider entry into `~/.hermes/config.yaml`:
+
+```yaml
+custom_providers:
+  - name: thunder-forge
+    base_url: http://studio.lan:40116/v1
+    key_env: TF_USER_SHAG
+    api_mode: chat_completions
+    models:
+      # mlx-community/Qwen3.6-35B-A3B-4bit
+      agent: {}
+      # mlx-community/Qwen3.6-35B-A3B-mxfp8
+      agent-better: {}
+      # mlx-community/Qwen3-Coder-Next-4bit
+      coder: {}
+      # mlx-community/Qwen3-Coder-Next-mxfp8
+      coder-better: {}
+      # mlx-community/gpt-oss-20b-MXFP4-Q8
+      memory: {}
+      # mlx-community/gpt-oss-20b-mxfp4-bf16
+      memory-bf16: {}
+```
+
+Switch to a Thunder Forge alias explicitly from the command line:
+
+```bash
+hermes --provider custom:thunder-forge -m agent -z 'Reply exactly: ok'
+```
+
+Inside an existing Hermes session, use the named custom provider form:
+
+```text
+/model custom:thunder-forge:coder
+```
+
+Hermes may discover backing runtime ids from `/v1/models`, while TF aliases such as `agent` and `coder` are still accepted by `/v1/chat/completions`. Keep the generated `models:` map alias-first so the user-facing choices match Thunder Forge roles rather than raw oMLX runtime names.
+
+Generate or refresh the Hermes provider snippet from `tfconfig.yaml` after changing model placement:
+
+```bash
+make hermes shag
+```
+
+Hermes output always uses `key_env`; it does not embed API keys. Use the direct command when a custom base URL or output file is needed:
+
+```bash
+uv run thunder-forge edge client-config hermes shag --create-missing-key --yes --copy --base-url http://studio.lan:40116/v1 --output $HOME/.hermes/thunder-forge.yaml
+```
+
+### Client Config Generator
+
+OpenCode and Hermes config snippets are generated from the same TF edge source of truth: the gateway base URL, `TF_USER_<CLIENT>` key name, assigned model aliases, backing model comments, and benchmark-only status. The target is explicit:
+
+```bash
+uv run thunder-forge edge client-config opencode [client-id] --copy
+uv run thunder-forge edge client-config hermes [client-id] --copy
+```
+
+Behavior:
+
+- Both renderers use the same assigned alias catalog from `tfconfig.yaml`.
+- `--create-missing-key --yes <client-id>` creates or reads `TF_USER_<CLIENT>` in `.env`.
+- OpenCode can use `--inject-api-key` when the client config must contain the real key.
+- Hermes always emits `key_env: TF_USER_<CLIENT>` and never embeds the secret.
+- Keep OpenCode output as JSONC/JSON because OpenCode needs static `provider.<id>.models`.
+- Keep Hermes output as a YAML snippet with `custom_providers:`, `base_url`, `key_env`, `api_mode: chat_completions`, and alias `models:`. It does not rewrite the top-level Hermes `model:` block.
+- Preserve `--base-url`, `--output`, `--copy`, and OSC52/tmux clipboard behavior across both clients.
+
+The Makefile stays thin aliases over that CLI:
+
+```bash
+make opencode shag
+make hermes shag
+```
+
+Avoid putting client ids, model ids, or ports in the Makefile; keep those in CLI options, `.env`, and `tfconfig.yaml`.
 
 ## Model Selection
 

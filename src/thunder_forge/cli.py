@@ -75,6 +75,7 @@ app.add_typer(service_app, name="service")
 app.add_typer(cluster_app, name="cluster")
 
 DEFAULT_OPENCODE_API_KEY_ENV = "TF_USER_OPENCODE"
+DEFAULT_HERMES_API_KEY_ENV = "TF_USER_HERMES"
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
@@ -236,8 +237,14 @@ def _opencode_config_from_catalog(
     return payload
 
 
-def _opencode_model_comment(entry: EdgeModelCatalogEntry) -> str:
+def _model_comment(entry: EdgeModelCatalogEntry) -> str:
     return entry.base_model or entry.source_repo or entry.runtime_model_id
+
+
+def _yaml_scalar(value: str) -> str:
+    if value and all(char.isalnum() or char in "._/:+-" for char in value):
+        return value
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _opencode_config_jsonc_from_catalog(
@@ -257,7 +264,7 @@ def _opencode_config_jsonc_from_catalog(
         if entry.benchmark_only:
             model_config["status"] = "beta"
         model_config_text = json.dumps(model_config, indent=2, ensure_ascii=False).replace("\n", "\n        ")
-        comment = _opencode_model_comment(entry)
+        comment = _model_comment(entry)
         comment_line = f"        // {comment}\n" if comment else ""
         model_blocks.append(f"{comment_line}        {json.dumps(entry.id)}: {model_config_text}")
 
@@ -298,6 +305,68 @@ def _opencode_api_key_comment(*, client_id: str | None, api_key_env: str | None)
     if client_id:
         resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
     return f"{resolved_env}: check .env"
+
+
+def _edge_api_key_env_name(
+    *,
+    client_id: str | None,
+    api_key_env: str | None,
+    default_api_key_env: str,
+) -> str:
+    if client_id:
+        resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
+        return resolved_env
+    return api_key_env or default_api_key_env
+
+
+def _ensure_edge_client_key_if_requested(
+    *,
+    client_id: str | None,
+    create_missing_key: bool,
+    yes: bool,
+) -> None:
+    if not create_missing_key:
+        return
+    if not client_id:
+        typer.echo("Error: --create-missing-key requires a client id", err=True)
+        raise typer.Exit(1)
+
+    resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
+    _repo_root, env_file = _load_repo_dotenv()
+    if not yes and not _confirm_create_edge_key(resolved_env, env_file):
+        typer.echo(f"Error: {resolved_env} was not created", err=True)
+        raise typer.Exit(1)
+
+    result = ensure_edge_api_keys(env_file=env_file, clients=[client_id], users_env=EDGE_USER_PREFIX)
+    status = result.keys[0].status if result.keys else "present"
+    typer.echo(f"{resolved_env}: {status} in {env_file}", err=True)
+
+
+def _hermes_config_yaml_from_catalog(
+    *,
+    model_catalog: list[EdgeModelCatalogEntry],
+    provider_id: str,
+    base_url: str,
+    api_key_env: str,
+) -> str:
+    lines = [
+        "custom_providers:",
+        f"  - name: {_yaml_scalar(provider_id)}",
+        f"    base_url: {_yaml_scalar(base_url)}",
+        f"    key_env: {_yaml_scalar(api_key_env)}",
+        "    api_mode: chat_completions",
+        "    models:",
+    ]
+    for entry in sorted(model_catalog, key=lambda item: item.id):
+        comment_parts = [
+            part
+            for part in (_model_comment(entry), "benchmark-only" if entry.benchmark_only else "")
+            if part
+        ]
+        if comment_parts:
+            lines.append(f"      # {'; '.join(comment_parts)}")
+        lines.append(f"      {entry.id}: {{}}")
+    return "\n".join(lines) + "\n"
 
 
 def _dotenv_value(env_file: Path, env_name: str) -> str:
@@ -1558,91 +1627,127 @@ def edge_serve(
     serve_edge_proxy(host=host, port=resolved_port, config=config)
 
 
-@edge_app.command("opencode-config")
-def edge_opencode_config(
-    client_id: str | None = typer.Argument(
-        None,
-        help="Optional TF edge client id. When used with --inject-api-key, injects that client's API key.",
-    ),
-    base_url: str | None = typer.Option(
-        None,
-        "--base-url",
-        help="TF edge OpenAI-compatible base URL. Defaults to http://<gateway-host>:<edge-port>/v1.",
-    ),
-    provider_id: str = typer.Option("thunder-forge", "--provider-id", help="OpenCode provider id."),
-    provider_name: str = typer.Option("Thunder Forge", "--provider-name", help="OpenCode provider display name."),
-    api_key_env: str | None = typer.Option(
-        None,
-        "--api-key-env",
-        help="Env var placeholder used by OpenCode when no client API key is injected.",
-    ),
-    model: str | None = typer.Option(None, "--model", help="Optional default TF alias for top-level OpenCode model."),
-    small_model: str | None = typer.Option(
-        None,
-        "--small-model",
-        help="Optional default TF alias for top-level OpenCode small_model.",
-    ),
-    output_format: str = typer.Option("jsonc", "--format", help="Output format: jsonc or json."),
-    copy: bool = typer.Option(False, "--copy", help="Copy the generated config to the terminal clipboard via OSC52."),
-    output: Path | None = typer.Option(None, "--output", help="Optional file path to write the generated config."),
-    inject_api_key: bool = typer.Option(
-        False,
-        "--inject-api-key",
-        help="Write the actual API key into the OpenCode config instead of an env placeholder.",
-    ),
-    create_missing_key: bool = typer.Option(
-        False,
-        "--create-missing-key",
-        help="When injecting a client API key, prompt to create it in .env if missing.",
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Create a missing injected client key without prompting."),
+def _validate_client_config_model_aliases(
+    model_catalog: list[EdgeModelCatalogEntry],
+    *,
+    model: str | None,
+    small_model: str | None,
 ) -> None:
-    """Print an OpenCode config generated from assigned TF model aliases."""
-    config, _ = _load_config()
-    model_catalog = _edge_model_catalog_from_config(config)
-    if not model_catalog:
-        typer.echo("Error: no TF model aliases are assigned to inference nodes", err=True)
-        raise typer.Exit(1)
-
     model_ids = {entry.id for entry in model_catalog}
     for option_name, option_value in (("--model", model), ("--small-model", small_model)):
         if option_value is not None and option_value not in model_ids:
             typer.echo(f"Error: {option_name} alias '{option_value}' is not assigned to an inference node", err=True)
             raise typer.Exit(1)
 
-    resolved_base_url = base_url or _edge_base_url_from_config(config)
-    resolved_api_key = _resolve_opencode_api_key(
-        client_id=client_id,
-        api_key_env=api_key_env,
-        inject_api_key=inject_api_key,
-        create_missing_key=create_missing_key,
-        yes=yes,
-    )
+
+@edge_app.command("client-config")
+def edge_client_config(
+    target: str = typer.Argument(..., help="Client config target: opencode or hermes."),
+    client_id: str | None = typer.Argument(
+        None,
+        help="Optional TF edge client id. For Hermes this selects key_env; for OpenCode it can inject the key.",
+    ),
+    base_url: str | None = typer.Option(
+        None,
+        "--base-url",
+        help="TF edge OpenAI-compatible base URL. Defaults to http://<gateway-host>:<edge-port>/v1.",
+    ),
+    provider_id: str = typer.Option("thunder-forge", "--provider-id", help="Provider id/name for the client config."),
+    provider_name: str = typer.Option("Thunder Forge", "--provider-name", help="OpenCode provider display name."),
+    api_key_env: str | None = typer.Option(None, "--api-key-env", help="Env var name used for API key references."),
+    model: str | None = typer.Option(None, "--model", help="Optional default TF alias for OpenCode model."),
+    small_model: str | None = typer.Option(
+        None,
+        "--small-model",
+        help="Optional default TF alias for OpenCode small_model.",
+    ),
+    output_format: str = typer.Option("auto", "--format", help="Output format: auto, jsonc, json, or yaml."),
+    copy: bool = typer.Option(False, "--copy", help="Copy the generated config to the terminal clipboard via OSC52."),
+    output: Path | None = typer.Option(None, "--output", help="Optional file path to write the generated config."),
+    inject_api_key: bool = typer.Option(
+        False,
+        "--inject-api-key",
+        help="OpenCode only: write the actual API key instead of an env placeholder.",
+    ),
+    create_missing_key: bool = typer.Option(
+        False,
+        "--create-missing-key",
+        help="Create a missing TF_USER_<CLIENT> key in .env when a client id is provided.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Create a missing client key without prompting."),
+) -> None:
+    """Print client config generated from assigned TF model aliases."""
+    config, _ = _load_config()
+    model_catalog = _edge_model_catalog_from_config(config)
+    if not model_catalog:
+        typer.echo("Error: no TF model aliases are assigned to inference nodes", err=True)
+        raise typer.Exit(1)
+
+    normalized_target = target.strip().lower()
     normalized_format = output_format.strip().lower()
-    if normalized_format == "jsonc":
-        output_text = _opencode_config_jsonc_from_catalog(
+    if normalized_format == "auto":
+        normalized_format = "jsonc" if normalized_target == "opencode" else "yaml"
+    resolved_base_url = base_url or _edge_base_url_from_config(config)
+
+    if normalized_target == "opencode":
+        _validate_client_config_model_aliases(model_catalog, model=model, small_model=small_model)
+        resolved_api_key = _resolve_opencode_api_key(
+            client_id=client_id,
+            api_key_env=api_key_env,
+            inject_api_key=inject_api_key,
+            create_missing_key=create_missing_key,
+            yes=yes,
+        )
+        if normalized_format == "jsonc":
+            output_text = _opencode_config_jsonc_from_catalog(
+                model_catalog=model_catalog,
+                provider_id=provider_id,
+                provider_name=provider_name,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                api_key_comment=_opencode_api_key_comment(client_id=client_id, api_key_env=api_key_env),
+                model=model,
+                small_model=small_model,
+            )
+        elif normalized_format == "json":
+            payload = _opencode_config_from_catalog(
+                model_catalog=model_catalog,
+                provider_id=provider_id,
+                provider_name=provider_name,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                model=model,
+                small_model=small_model,
+            )
+            output_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        else:
+            typer.echo("Error: --format must be auto, jsonc, or json for opencode", err=True)
+            raise typer.Exit(1)
+        label = "OpenCode"
+    elif normalized_target == "hermes":
+        if model or small_model:
+            typer.echo("Error: Hermes config snippets do not set top-level model defaults", err=True)
+            raise typer.Exit(1)
+        if inject_api_key:
+            typer.echo("Error: Hermes config uses key_env; do not use --inject-api-key", err=True)
+            raise typer.Exit(1)
+        if normalized_format not in {"yaml", "yml"}:
+            typer.echo("Error: --format must be auto or yaml for hermes", err=True)
+            raise typer.Exit(1)
+        _ensure_edge_client_key_if_requested(client_id=client_id, create_missing_key=create_missing_key, yes=yes)
+        output_text = _hermes_config_yaml_from_catalog(
             model_catalog=model_catalog,
             provider_id=provider_id,
-            provider_name=provider_name,
             base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            api_key_comment=_opencode_api_key_comment(client_id=client_id, api_key_env=api_key_env),
-            model=model,
-            small_model=small_model,
+            api_key_env=_edge_api_key_env_name(
+                client_id=client_id,
+                api_key_env=api_key_env,
+                default_api_key_env=DEFAULT_HERMES_API_KEY_ENV,
+            ),
         )
-    elif normalized_format == "json":
-        payload = _opencode_config_from_catalog(
-            model_catalog=model_catalog,
-            provider_id=provider_id,
-            provider_name=provider_name,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            model=model,
-            small_model=small_model,
-        )
-        output_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        label = "Hermes"
     else:
-        typer.echo("Error: --format must be jsonc or json", err=True)
+        typer.echo("Error: target must be opencode or hermes", err=True)
         raise typer.Exit(1)
 
     typer.echo(output_text, nl=False)
@@ -1652,8 +1757,7 @@ def edge_opencode_config(
         typer.echo(f"wrote {output}", err=True)
     if copy:
         _copy_to_clipboard(output_text)
-        typer.echo("copied OpenCode config to clipboard", err=True)
-
+        typer.echo(f"copied {label} config to clipboard", err=True)
 
 @artifact_app.command("status")
 def artifact_status(

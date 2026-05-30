@@ -270,7 +270,7 @@ def test_edge_serve_cli_exposes_tf_alias_model_catalog(monkeypatch) -> None:
     assert config.model_catalog[0].runtime_model_id == "Qwen3-Coder-Next-4bit"
 
 
-def test_edge_opencode_config_prints_assigned_aliases(monkeypatch) -> None:
+def test_edge_client_config_opencode_prints_assigned_aliases(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     monkeypatch.setattr(
@@ -320,7 +320,8 @@ def test_edge_opencode_config_prints_assigned_aliases(monkeypatch) -> None:
         app,
         [
             "edge",
-            "opencode-config",
+            "client-config",
+            "opencode",
             "--base-url",
             "http://studio:40116/v1",
             "--model",
@@ -342,7 +343,7 @@ def test_edge_opencode_config_prints_assigned_aliases(monkeypatch) -> None:
     assert provider["models"]["memory-bf16"]["status"] == "beta"
 
 
-def test_edge_opencode_config_client_uses_env_placeholder(monkeypatch) -> None:
+def test_edge_client_config_opencode_client_uses_env_placeholder(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     monkeypatch.setattr(
@@ -371,15 +372,15 @@ def test_edge_opencode_config_client_uses_env_placeholder(monkeypatch) -> None:
         raising=False,
     )
 
-    result = runner.invoke(app, ["edge", "opencode-config", "gnezim", "--format", "json"])
+    result = runner.invoke(app, ["edge", "client-config", "opencode", "shag", "--format", "json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     provider = payload["provider"]["thunder-forge"]
-    assert provider["options"]["apiKey"] == "{env:TF_USER_GNEZIM}"
+    assert provider["options"]["apiKey"] == "{env:TF_USER_SHAG}"
 
 
-def test_edge_opencode_config_jsonc_comments_api_key_client(monkeypatch) -> None:
+def test_edge_client_config_opencode_jsonc_comments_api_key_client(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     monkeypatch.setattr(
@@ -408,17 +409,17 @@ def test_edge_opencode_config_jsonc_comments_api_key_client(monkeypatch) -> None
         raising=False,
     )
 
-    result = runner.invoke(app, ["edge", "opencode-config", "gnezim"])
+    result = runner.invoke(app, ["edge", "client-config", "opencode", "shag"])
 
     assert result.exit_code == 0
-    assert '        // TF_USER_GNEZIM: check .env\n        "apiKey": "{env:TF_USER_GNEZIM}"' in result.stdout
+    assert '        // TF_USER_SHAG: check .env\n        "apiKey": "{env:TF_USER_SHAG}"' in result.stdout
 
 
-def test_edge_opencode_config_client_injects_created_key(monkeypatch, tmp_path) -> None:
+def test_edge_client_config_opencode_injects_created_key(monkeypatch, tmp_path) -> None:
     import thunder_forge.cli as cli_module
 
     env_file = tmp_path / ".env"
-    monkeypatch.delenv("TF_USER_GNEZIM", raising=False)
+    monkeypatch.delenv("TF_USER_SHAG", raising=False)
     monkeypatch.setattr(
         cli_module,
         "_load_repo_dotenv",
@@ -455,8 +456,9 @@ def test_edge_opencode_config_client_injects_created_key(monkeypatch, tmp_path) 
         app,
         [
             "edge",
-            "opencode-config",
-            "gnezim",
+            "client-config",
+            "opencode",
+            "shag",
             "--inject-api-key",
             "--create-missing-key",
             "--yes",
@@ -467,7 +469,7 @@ def test_edge_opencode_config_client_injects_created_key(monkeypatch, tmp_path) 
 
     assert result.exit_code == 0
     env_text = env_file.read_text()
-    env_prefix = "TF_USER_GNEZIM="
+    env_prefix = "TF_USER_SHAG="
     assert env_prefix in env_text
     api_key = next(line.removeprefix(env_prefix) for line in env_text.splitlines() if line.startswith(env_prefix))
     payload = json.loads(result.stdout)
@@ -476,7 +478,7 @@ def test_edge_opencode_config_client_injects_created_key(monkeypatch, tmp_path) 
     assert "{env:" not in provider["options"]["apiKey"]
 
 
-def test_edge_opencode_config_copy_uses_generated_payload(monkeypatch) -> None:
+def test_edge_client_config_copy_uses_generated_payload(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     copied: list[str] = []
@@ -507,14 +509,14 @@ def test_edge_opencode_config_copy_uses_generated_payload(monkeypatch) -> None:
         raising=False,
     )
 
-    result = runner.invoke(app, ["edge", "opencode-config", "--copy", "--format", "json"])
+    result = runner.invoke(app, ["edge", "client-config", "opencode", "--copy", "--format", "json"])
 
     assert result.exit_code == 0
     assert copied == [result.stdout]
     assert "copied OpenCode config to clipboard" in result.stderr
 
 
-def test_edge_opencode_config_jsonc_comments_show_backing_models(monkeypatch) -> None:
+def test_edge_client_config_opencode_jsonc_comments_show_backing_models(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     monkeypatch.setattr(
@@ -544,7 +546,7 @@ def test_edge_opencode_config_jsonc_comments_show_backing_models(monkeypatch) ->
         raising=False,
     )
 
-    result = runner.invoke(app, ["edge", "opencode-config"])
+    result = runner.invoke(app, ["edge", "client-config", "opencode"])
 
     assert result.exit_code == 0
     assert "// mlx-community/gpt-oss-20b-mxfp4-bf16" in result.stdout
@@ -553,7 +555,7 @@ def test_edge_opencode_config_jsonc_comments_show_backing_models(monkeypatch) ->
     assert '"status": "beta"' in result.stdout
 
 
-def test_edge_opencode_config_rejects_unassigned_default_model(monkeypatch) -> None:
+def test_edge_client_config_opencode_rejects_unassigned_default_model(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
     monkeypatch.setattr(
@@ -582,10 +584,106 @@ def test_edge_opencode_config_rejects_unassigned_default_model(monkeypatch) -> N
         raising=False,
     )
 
-    result = runner.invoke(app, ["edge", "opencode-config", "--model", "coder"])
+    result = runner.invoke(app, ["edge", "client-config", "opencode", "--model", "coder"])
 
     assert result.exit_code == 1
     assert "Error: --model alias 'coder' is not assigned to an inference node" in result.stderr
+
+
+def test_edge_client_config_hermes_prints_yaml_with_key_env(monkeypatch) -> None:
+    import yaml
+
+    import thunder_forge.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                    ),
+                    "memory-bf16": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-mxfp4-bf16"),
+                        runtime_model_id="gpt-oss-20b-mxfp4-bf16",
+                        benchmark_only=True,
+                    ),
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory", "memory-bf16"],
+                    )
+                },
+            ),
+            Path.cwd(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        ["edge", "client-config", "hermes", "shag", "--base-url", "http://studio:40116/v1"],
+    )
+
+    assert result.exit_code == 0
+    payload = yaml.safe_load(result.stdout)
+    provider = payload["custom_providers"][0]
+    assert provider["name"] == "thunder-forge"
+    assert provider["base_url"] == "http://studio:40116/v1"
+    assert provider["key_env"] == "TF_USER_SHAG"
+    assert provider["api_mode"] == "chat_completions"
+    assert sorted(provider["models"]) == ["memory", "memory-bf16"]
+    assert "# mlx-community/gpt-oss-20b-mxfp4-bf16; benchmark-only" in result.stdout
+
+
+def test_edge_client_config_hermes_creates_missing_key_without_printing_secret(monkeypatch, tmp_path) -> None:
+    import thunder_forge.cli as cli_module
+
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("TF_USER_SHAG", raising=False)
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (tmp_path, env_file), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            tmp_path,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["edge", "client-config", "hermes", "shag", "--create-missing-key", "--yes"])
+
+    assert result.exit_code == 0
+    env_text = env_file.read_text()
+    env_prefix = "TF_USER_SHAG="
+    assert env_prefix in env_text
+    api_key = next(line.removeprefix(env_prefix) for line in env_text.splitlines() if line.startswith(env_prefix))
+    assert "key_env: TF_USER_SHAG" in result.stdout
+    assert api_key not in result.stdout
+    assert api_key not in result.stderr
 
 
 def test_edge_smoke_cli_uses_config_default(monkeypatch) -> None:
