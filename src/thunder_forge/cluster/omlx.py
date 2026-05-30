@@ -670,7 +670,19 @@ NODE_UID="$(/usr/bin/id -u "$NODE_USER")"
 run_root /bin/launchctl bootout "user/$NODE_UID/$LABEL" 2>/dev/null || true
 run_root /bin/launchctl bootout "gui/$NODE_UID/$LABEL" 2>/dev/null || true
 run_root /bin/launchctl bootout "system/$LABEL" 2>/dev/null || true
-run_root /usr/bin/pkill -f "$PROCESS_PATTERN" 2>/dev/null || true
+run_root /usr/bin/pkill -TERM -f "$PROCESS_PATTERN" 2>/dev/null || true
+# Wait for the process to fully exit before installing new plist; launchd returns
+# EIO (exit 5) from bootstrap if the old process is still alive (SIGTERMed state).
+_wait=0
+while /usr/bin/pgrep -f "$PROCESS_PATTERN" >/dev/null 2>&1; do
+    if [[ $_wait -ge 10 ]]; then
+        echo "process still running after 10s; sending SIGKILL" >&2
+        run_root /usr/bin/pkill -KILL -f "$PROCESS_PATTERN" 2>/dev/null || true
+        break
+    fi
+    sleep 1
+    _wait=$((_wait + 1))
+done
 
 run_root /usr/bin/install -o "$NODE_USER" -g staff -m 644 "$TMP_PLIST" "$STAGING_PLIST_PATH"
 run_root /usr/bin/install -o root -g wheel -m 644 "$TMP_PLIST" "$PLIST_PATH"
@@ -679,10 +691,11 @@ run_root /usr/bin/install -o root -g wheel -m 440 "$TMP_SUDOERS" "$SUDOERS_PATH"
 # Enable clears any "disabled" override left by prior failed bootstrap attempts
 run_root /bin/launchctl enable "system/$LABEL" 2>/dev/null || true
 if ! run_root /bin/launchctl bootstrap system "$PLIST_PATH" 2>&1; then
-    echo "Bootstrap failed; diagnosing..." >&2
+    _bootstrap_exit=$?
+    echo "Bootstrap failed: $_bootstrap_exit" >&2
     echo "plist: $PLIST_PATH" >&2
     run_root /bin/launchctl print "system/$LABEL" 2>&1 || true
-    exit 1
+    exit $_bootstrap_exit
 fi
 run_root /bin/launchctl kickstart -k "system/$LABEL"
 run_root /bin/launchctl print "system/$LABEL" >/dev/null
