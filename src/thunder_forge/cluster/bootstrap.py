@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
+import tarfile
 import tempfile
 import urllib.request
 import zipfile
@@ -12,9 +14,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from thunder_forge.cluster.artifacts import cache_omlx_models_dir_from_env
-from thunder_forge.cluster.config import ClusterConfig, generate_olla_config, generated_olla_config_path
+from thunder_forge.cluster.config import (
+    DEFAULT_OLLA_VERSION,
+    ClusterConfig,
+    generate_olla_config,
+    generated_olla_config_path,
+)
 
 Progress = Callable[[str], None]
+LATEST_OLLA_RELEASE_API = "https://api.github.com/repos/thushan/olla/releases/latest"
 
 
 @dataclass(frozen=True)
@@ -32,34 +40,41 @@ def ensure_olla_binary(
     os_name: str,
     arch: str,
     bin_dir: Path,
+    upgrade: bool = False,
     release_base: str | None = None,
     timeout: int = 60,
     progress: Progress | None = None,
 ) -> OllaBinaryResult:
-    """Install the pinned Olla binary unless the sidecar checksum is current."""
-    asset = f"olla_{version}_{os_name}_{arch}.zip"
-    base_url = release_base or f"https://github.com/thushan/olla/releases/download/{version}"
+    """Install or upgrade Olla binary for the requested version (or latest when unpinned)."""
+    resolved_version = _resolve_olla_version(version, timeout=timeout, progress=progress)
+    asset_prefix = f"olla_{resolved_version}_{os_name}_{arch}"
+    base_url = release_base or f"https://github.com/thushan/olla/releases/download/{resolved_version}"
     checksums_url = f"{base_url}/checksums.txt"
     bin_dir.mkdir(parents=True, exist_ok=True)
     binary_path = bin_dir / "olla"
     sidecar_path = bin_dir / ".olla.sha256"
 
-    if progress:
-        progress(f"olla: checking {version} ({asset})")
     checksums = _download_text(checksums_url, timeout=timeout)
-    expected_sha256 = _checksum_for_asset(checksums, asset)
+    asset, expected_sha256 = _resolve_asset_and_checksum(checksums, asset_prefix)
+    if progress:
+        progress(f"olla: checking {resolved_version} ({asset})")
 
-    if binary_path.exists() and binary_path.stat().st_mode & 0o111 and sidecar_path.exists():
-        if sidecar_path.read_text().strip() == expected_sha256:
-            if progress:
-                progress(f"olla: already current at {binary_path}")
-            return OllaBinaryResult(
-                version=version,
-                asset=asset,
-                binary_path=binary_path,
-                status="current",
-                expected_sha256=expected_sha256,
-            )
+    binary_exists = binary_path.exists() and bool(binary_path.stat().st_mode & 0o111)
+    sidecar_matches = sidecar_path.exists() and sidecar_path.read_text().strip() == expected_sha256
+
+    if binary_exists and sidecar_matches and not upgrade:
+        if progress:
+            progress(f"olla: already current at {binary_path}")
+        return OllaBinaryResult(
+            version=resolved_version,
+            asset=asset,
+            binary_path=binary_path,
+            status="current",
+            expected_sha256=expected_sha256,
+        )
+
+    if binary_exists and sidecar_matches and upgrade and progress:
+        progress(f"olla: upgrading {resolved_version} ({asset})")
 
     if progress:
         progress(f"olla: downloading {asset}")
@@ -73,9 +88,8 @@ def ensure_olla_binary(
         temp_path = Path(temp_dir)
         archive_path = temp_path / asset
         archive_path.write_bytes(archive_bytes)
-        with zipfile.ZipFile(archive_path) as archive:
-            archive.extractall(temp_path)
-        extracted_binary = temp_path / "olla"
+        _extract_archive(archive_path, temp_path)
+        extracted_binary = _find_extracted_binary(temp_path)
         if not extracted_binary.exists():
             msg = f"Olla archive did not contain executable 'olla': {asset}"
             raise ValueError(msg)
@@ -84,15 +98,36 @@ def ensure_olla_binary(
         installed_path.chmod(0o755)
         installed_path.replace(binary_path)
     sidecar_path.write_text(f"{expected_sha256}\n")
+    status = "upgraded" if binary_exists else "installed"
     if progress:
-        progress(f"olla: installed {binary_path}")
+        progress(f"olla: {status} {binary_path}")
     return OllaBinaryResult(
-        version=version,
+        version=resolved_version,
         asset=asset,
         binary_path=binary_path,
-        status="installed",
+        status=status,
         expected_sha256=expected_sha256,
     )
+
+
+def _resolve_olla_version(version: str, *, timeout: int, progress: Progress | None = None) -> str:
+    requested = version.strip()
+    if requested and requested != "latest":
+        return requested
+
+    try:
+        payload = json.loads(_download_text(LATEST_OLLA_RELEASE_API, timeout=timeout))
+        latest = str(payload.get("tag_name", "")).strip()
+        if latest:
+            if progress:
+                progress(f"olla: resolved latest release {latest}")
+            return latest
+    except (ValueError, TypeError, OSError, RuntimeError, TimeoutError):
+        pass
+
+    if progress:
+        progress(f"olla: latest release lookup failed, using {DEFAULT_OLLA_VERSION}")
+    return DEFAULT_OLLA_VERSION
 
 
 def write_generated_olla_config(config: ClusterConfig, *, repo_root: Path, port: int | None = None) -> Path:
@@ -145,4 +180,39 @@ def _checksum_for_asset(checksums: str, asset: str) -> str:
         if name == asset:
             return fields[0]
     msg = f"checksum entry not found for {asset}"
+    raise ValueError(msg)
+
+
+def _resolve_asset_and_checksum(checksums: str, asset_prefix: str) -> tuple[str, str]:
+    candidates = [f"{asset_prefix}.zip", f"{asset_prefix}.tar.gz"]
+    for asset in candidates:
+        try:
+            return asset, _checksum_for_asset(checksums, asset)
+        except ValueError:
+            continue
+    msg = f"checksum entry not found for any of: {', '.join(candidates)}"
+    raise ValueError(msg)
+
+
+def _extract_archive(archive_path: Path, destination: Path) -> None:
+    if archive_path.name.endswith(".zip"):
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(destination)
+        return
+    if archive_path.name.endswith(".tar.gz"):
+        with tarfile.open(archive_path, mode="r:gz") as archive:
+            archive.extractall(path=destination, filter="data")
+        return
+    msg = f"unsupported Olla archive format: {archive_path.name}"
+    raise ValueError(msg)
+
+
+def _find_extracted_binary(extracted_root: Path) -> Path:
+    direct = extracted_root / "olla"
+    if direct.is_file():
+        return direct
+    for candidate in extracted_root.rglob("olla"):
+        if candidate.is_file():
+            return candidate
+    msg = "Olla archive did not contain executable 'olla'"
     raise ValueError(msg)

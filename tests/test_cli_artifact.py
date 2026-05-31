@@ -62,6 +62,75 @@ nodes:
     )
 
 
+def _write_runtime_config_with_remote_cache(repo: Path, *, cache_host: str = "studio.lan") -> None:
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (repo / "tfconfig.yaml").write_text(
+        f"""models:
+    memory:
+        source:
+            repo: mlx-community/gpt-oss-20b-MXFP4-Q8
+nodes:
+    rock:
+        host: rock.lan
+        ram_gb: 32
+        user: shag
+        roles: [gateway]
+    studio:
+        host: {cache_host}
+        ram_gb: 64
+        user: shag
+        roles: [cache]
+    infer-01:
+        host: infer-01.lan
+        ram_gb: 128
+        user: shag
+        roles: [inference]
+        home_dir: /Users/shag
+        runtime:
+            type: omlx
+            port: 8018
+        models:
+            - memory
+"""
+    )
+
+
+def _write_runtime_config_with_remote_cache_and_fabric(repo: Path, *, cache_host: str = "studio.lan") -> None:
+    config_dir = repo / "configs"
+    config_dir.mkdir()
+    (repo / "tfconfig.yaml").write_text(
+        f"""models:
+    memory:
+        source:
+            repo: mlx-community/gpt-oss-20b-MXFP4-Q8
+nodes:
+    rock:
+        host: rock.lan
+        ram_gb: 32
+        user: shag
+        roles: [gateway]
+    studio:
+        host: {cache_host}
+        ram_gb: 64
+        user: shag
+        roles: [cache]
+    infer-01:
+        host: infer-01.lan
+        fabric_host: true
+        ram_gb: 128
+        user: shag
+        roles: [inference]
+        home_dir: /Users/shag
+        runtime:
+            type: omlx
+            port: 8018
+        models:
+            - memory
+"""
+    )
+
+
 def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo)
@@ -165,6 +234,244 @@ def test_artifact_download_dry_run_uses_cache_omlx_dir_env(tmp_path: Path, monke
     assert f"--model-dir {cache_omlx_models_dir}" in result.stdout
 
 
+def test_artifact_download_apply_dispatches_to_remote_cache_host(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_remote_cache(repo, cache_host="remote-cache.lan")
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setenv(CACHE_OMLX_MODELS_DIR_ENV, "/tmp/local-cache-path")
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "download",
+            "--model",
+            "mlx-community/Qwen3-1.7B-4bit",
+            "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "cache_exec: remote studio (remote-cache.lan)" in result.stdout
+    assert "destination: ${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}/mlx-community/Qwen3-1.7B-4bit" in result.stdout
+    assert "/tmp/local-cache-path" not in result.stdout
+    assert calls[0][0] == "shag"
+    assert calls[0][1] == "remote-cache.lan"
+    assert "TF_CACHE_REMOTE_EXEC=1" not in calls[0][2]
+    assert "python3 -u - <<'PY'" in calls[0][2]
+    assert "omlx" in calls[0][2]
+
+
+def test_artifact_status_checks_remote_cache_host_over_ssh(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_remote_cache(repo, cache_host="remote-cache.lan")
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.artifacts as artifacts_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        artifacts_module,
+        "_remote_artifact_complete",
+        lambda host, path: True,
+    )
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "status",
+            "--model",
+            "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            "--node",
+            "infer-01",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls[0][0] == "shag"
+    assert calls[0][1] == "remote-cache.lan"
+    assert "TF_CACHE_REMOTE_EXEC=1" not in calls[0][2]
+    assert "test -d" in calls[0][2]
+    assert "cache_omlx_model_dir: ready" in result.stdout
+
+
+def test_artifact_sync_dispatches_to_remote_cache_host(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_remote_cache(repo, cache_host="remote-cache.lan")
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("local sync path should not run")),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            "--node",
+            "infer-01",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == []
+    assert "transport_host: infer-01.lan" in result.stdout
+    assert "mode: dry-run" in result.stdout
+
+
+def test_artifact_sync_apply_runs_directly_on_remote_cache_host(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_remote_cache(repo, cache_host="remote-cache.lan")
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+    monkeypatch.setattr(cli_module, "_is_local_host", lambda host: False)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            "--node",
+            "infer-01",
+            "--apply",
+            "--timeout",
+            "123",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "cache_exec: remote studio (remote-cache.lan)" in result.stdout
+    assert calls[0][0] == "shag"
+    assert calls[0][1] == "remote-cache.lan"
+    assert "rsync" in calls[0][2]
+    assert "--exclude" in calls[0][2]
+    assert ".cache/" in calls[0][2]
+    assert "TF_CACHE_REMOTE_EXEC=1" not in calls[0][2]
+    assert "mkdir -p" in calls[0][2]
+    assert "missing cache oMLX model dir" in calls[0][2]
+    assert '"$SOURCE_PATH"' in calls[0][2]
+    assert "'$SOURCE_PATH'" not in calls[0][2]
+    assert calls[0][3]["timeout"] == 123
+    assert "status: synced" in result.stdout
+
+
+def test_artifact_sync_apply_resolves_fabric_on_remote_cache_host(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_remote_cache_and_fabric(repo, cache_host="remote-cache.lan")
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_is_local_host", lambda host: False)
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd, kwargs))
+        if "__TF_TRANSPORT_PLAN__" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=(
+                    '__TF_TRANSPORT_PLAN__{"error": "", '
+                    '"fabric_fallback": "", '
+                    '"management_host": "infer-01.lan", '
+                    '"requested_transport": "auto", '
+                    '"resolved_transport_host": "169.254.251.195", '
+                    '"transport_host": "169.254.251.195"}\n'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            "--node",
+            "infer-01",
+            "--apply",
+            "--timeout",
+            "123",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls[0][0] == "shag"
+    assert calls[0][1] == "remote-cache.lan"
+    assert "__TF_TRANSPORT_PLAN__" in calls[0][2]
+    assert calls[1][0] == "shag"
+    assert calls[1][1] == "remote-cache.lan"
+    assert "HostKeyAlias=infer-01.lan" in calls[1][2]
+    assert "169.254.251.195" in calls[1][2]
+    assert "transport_host: 169.254.251.195" in result.stdout
+    assert "fabric_fallback" not in result.stdout
+    assert "status: synced" in result.stdout
+
+
 def test_artifact_sync_dry_run_prints_cache_to_node_plan(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo, fabric_host=False)
@@ -204,6 +511,7 @@ def test_artifact_sync_dry_run_prints_cache_to_node_plan(tmp_path: Path, monkeyp
     assert "runtime_model_id: bge-small-en-v1.5" in result.stdout
     assert "action: sync_to_node_omlx" in result.stdout
     assert "rsync" in result.stdout
+    assert "--exclude .cache/" in result.stdout
     assert "/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
     assert "shag@infer-01.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/" in result.stdout
     assert ".cache/huggingface" not in result.stdout
@@ -582,6 +890,7 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setenv("TF_CACHE_REMOTE_EXEC", "1")
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",

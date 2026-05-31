@@ -456,7 +456,7 @@ def test_cluster_prepare_dry_run_prints_unified_plan(tmp_path: Path, monkeypatch
     assert "cache: gateway-cache-01 (gateway-cache-01.lan) -> oMLX model hub" in result.stdout
     assert "inference: infer-03 -> oMLX LaunchDaemon" in result.stdout
     assert "would: ensure Olla v0.0.27" in result.stdout
-    assert "would: ensure oMLX CLI at /Users/shag/.local/bin/omlx" in result.stdout
+    assert "would: ensure/upgrade oMLX CLI at /Users/shag/.local/bin/omlx" in result.stdout
     assert "would: bootstrap infer-03 ssh=shag@infer-03.lan su=admin" in result.stdout
 
 
@@ -521,7 +521,8 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
         return Path("/Users/shag/.omlx/models")
 
     def fake_ensure_omlx_tooling(runtime_node, **kwargs):
-        calls.append("tooling")
+        calls.append(f"tooling:{runtime_node.host}")
+        assert kwargs["upgrade"] is True
         kwargs["progress"]("tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx")
         return OmlxToolingResult(
             node=runtime_node.host,
@@ -555,6 +556,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     monkeypatch.setattr(cli_module, "ensure_olla_binary", fake_ensure_olla_binary)
     monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
     monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
+    monkeypatch.setattr(cli_module, "_is_local_host", lambda host: True)
     monkeypatch.setattr(cli_module, "ensure_cache_hub_dir", fake_ensure_cache_hub_dir)
     monkeypatch.setattr(cli_module, "ensure_omlx_tooling", fake_ensure_omlx_tooling)
     monkeypatch.setattr(cli_module, "run_omlx_daemon_setup", fake_run_omlx_daemon_setup)
@@ -562,7 +564,15 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     result = runner.invoke(app, ["cluster", "prepare", "--apply"])
 
     assert result.exit_code == 0
-    assert calls == ["olla", "config", "gateway", "cache", "tooling", "inference"]
+    assert calls == [
+        "olla",
+        "config",
+        "gateway",
+        "tooling:gateway-cache-01.lan",
+        "cache",
+        "tooling:infer-03.lan",
+        "inference",
+    ]
     assert gateway_calls[0]["edge_host"] == "0.0.0.0"
     assert "== Gateway: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
     frontend_reason = (
@@ -572,9 +582,189 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     )
     assert f"auth: operator=shag admin=serpo reason={frontend_reason}" in result.stdout
     assert "== Cache Hub: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
+    assert "tooling_path: /Users/shag/.local/bin/omlx" in result.stdout
     assert "== Inference: infer-03 (infer-03.lan) ==" in result.stdout
     assert "auth: ssh=shag@infer-03.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
     assert "tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx" in result.stdout
+    assert "status: cluster prepare complete" in result.stdout
+
+
+def test_cluster_prepare_dry_run_uses_latest_olla_when_config_is_unpinned(tmp_path: Path, monkeypatch) -> None:
+        import thunder_forge.cluster.config as config_module
+
+        repo = tmp_path
+        (repo / "tfconfig.yaml").write_text(
+                dedent("""\
+                        services:
+                            olla:
+                                os: linux
+                                arch: arm64
+                        models: {}
+                        nodes:
+                            rock:
+                                host: rock.lan
+                                ram_gb: 32
+                                roles: [gateway]
+                                user: shag
+                """)
+        )
+        monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+        result = runner.invoke(app, ["cluster", "prepare", "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "would: ensure Olla latest" in result.stdout
+
+
+def test_cluster_prepare_apply_uses_latest_olla_when_config_is_unpinned(tmp_path: Path, monkeypatch) -> None:
+        import thunder_forge.cli as cli_module
+        import thunder_forge.cluster.config as config_module
+
+        repo = tmp_path
+        (repo / "tfconfig.yaml").write_text(
+                dedent("""\
+                        services:
+                            frontend:
+                                admin_user: serpo
+                            olla:
+                                os: linux
+                                arch: arm64
+                        models: {}
+                        nodes:
+                            rock:
+                                host: rock.lan
+                                ram_gb: 32
+                                roles: [gateway]
+                                user: shag
+                                admin_user: serpo
+                """)
+        )
+
+        def fake_ensure_olla_binary(**kwargs):
+                assert kwargs["version"] == "latest"
+                kwargs["progress"]("olla: upgraded .tmp/olla-bin/olla")
+                return SimpleNamespace(binary_path=repo / ".tmp/olla-bin/olla")
+
+        def fake_write_generated_olla_config(config, *, repo_root, port=None):
+                return repo_root / "configs/olla-config.yaml"
+
+        def fake_run_gateway_daemon_setup(**kwargs):
+                kwargs["progress"]("health: gateway ok")
+                return GatewayDaemonSetupResult(
+                        user=kwargs["user"],
+                        admin_user=kwargs["admin_user"],
+                        sudoers_path="/etc/sudoers.d/thunder-forge",
+                        script_path=str(repo / ".tmp/run/thunder-forge-gateway-daemon-setup.sh"),
+                        applied=True,
+                        sudoers_verified=True,
+                        service_labels_verified=True,
+                        health_ok=True,
+                )
+
+        monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(cli_module, "ensure_olla_binary", fake_ensure_olla_binary)
+        monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+        monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
+
+        result = runner.invoke(app, ["cluster", "prepare", "--apply"])
+
+        assert result.exit_code == 0
+        assert "status: cluster prepare complete" in result.stdout
+
+
+def test_cluster_prepare_apply_prepares_remote_cache_hub(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            services:
+              frontend:
+                admin_user: serpo
+            models: {}
+            nodes:
+              rock:
+                host: rock.lan
+                ram_gb: 32
+                roles: [gateway]
+                user: shag
+                admin_user: serpo
+              studio:
+                host: studio.lan
+                ram_gb: 64
+                roles: [cache]
+                user: shag
+        """)
+    )
+    calls: list[str] = []
+    ssh_calls = []
+
+    def fake_ensure_olla_binary(**kwargs):
+        calls.append("olla")
+        kwargs["progress"]("olla: already current at .tmp/olla-bin/olla")
+        return SimpleNamespace(binary_path=repo / ".tmp/olla-bin/olla")
+
+    def fake_write_generated_olla_config(config, *, repo_root, port=None):
+        calls.append("config")
+        return repo_root / "configs/olla-config.yaml"
+
+    def fake_run_gateway_daemon_setup(**kwargs):
+        calls.append("gateway")
+        kwargs["progress"]("health: gateway ok")
+        return GatewayDaemonSetupResult(
+            user=kwargs["user"],
+            admin_user=kwargs["admin_user"],
+            sudoers_path="/etc/sudoers.d/thunder-forge",
+            script_path=str(repo / ".tmp/run/thunder-forge-gateway-daemon-setup.sh"),
+            applied=True,
+            sudoers_verified=True,
+            service_labels_verified=True,
+            health_ok=True,
+        )
+
+    def fake_ensure_omlx_tooling(runtime_node, **kwargs):
+        calls.append(f"tooling:{runtime_node.host}")
+        assert kwargs["upgrade"] is True
+        kwargs["progress"]("tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx")
+        return OmlxToolingResult(
+            node=runtime_node.host,
+            uv_path="/Users/shag/.local/bin/uv",
+            omlx_path="/Users/shag/.local/bin/omlx",
+            tool_spec="git+https://github.com/jundot/omlx.git",
+            applied=True,
+            verified=True,
+        )
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        ssh_calls.append((user, ip, cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "ensure_olla_binary", fake_ensure_olla_binary)
+    monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+    monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
+    monkeypatch.setattr(cli_module, "ensure_omlx_tooling", fake_ensure_omlx_tooling)
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+    monkeypatch.setattr(cli_module, "_is_local_host", lambda host: host == "rock.lan")
+    monkeypatch.setattr(
+        cli_module,
+        "ensure_cache_hub_dir",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("local cache setup should not run")),
+    )
+
+    result = runner.invoke(app, ["cluster", "prepare", "--apply"])
+
+    assert result.exit_code == 0
+    assert calls == ["olla", "config", "gateway", "tooling:studio.lan"]
+    assert ssh_calls[0][0] == "shag"
+    assert ssh_calls[0][1] == "studio.lan"
+    assert "TF_CACHE_OMLX_MODELS_DIR" in ssh_calls[0][2]
+    assert "/bin/mkdir -p" in ssh_calls[0][2]
+    assert "tooling_path: /Users/shag/.local/bin/omlx" in result.stdout
+    assert "cache_exec: ensuring cache hub on studio (studio.lan)" in result.stdout
     assert "status: cluster prepare complete" in result.stdout
 
 

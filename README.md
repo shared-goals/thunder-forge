@@ -53,6 +53,42 @@ ssh-copy-id infer-01   # or ssh-copy-id user@host
 
 Thunder Forge always SSHes as the operator user. Privilege escalation (via `su` or `sudo`) is performed on the remote node — the operator user is never required to SSH as the admin user directly.
 
+## Cache Host Prerequisites (Repo Optional)
+
+The cache/download role is designed to run with minimal host requirements. A full Thunder Forge repo checkout on the cache host is optional for the target architecture.
+
+Required on the cache host:
+
+- oMLX CLI binary available in the operator user path (default `~/.local/bin/omlx`).
+- Writable cache root (default `~/.omlx/models` or `TF_CACHE_OMLX_MODELS_DIR`).
+- Optional Hugging Face token only when downloading gated/private models (`HF_TOKEN` in the cache host environment).
+- Network access to Hugging Face and to inference nodes over management LAN and/or Thunderbolt fabric.
+- Operator SSH identity allowed from the gateway/control host.
+
+`cluster prepare --apply` now treats cache as a first-class bootstrap role: it ensures oMLX tooling and prepares the cache hub directory on each configured cache host.
+
+## Thunderbolt Fabric Setup (Cache to Inference)
+
+For split topology, treat the cache host as a fabric hub. Example: one cache machine with four Thunderbolt links, one direct link per inference node.
+
+One-time host/network setup (outside Thunder Forge):
+
+1. Physically cable cache Thunderbolt ports to inference nodes one-to-one.
+2. Create/enable Thunderbolt network interfaces on both ends (macOS Network Settings).
+3. Verify each link has link-local or private IPv4 addresses and is reachable.
+4. Ensure SSH host keys are trusted for management hostnames first.
+
+Thunder Forge runtime behavior stays dynamic and no-extra-config:
+
+- Keep node management hostnames in `nodes.<name>.host`.
+- Set `nodes.<name>.fabric_host: true` only for nodes that should use fabric probing.
+- Use `operations.sync.transport: auto` (default) so sync prefers discovered fabric paths and falls back to management LAN when unresolved.
+- `--transport fabric` enforces fabric-only and fails fast when no reachable fabric address is discovered.
+
+Fabric probing is intentionally Darwin-only today and runs from the machine executing the sync command. In split mode, run sync/download from the cache role so discovery and transfer use cache-local Thunderbolt interfaces.
+
+For a step-by-step operations checklist, see `docs/operations/thunderbolt-cache-fabric.md`.
+
 ## Quickstart
 
 ```bash
@@ -67,7 +103,7 @@ cp tfconfig.example.yaml tfconfig.yaml
 # Generate Olla config from the TF cluster config
 uv run thunder-forge generate-olla-config
 
-# One-time bootstrap: install gateway (Olla + Edge), cache hub, and node (oMLX) LaunchDaemons
+# One-time bootstrap: install gateway (Olla + Edge), cache oMLX tooling + hub, and node (oMLX) LaunchDaemons
 # Operator user must have passwordless SSH to all nodes first (see Prerequisites)
 make bootstrap           # gateway + cache + inference nodes
 make bootstrap gateway-cache-01    # combined gateway/cache host only
@@ -100,7 +136,9 @@ The Makefile is a thin dispatcher for cluster-level CLI commands:
 - `uv run thunder-forge service restart --service omlx --node <node> --manager daemon --apply` delegates to the existing node LaunchDaemon workflow after one-time setup.
 - Use `--dry-run` first to print the generated plist and shell commands without changing the host.
 
-For reboot-durable system daemons, bootstrap once with `make bootstrap`, then use `make restart` for all subsequent updates. Bootstrap installs the pinned Olla binary, generates Olla config, prepares the local oMLX model cache hub, installs user-local `uv`/oMLX tooling on inference nodes when missing, installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. After that, `make restart` regenerates Olla config and reinstalls/restarts all services with `sudo -n`; no password prompt is expected.
+For reboot-durable system daemons, bootstrap once with `make bootstrap`, then use `make restart` for all subsequent updates. Bootstrap ensures the configured Olla binary version, generates Olla config, ensures cache-role oMLX tooling (including upgrade checks), prepares the cache hub directory on each cache host, ensures user-local `uv`/oMLX tooling on inference nodes (including upgrade checks), installs gateway Olla/Edge and node oMLX LaunchDaemons through the configured admin accounts, validates sudoers with `visudo -cf`, and writes one narrow Thunder Forge sudoers include on each host at `/etc/sudoers.d/thunder-forge`. Olla upgrades occur when the configured target changes (for example a new pinned Olla version, or unpinned `latest` resolving to a newer release). After that, `make restart` regenerates Olla config and reinstalls/restarts all services with `sudo -n`; no password prompt is expected.
+
+When `services.olla.version` is omitted inside an explicit `services.olla` block, bootstrap treats Olla as unpinned and resolves the latest release tag at runtime. If latest lookup fails, it falls back to `v0.0.27`.
 
 After changing model placement or node topology in `tfconfig.yaml`, run `make restart gateway-cache-01` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
 
@@ -176,7 +214,7 @@ Non-secret Make/CLI defaults live in `tfconfig.yaml` under `operations:`. `opera
 
 For production nodes, prefer `--manager daemon` after node setup grants only the required non-interactive sudo commands. Use the default `process` manager for dev recovery and immediate no-sudo operation.
 
-`cluster prepare` is the unified one-time setup path for the pre-MVP cluster. It prints a plan, then applies phases in this order: gateway tooling, gateway daemons, cache hub, inference daemons. Use the lower-level `runtime setup-daemon` command only when working on one node directly. By default it prints the generated node-side admin script and remote commands. With `--apply`, it copies the script to the node and runs it through an admin account:
+`cluster prepare` is the unified one-time setup path for the pre-MVP cluster. It prints a plan, then applies phases in this order: gateway tooling, gateway daemons, cache tooling + cache hub, inference daemons. Use the lower-level `runtime setup-daemon` command only when working on one node directly. By default it prints the generated node-side admin script and remote commands. With `--apply`, it copies the script to the node and runs it through an admin account:
 
 ```bash
 uv run thunder-forge runtime setup-daemon --node infer-01 --admin-user <admin> --apply
@@ -213,7 +251,7 @@ Run `uv run thunder-forge config lint` before generating runtime/router config. 
 
 ### Parameter Sources
 
-- Cache artifact root: `.env` key `TF_CACHE_OMLX_MODELS_DIR`, default `~/.omlx/models`. Artifact `status`, `download`, and `sync` use this path on the machine running the CLI.
+- Cache artifact root: `.env` key `TF_CACHE_OMLX_MODELS_DIR`, default `~/.omlx/models`. Artifact `status`, `download`, and `sync` use this path on the cache execution host (local cache role or remotely dispatched cache role).
 - Node oMLX process args: `configs/node-assignments.yaml` under `nodes.<node>.runtime`. `type` and `port` are required; optional keys map directly to `omlx serve` flags: `model_dir`, `bind_host`, `base_path`, `log_level`, `max_model_memory`, `max_process_memory`, `max_concurrent_requests`, `paged_ssd_cache_dir`, `paged_ssd_cache_max_size`, `hot_cache_max_size`, `no_cache`, `mcp_config`, and `hf_endpoint`.
 - Olla generated endpoints: `generate-olla-config` reads `nodes.<node>.host`, `nodes.<node>.runtime.port`, and node names. Endpoint names are `<node>-omlx-live`.
 - Olla model aliases: generated from `models.<alias>.runtime_model_id` and `nodes.<node>.models`.

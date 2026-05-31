@@ -177,6 +177,8 @@ def build_artifact_sync_plan(
         "-a",
         "--progress",
         "--partial-dir=.rsync-partial",
+        "--exclude",
+        ".cache/",
         "-e",
         "ssh " + " ".join(shlex.quote(option) for option in ssh_options),
         source_path,

@@ -1,5 +1,7 @@
 """Tests for oMLX artifact readiness planning."""
 
+from pathlib import Path
+
 from thunder_forge.cluster.artifacts import (
     ArtifactPresence,
     ArtifactReadinessAction,
@@ -69,10 +71,11 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
         node_host="infer-01.lan",
         node_home_dir="/Users/shag",
     )
+    expected_cache_models_dir = str(Path("~/.omlx/models").expanduser())
 
     assert plan.model_dir_name == "BAAI/bge-small-en-v1.5"
     assert plan.runtime_model_id == "bge-small-en-v1.5"
-    assert plan.source_path == "/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/"
+    assert plan.source_path == f"{expected_cache_models_dir}/BAAI/bge-small-en-v1.5/"
     assert plan.destination == "shag@infer-01.lan:/Users/shag/.omlx/models/BAAI/bge-small-en-v1.5/"
     assert "shag@infer-01.lan" in plan.command
     assert "BAAI/bge-small-en-v1.5/" in plan.command
@@ -97,6 +100,7 @@ def test_artifact_sync_plan_uses_omlx_model_dir_as_source_and_management_host_by
 
 def test_artifact_download_plan_downloads_directly_to_omlx_model_dir() -> None:
     plan = build_artifact_download_plan(repo_id="mlx-community/Qwen3-1.7B-4bit")
+    expected_cache_models_dir = str(Path("~/.omlx/models").expanduser())
 
     assert plan.repo_id == "mlx-community/Qwen3-1.7B-4bit"
     assert plan.model_dir_name == "mlx-community/Qwen3-1.7B-4bit"
@@ -110,7 +114,7 @@ def test_artifact_download_plan_downloads_directly_to_omlx_model_dir() -> None:
         "--port",
         "8020",
         "--model-dir",
-        "/Users/shag/.omlx/models",
+        expected_cache_models_dir,
         "--max-model-memory",
         "disabled",
     ]
@@ -242,7 +246,7 @@ def test_artifact_sync_plan_can_use_fabric_host() -> None:
     assert plan.destination.startswith("shag@169.254.251.195:")
     assert "shag@169.254.251.195" in plan.mkdir_args
     assert "HostKeyAlias=infer-01.lan" in plan.mkdir_args
-    assert "HostKeyAlias=infer-01.lan" in plan.rsync_args[5]
+    assert any("HostKeyAlias=infer-01.lan" in arg for arg in plan.rsync_args)
 
 
 def test_artifact_sync_plan_rejects_invalid_repo_id() -> None:

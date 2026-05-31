@@ -122,6 +122,7 @@ def _gateway_setup_run_command(
     admin_user: str,
     interactive_sudo: bool,
     shell_program: str,
+    use_su_pty: bool = False,
 ) -> list[str]:
     host = socket.gethostname()
     host_tag = f"[{host}] " if host else ""
@@ -135,9 +136,13 @@ def _gateway_setup_run_command(
             else f"/usr/bin/sudo -n {quoted_shell} {quoted_script}"
         )
         notice = f"{host_tag}password prompt: method=su user={admin_user} reason=install Thunder Forge gateway daemons"
+        su_command = (
+            f"/usr/bin/su {'-P ' if use_su_pty else ''}- {shlex.quote(admin_user)} "
+            f"-c {shlex.quote(sudo_command)}"
+        )
         return [
             f"printf '%s\\n' {shlex.quote(notice)}",
-            f"/usr/bin/su - {shlex.quote(admin_user)} -c {shlex.quote(sudo_command)}",
+            su_command,
         ]
 
     sudo_prompt = "[%h] password: user=%p reason=install Thunder Forge gateway daemons: "
@@ -242,7 +247,7 @@ if [[ \"$(/usr/bin/uname -s)\" != \"Darwin\" ]]; then
 fi
 
 run_root /bin/mkdir -p {setup_dirs} \"$SUDOERS_DIR\"
-run_root /usr/sbin/chown -R \"$OPERATOR_USER\":staff {setup_dirs}
+run_root /usr/bin/chown -R \"$OPERATOR_USER\":staff {setup_dirs}
 run_root /usr/sbin/visudo -cf \"$TMP_SUDOERS\"
 run_root /usr/bin/install -o root -g wheel -m 440 \"$TMP_SUDOERS\" \"$SUDOERS_PATH\"
 
@@ -341,7 +346,7 @@ if [[ \"$(/usr/bin/uname -s)\" != \"Linux\" ]]; then
 fi
 
 run_root /bin/mkdir -p {setup_dirs} \"$SUDOERS_DIR\"
-run_root /usr/sbin/chown -R \"$OPERATOR_USER\":\"$OPERATOR_GROUP\" {setup_dirs}
+run_root /usr/bin/chown -R \"$OPERATOR_USER\":\"$OPERATOR_GROUP\" {setup_dirs}
 run_root /usr/sbin/visudo -cf \"$TMP_SUDOERS\"
 run_root /usr/bin/install -o root -g root -m 440 \"$TMP_SUDOERS\" \"$SUDOERS_PATH\"
 
@@ -493,6 +498,7 @@ def build_gateway_daemon_setup_result(
             admin_user=admin_user,
             interactive_sudo=interactive_sudo,
             shell_program=shell_program,
+            use_su_pty=manager == "systemd" and interactive_sudo and bool(admin_user),
         ),
         *verify_commands,
     ]

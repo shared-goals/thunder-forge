@@ -94,6 +94,7 @@ def test_parse_config_admin_users() -> None:
 
     assert config.services.frontend_admin_user == "serpo"
     assert config.services.olla_version == "v9.9.9"
+    assert config.services.olla_version_pinned is True
     assert config.services.olla_bin_dir == ".tmp/custom-olla"
     assert config.operations.smoke.alias == "memory"
     assert config.operations.smoke.client_id == "admin"
@@ -105,6 +106,36 @@ def test_parse_config_admin_users() -> None:
     assert config.nodes["gateway-cache-01"].admin_user == "serpo"
     assert config.nodes["infer-03"].user == "shag"
     assert config.nodes["infer-03"].admin_user == "admin"
+
+
+def test_parse_config_olla_version_is_unpinned_when_olla_block_omits_version() -> None:
+    config = parse_cluster_config(
+        {
+            "services": {
+                "olla": {
+                    "os": "linux",
+                    "arch": "arm64",
+                }
+            },
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.services.olla_version == "v0.0.27"
+    assert config.services.olla_version_pinned is False
+
+
+def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing() -> None:
+    config = parse_cluster_config(
+        {
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.services.olla_version == "v0.0.27"
+    assert config.services.olla_version_pinned is True
 
 
 def test_parse_config_rejects_role_field() -> None:

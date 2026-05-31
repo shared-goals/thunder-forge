@@ -409,6 +409,7 @@ class OmlxToolingResult:
     uv_path: str
     omlx_path: str
     tool_spec: str
+    resolved_omlx_path: str = ""
     command: str = ""
     applied: bool = False
     verified: bool = False
@@ -433,7 +434,12 @@ def _uv_binary_path(node: Node) -> str:
     return f"{node.home_dir}/.local/bin/uv"
 
 
-def _omlx_tooling_command(node: Node, *, tool_spec: str = DEFAULT_OMLX_TOOL_SPEC) -> str:
+def _omlx_tooling_command(
+    node: Node,
+    *,
+    tool_spec: str = DEFAULT_OMLX_TOOL_SPEC,
+    upgrade: bool = False,
+) -> str:
     if node.home_dir is None:
         msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
         raise ValueError(msg)
@@ -446,6 +452,7 @@ NODE_HOME={shlex.quote(node.home_dir)}
 UV_BINARY={shlex.quote(uv_binary)}
 OMLX_BINARY={shlex.quote(omlx_binary)}
 OMLX_TOOL_SPEC={shlex.quote(tool_spec)}
+OMLX_UPGRADE={"1" if upgrade else "0"}
 
 export HOME="$NODE_HOME"
 export PATH="$NODE_HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -467,6 +474,9 @@ fi
 if [[ ! -x "$OMLX_BINARY" ]]; then
     echo "oMLX: installing $OMLX_TOOL_SPEC"
     "$UV_BINARY" tool install "$OMLX_TOOL_SPEC"
+elif [[ "$OMLX_UPGRADE" == "1" ]]; then
+    echo "oMLX: upgrading $OMLX_TOOL_SPEC"
+    "$UV_BINARY" tool install --upgrade "$OMLX_TOOL_SPEC"
 else
     echo "oMLX: already installed at $OMLX_BINARY"
 fi
@@ -487,6 +497,7 @@ def ensure_omlx_tooling(
     apply: bool = True,
     timeout: int = 300,
     tool_spec: str = DEFAULT_OMLX_TOOL_SPEC,
+    upgrade: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> OmlxToolingResult:
     """Ensure the node user has uv and the oMLX CLI before daemon setup."""
@@ -499,7 +510,7 @@ def ensure_omlx_tooling(
         uv_path=_uv_binary_path(node),
         omlx_path=_omlx_binary_path(node),
         tool_spec=tool_spec,
-        command=_omlx_tooling_command(node, tool_spec=tool_spec),
+        command=_omlx_tooling_command(node, tool_spec=tool_spec, upgrade=upgrade),
     )
     if not apply:
         return result
@@ -514,9 +525,27 @@ def ensure_omlx_tooling(
         result.errors.append(f"oMLX tooling setup failed with exit code {run_res.returncode}{suffix}")
         return result
 
+    verify_res = ssh_run(
+        node.user,
+        node.host,
+        "command -v omlx",
+        timeout=min(timeout, 60),
+        shell=node.shell,
+    )
+    if verify_res.returncode != 0:
+        result.resolved_omlx_path = result.omlx_path
+        if progress:
+            progress(
+                "tooling: note oMLX is not on login-shell PATH; "
+                f"using direct path {result.omlx_path}"
+            )
+    else:
+        resolved_path = (verify_res.stdout or "").strip()
+        result.resolved_omlx_path = resolved_path or result.omlx_path
+
     result.verified = True
     if progress:
-        progress(f"tooling: oMLX CLI ready at {result.omlx_path}")
+        progress(f"tooling: oMLX CLI ready at {result.resolved_omlx_path}")
     return result
 
 
@@ -787,6 +816,11 @@ fi
 SUDOERS_DIR="$(/usr/bin/dirname "$SUDOERS_PATH")"
 TMP_PLIST="$(/usr/bin/mktemp "/tmp/$LABEL.plist.XXXXXX")"
 TMP_SUDOERS="$(/usr/bin/mktemp "/tmp/thunder-forge-sudoers.XXXXXX")"
+CHOWN_BIN="$(command -v chown || true)"
+if [[ -z "$CHOWN_BIN" ]]; then
+    echo "chown binary not found in PATH" >&2
+    exit 1
+fi
 cleanup() {{
     /bin/rm -f "$TMP_PLIST" "$TMP_SUDOERS"
 }}
@@ -801,8 +835,8 @@ THUNDER_FORGE_PLIST
 THUNDER_FORGE_SUDOERS
 
 run_root /bin/mkdir -p "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$OMLX_MODELS_DIR" "$LOG_DIR" "$SUDOERS_DIR"
-run_root /usr/sbin/chown "$NODE_USER":staff "$OMLX_HOME" "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$OMLX_MODELS_DIR" "$LOG_DIR"
-run_root /usr/sbin/chown -R "$NODE_USER":staff "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$LOG_DIR"
+run_root "$CHOWN_BIN" "$NODE_USER":staff "$OMLX_HOME" "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$OMLX_MODELS_DIR" "$LOG_DIR"
+run_root "$CHOWN_BIN" -R "$NODE_USER":staff "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$LOG_DIR"
 run_root /usr/sbin/visudo -cf "$TMP_SUDOERS"
 
 NODE_UID="$(/usr/bin/id -u "$NODE_USER")"

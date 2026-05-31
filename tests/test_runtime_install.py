@@ -205,7 +205,8 @@ def test_generate_daemon_setup_script_installs_sudoers_and_daemon() -> None:
     assert "run_root /usr/sbin/visudo -cf" in script
     assert 'OMLX_CACHE_DIR="$OMLX_HOME/cache"' in script
     assert 'OMLX_MODELS_DIR="$OMLX_HOME/models"' in script
-    assert 'run_root /usr/sbin/chown "$NODE_USER":staff "$OMLX_HOME"' in script
+    assert 'CHOWN_BIN="$(command -v chown || true)"' in script
+    assert 'run_root "$CHOWN_BIN" "$NODE_USER":staff "$OMLX_HOME"' in script
     assert "run_root /usr/bin/install -o root -g wheel -m 440" in script
     assert "run_root /bin/launchctl bootstrap system" in script
     assert "\nTHUNDER_FORGE_PLIST\n\n/bin/cat" in script
@@ -217,9 +218,17 @@ def test_ensure_omlx_tooling_dry_run_installs_user_local_uv_and_omlx() -> None:
     assert result.uv_path == "/Users/shag/.local/bin/uv"
     assert result.omlx_path == "/Users/shag/.local/bin/omlx"
     assert result.tool_spec == "git+https://github.com/jundot/omlx.git"
+    assert "OMLX_UPGRADE=0" in result.command
     assert "https://astral.sh/uv/install.sh" in result.command
     assert '"$UV_BINARY" tool install "$OMLX_TOOL_SPEC"' in result.command
     assert '"$OMLX_BINARY" --help >/dev/null' in result.command
+
+
+def test_ensure_omlx_tooling_dry_run_upgrade_mode_requests_tool_upgrade() -> None:
+    result = ensure_omlx_tooling(_make_runtime_node(), apply=False, upgrade=True)
+
+    assert "OMLX_UPGRADE=1" in result.command
+    assert '"$UV_BINARY" tool install --upgrade "$OMLX_TOOL_SPEC"' in result.command
 
 
 def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
@@ -228,6 +237,13 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
 
     def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_name=None, tty=False):
         calls.append((user, ip, cmd, stream))
+        if cmd == "command -v omlx":
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="/Users/shag/.local/bin/omlx\n",
+                stderr="",
+            )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     import thunder_forge.cluster.omlx as omlx_module
@@ -237,8 +253,41 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
     result = ensure_omlx_tooling(node, apply=True, timeout=120)
 
     assert result.ok
-    assert calls == [("shag", "infer-03.lan", result.command, True)]
+    assert calls == [
+        ("shag", "infer-03.lan", result.command, True),
+        ("shag", "infer-03.lan", "command -v omlx", False),
+    ]
     assert "NODE_HOME=/Users/shag" in result.command
+    assert result.resolved_omlx_path == "/Users/shag/.local/bin/omlx"
+
+
+def test_ensure_omlx_tooling_apply_falls_back_to_direct_path_when_omlx_is_missing_from_login_path(
+    monkeypatch,
+) -> None:
+    node = _make_runtime_node()
+    calls: list[tuple[str, str, str, bool]] = []
+
+    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_name=None, tty=False):
+        calls.append((user, ip, cmd, stream))
+        if cmd == "command -v omlx":
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="not found")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    import thunder_forge.cluster.omlx as omlx_module
+
+    monkeypatch.setattr(omlx_module, "ssh_run", fake_ssh_run)
+
+    result = ensure_omlx_tooling(node, apply=True, timeout=120)
+
+    assert result.ok
+    assert result.applied
+    assert result.verified
+    assert calls == [
+        ("shag", "infer-03.lan", result.command, True),
+        ("shag", "infer-03.lan", "command -v omlx", False),
+    ]
+    assert result.resolved_omlx_path == "/Users/shag/.local/bin/omlx"
+    assert result.errors == []
 
 
 def test_run_omlx_daemon_setup_dry_run_describes_admin_script() -> None:

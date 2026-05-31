@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import platform
 import re
 import subprocess
 from dataclasses import dataclass
@@ -111,25 +112,31 @@ def discover_link_local_fabric_host(
     that the route to the candidate also uses a Thunderbolt interface. This
     avoids treating unrelated 169.254 addresses as fabric.
     """
+    if platform.system() != "Darwin":
+        return None
+
     local_thunderbolt_devices = _local_thunderbolt_devices(timeout=timeout)
     if not local_thunderbolt_devices:
         return None
 
-    result = subprocess.run(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            f"{node_user}@{management_host}",
-            "networksetup -listallhardwareports 2>/dev/null; printf '\\n__TF_IFCONFIG__\\n'; ifconfig",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout + 8,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                f"{node_user}@{management_host}",
+                "networksetup -listallhardwareports 2>/dev/null; printf '\\n__TF_IFCONFIG__\\n'; ifconfig",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 8,
+        )
+    except FileNotFoundError:
+        return None
     if result.returncode != 0:
         return None
 
@@ -152,13 +159,16 @@ def discover_link_local_fabric_host(
 
 
 def _local_thunderbolt_devices(*, timeout: int) -> set[str]:
-    result = subprocess.run(
-        ["networksetup", "-listallhardwareports"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return set()
     if result.returncode != 0:
         return set()
     return _extract_thunderbolt_devices(result.stdout)
@@ -193,13 +203,16 @@ def _extract_link_local_ipv4(text: str, *, allowed_interfaces: set[str] | None =
 
 
 def _route_uses_allowed_interface(address: str, *, allowed_interfaces: set[str], timeout: int) -> bool:
-    result = subprocess.run(
-        ["route", "-n", "get", address],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            ["route", "-n", "get", address],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return False
     if result.returncode != 0:
         return False
     match = re.search(r"^\s*interface:\s*(\S+)\s*$", result.stdout, flags=re.MULTILINE)
@@ -218,13 +231,16 @@ def _ssh_hostname_check(address: str, *, node_user: str, host_key_alias: str, ti
         f"{node_user}@{address}",
         "hostname",
     ]
-    result = subprocess.run(
-        ssh_args,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=timeout + 1,
-    )
+    try:
+        result = subprocess.run(
+            ssh_args,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout + 1,
+        )
+    except FileNotFoundError:
+        return False
     return result.returncode == 0
 
 

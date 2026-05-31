@@ -8,6 +8,8 @@ from thunder_forge.cluster.fabric import build_transport_plan, discover_link_loc
 def test_discover_link_local_fabric_host_returns_first_ssh_reachable_node_address(monkeypatch) -> None:
     calls = []
 
+    monkeypatch.setattr("thunder_forge.cluster.fabric.platform.system", lambda: "Darwin")
+
     def fake_run(args, **kwargs):
         calls.append(args)
         if args[0] == "networksetup":
@@ -65,6 +67,8 @@ def test_discover_link_local_fabric_host_returns_first_ssh_reachable_node_addres
 
 
 def test_discover_link_local_fabric_host_rejects_non_thunderbolt_local_route(monkeypatch) -> None:
+    monkeypatch.setattr("thunder_forge.cluster.fabric.platform.system", lambda: "Darwin")
+
     def fake_run(args, **kwargs):
         if args[0] == "networksetup":
             return subprocess.CompletedProcess(
@@ -105,6 +109,8 @@ def test_discover_link_local_fabric_host_rejects_non_thunderbolt_local_route(mon
 
 
 def test_discover_link_local_fabric_host_ignores_non_thunderbolt_remote_interfaces(monkeypatch) -> None:
+    monkeypatch.setattr("thunder_forge.cluster.fabric.platform.system", lambda: "Darwin")
+
     def fake_run(args, **kwargs):
         if args[0] == "networksetup":
             return subprocess.CompletedProcess(
@@ -133,6 +139,23 @@ def test_discover_link_local_fabric_host_ignores_non_thunderbolt_remote_interfac
     address = discover_link_local_fabric_host(management_host="infer-03.lan", node_user="shag")
 
     assert address is None
+
+
+def test_discover_link_local_fabric_host_returns_none_on_non_darwin(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr("thunder_forge.cluster.fabric.platform.system", lambda: "Linux")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    address = discover_link_local_fabric_host(management_host="infer-03.lan", node_user="shag")
+
+    assert address is None
+    assert calls == []
 
 
 def test_build_transport_plan_prefers_discovered_fabric_when_enabled(monkeypatch) -> None:

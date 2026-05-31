@@ -159,6 +159,7 @@ class ServiceConfig:
     edge_port: int = DEFAULT_EDGE_PORT
     olla_port: int = DEFAULT_OLLA_PORT
     olla_version: str = DEFAULT_OLLA_VERSION
+    olla_version_pinned: bool = True
     olla_os: str = DEFAULT_OLLA_OS
     olla_arch: str = DEFAULT_OLLA_ARCH
     olla_bin_dir: str = DEFAULT_OLLA_BIN_DIR
@@ -392,11 +393,16 @@ def _parse_services(raw: object) -> ServiceConfig:
     if not isinstance(olla_raw, dict):
         msg = "services.olla must be a mapping"
         raise ValueError(msg)
+    has_olla_block = "olla" in raw and raw.get("olla") is not None
+    olla_version_raw = str(olla_raw.get("version", "")).strip()
+    olla_version_pinned = bool(olla_version_raw) or not has_olla_block
+    olla_version = olla_version_raw or DEFAULT_OLLA_VERSION
     return ServiceConfig(
         edge_host=edge_host,
         edge_port=_parse_service_port(raw, "edge", DEFAULT_EDGE_PORT),
         olla_port=_parse_service_port(raw, "olla", DEFAULT_OLLA_PORT),
-        olla_version=str(olla_raw.get("version", DEFAULT_OLLA_VERSION)).strip() or DEFAULT_OLLA_VERSION,
+        olla_version=olla_version,
+        olla_version_pinned=olla_version_pinned,
         olla_os=str(olla_raw.get("os", DEFAULT_OLLA_OS)).strip() or DEFAULT_OLLA_OS,
         olla_arch=str(olla_raw.get("arch", DEFAULT_OLLA_ARCH)).strip() or DEFAULT_OLLA_ARCH,
         olla_bin_dir=str(olla_raw.get("bin_dir", DEFAULT_OLLA_BIN_DIR)).strip() or DEFAULT_OLLA_BIN_DIR,

@@ -264,6 +264,7 @@ def test_gateway_daemon_setup_generates_systemd_sudoers_on_linux(tmp_path: Path,
     assert "Cmnd_Alias TF_EDGE_40116_SYSTEMD" in result.script_content
     assert "run_root /bin/systemctl daemon-reload" in result.script_content
     assert "supports Linux only" in result.script_content
+    assert any("/usr/bin/su -P - serpo -c" in command for command in result.commands)
     assert result.commands[-2:] == [
         "/usr/bin/sudo -n /bin/systemctl is-active --quiet com.thunder-forge.olla-40115.service",
         "/usr/bin/sudo -n /bin/systemctl is-active --quiet com.thunder-forge.edge-40116.service",
@@ -315,7 +316,7 @@ def test_gateway_daemon_setup_apply_verifies_with_systemd_on_linux(tmp_path: Pat
     assert result.ok
     assert written_files[0][0] == str(tmp_path / ".tmp/run/thunder-forge-gateway-daemon-setup.sh")
     assert command_batches[0][0].startswith("printf '%s\\n' ")
-    assert "/usr/bin/su - serpo -c" in command_batches[0][1]
+    assert "/usr/bin/su -P - serpo -c" in command_batches[0][1]
     assert "/bin/zsh" in command_batches[0][1]
     assert command_batches[1] == [
         "/usr/bin/sudo -n /bin/systemctl is-active --quiet com.thunder-forge.olla-40115.service",
