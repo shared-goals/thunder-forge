@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 from typing import cast
@@ -545,15 +546,20 @@ def config_lint() -> None:
 
 
 def _print_launchd_service_result(result, *, manager: str, dry_run: bool) -> None:
+    systemd_layout = manager == "systemd" or result.plist_path.endswith(".service")
+    manager_display = "systemd (daemon alias)" if manager == "daemon" and systemd_layout else manager
     typer.echo(f"service: {result.service}")
-    typer.echo(f"manager: {manager}")
-    typer.echo(f"plist_path: {result.plist_path}")
+    typer.echo(f"manager: {manager_display}")
+    path_label = "unit_path" if systemd_layout else "plist_path"
+    staging_label = "staging_unit_path" if systemd_layout else "staging_plist_path"
+    content_label = "unit" if systemd_layout else "plist"
+    typer.echo(f"{path_label}: {result.plist_path}")
     if result.staging_plist_path:
-        typer.echo(f"staging_plist_path: {result.staging_plist_path}")
+        typer.echo(f"{staging_label}: {result.staging_plist_path}")
     typer.echo(f"label: {result.label}")
     typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
     if result.plist_content:
-        typer.echo("plist:")
+        typer.echo(f"{content_label}:")
         for line in result.plist_content.splitlines():
             typer.echo(f"  {line}")
     if result.commands:
@@ -582,9 +588,20 @@ def _gateway_operator_user(config: ClusterConfig, user: str) -> str:
         return os.environ.get("USER", "")
 
 
+def _frontend_system_manager() -> str:
+    return "systemd" if platform.system() == "Linux" else "daemon"
+
+
+def _gateway_frontend_setup_reason() -> str:
+    if platform.system() == "Linux":
+        return "install Olla + TF edge systemd services"
+    return "install Olla + TF edge LaunchDaemons"
+
+
 def _print_gateway_daemon_setup_result(result: GatewayDaemonSetupResult, *, dry_run: bool) -> None:
+    systemd_layout = any(service.plist_path.endswith(".service") for service in result.services)
     typer.echo("scope: gateway")
-    typer.echo("manager: daemon")
+    typer.echo("manager: systemd (daemon alias)" if systemd_layout else "manager: daemon")
     typer.echo(f"operator_user: {result.user}")
     typer.echo(f"admin_user: {result.admin_user or '(direct sudo)'}")
     typer.echo(f"sudoers_path: {result.sudoers_path}")
@@ -593,9 +610,12 @@ def _print_gateway_daemon_setup_result(result: GatewayDaemonSetupResult, *, dry_
     if result.services:
         typer.echo("services:")
         for service in result.services:
+            service_systemd = service.plist_path.endswith(".service")
+            path_label = "unit_path" if service_systemd else "plist_path"
+            staging_label = "staging_unit_path" if service_systemd else "staging_plist_path"
             typer.echo(f"  - {service.service}: {service.label}")
-            typer.echo(f"    plist_path: {service.plist_path}")
-            typer.echo(f"    staging_plist_path: {service.staging_plist_path}")
+            typer.echo(f"    {path_label}: {service.plist_path}")
+            typer.echo(f"    {staging_label}: {service.staging_plist_path}")
     if dry_run and result.script_content:
         typer.echo("script:")
         for line in result.script_content.splitlines():
@@ -757,7 +777,7 @@ def cluster_prepare(
         typer.echo(
             "  auth: "
             f"operator={_gateway_operator_user(config, '')} admin={gateway_admin_user} "
-            "reason=install Olla + TF edge LaunchDaemons"
+            f"reason={_gateway_frontend_setup_reason()}"
         )
         result = run_gateway_daemon_setup(
             repo_root=repo_root,
@@ -858,6 +878,7 @@ def cluster_restart(
     typer.echo("Thunder Forge cluster restart")
     typer.echo(f"target: {target or 'all'}")
     typer.echo(f"mode: {'dry-run' if dry_run else 'apply'}")
+    frontend_manager = _frontend_system_manager()
 
     if gateway_names:
         typer.echo("")
@@ -873,7 +894,7 @@ def cluster_restart(
             binary=resolved_binary,
             config_path=repo_root / "configs" / "olla-config.yaml",
             port=resolve_port(None, default=config.services.olla_port),
-            manager="daemon",
+            manager=frontend_manager,
             apply=not dry_run,
             timeout=timeout,
             user=_gateway_operator_user(config, ""),
@@ -886,7 +907,7 @@ def cluster_restart(
             repo_root=repo_root,
             host=config.services.edge_host,
             port=resolve_port(None, default=config.services.edge_port),
-            manager="daemon",
+            manager=frontend_manager,
             apply=not dry_run,
             timeout=timeout,
             users_env=EDGE_USER_PREFIX,
@@ -1205,7 +1226,7 @@ def service_restart(
     manager: str = typer.Option(
         "launchd",
         "--manager",
-        help="Service manager. Olla/edge: launchd or daemon. oMLX: process, daemon, or launchd.",
+        help="Service manager. Olla/edge: launchd, daemon, or systemd. oMLX: process, daemon, or launchd.",
     ),
     dry_run: bool = typer.Option(
         True,

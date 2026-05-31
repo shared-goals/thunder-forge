@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import re
 import subprocess
 import time
@@ -18,10 +19,14 @@ from thunder_forge.cluster.services import (
     LaunchdServiceResult,
     LaunchdServiceSpec,
     generate_launchd_plist,
+    generate_systemd_unit,
     launch_agent_path,
     launch_daemon_path,
     run_local_commands,
     system_launchd_commands,
+    systemd_commands,
+    systemd_service_name,
+    systemd_unit_path,
     user_launchd_commands,
     write_local_file,
 )
@@ -431,6 +436,40 @@ def _build_olla_launchd_result(
     return result, f"http://127.0.0.1:{port}"
 
 
+def _build_olla_systemd_result(
+    *,
+    repo_root: Path,
+    binary: Path,
+    config_path: Path,
+    port: int,
+    user: str,
+    interactive_sudo: bool = False,
+    admin_user: str = "",
+) -> tuple[LaunchdServiceResult, str]:
+    spec = _olla_service_spec(repo_root=repo_root, binary=binary, config_path=config_path, port=port, user=user)
+    service_name = systemd_service_name(spec.label)
+    unit_path = systemd_unit_path(service_name)
+    staging_unit_path = str(repo_root / ".tmp" / "run" / service_name)
+    result = LaunchdServiceResult(
+        service=spec.name,
+        label=service_name,
+        plist_path=unit_path,
+        staging_plist_path=staging_unit_path,
+        process_pattern=spec.process_pattern,
+    )
+    result.plist_content = generate_systemd_unit(spec)
+    log_dir = sh_quote(str(repo_root / "logs"))
+    result.commands = systemd_commands(
+        service_name=service_name,
+        staging_unit_path=staging_unit_path,
+        unit_path=unit_path,
+        setup_command=f"mkdir -p {sh_quote(str(repo_root / '.tmp' / 'run'))} {log_dir}",
+        interactive_sudo=interactive_sudo,
+        admin_user=admin_user,
+    )
+    return result, f"http://127.0.0.1:{port}"
+
+
 def sh_quote(value: str) -> str:
     import shlex
 
@@ -489,22 +528,38 @@ def run_olla_service_restart(
     interactive_sudo: bool = False,
     admin_user: str = "",
 ) -> LaunchdServiceResult:
-    """Install/update and restart Olla as a frontend launchd service."""
+    """Install/update and restart Olla as a frontend service."""
     normalized_manager = manager.lower()
-    if normalized_manager not in {"launchd", "daemon"}:
-        msg = "Olla service manager must be 'launchd' or 'daemon'"
+    if normalized_manager not in {"launchd", "daemon", "systemd"}:
+        msg = "Olla service manager must be 'launchd', 'daemon', or 'systemd'"
         raise ValueError(msg)
+    host_os = platform.system()
+    if normalized_manager == "systemd" and host_os != "Linux":
+        msg = "Olla service manager 'systemd' is only supported on Linux hosts"
+        raise ValueError(msg)
+    effective_manager = "systemd" if normalized_manager == "daemon" and host_os != "Darwin" else normalized_manager
     resolved_port = resolve_port(port, default=OLLA_DEFAULT_PORT)
-    result, base_url = _build_olla_launchd_result(
-        repo_root=repo_root,
-        binary=binary,
-        config_path=config_path,
-        port=resolved_port,
-        user=user or "shag",
-        manager=normalized_manager,
-        interactive_sudo=interactive_sudo,
-        admin_user=admin_user,
-    )
+    if effective_manager == "systemd":
+        result, base_url = _build_olla_systemd_result(
+            repo_root=repo_root,
+            binary=binary,
+            config_path=config_path,
+            port=resolved_port,
+            user=user or "shag",
+            interactive_sudo=interactive_sudo,
+            admin_user=admin_user,
+        )
+    else:
+        result, base_url = _build_olla_launchd_result(
+            repo_root=repo_root,
+            binary=binary,
+            config_path=config_path,
+            port=resolved_port,
+            user=user or "shag",
+            manager=effective_manager,
+            interactive_sudo=interactive_sudo,
+            admin_user=admin_user,
+        )
     if not apply:
         return result
     return _apply_local_olla_service(result, base_url=base_url, timeout=timeout, stream=interactive_sudo)

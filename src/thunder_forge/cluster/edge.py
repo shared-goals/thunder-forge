@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -29,10 +30,14 @@ from thunder_forge.cluster.services import (
     LaunchdServiceResult,
     LaunchdServiceSpec,
     generate_launchd_plist,
+    generate_systemd_unit,
     launch_agent_path,
     launch_daemon_path,
     run_local_commands,
     system_launchd_commands,
+    systemd_commands,
+    systemd_service_name,
+    systemd_unit_path,
     user_launchd_commands,
     write_local_file,
 )
@@ -957,6 +962,50 @@ def _build_edge_launchd_result(
     return result, local_base_url(port)
 
 
+def _build_edge_systemd_result(
+    *,
+    repo_root: Path,
+    host: str,
+    port: int,
+    olla_base_url: str,
+    users_env: str,
+    access_log_path: Path,
+    user: str,
+    interactive_sudo: bool = False,
+    admin_user: str = "",
+) -> tuple[LaunchdServiceResult, str]:
+    spec = _edge_service_spec(
+        repo_root=repo_root,
+        host=host,
+        port=port,
+        olla_base_url=olla_base_url,
+        users_env=users_env,
+        access_log_path=access_log_path,
+        user=user,
+    )
+    service_name = systemd_service_name(spec.label)
+    unit_path = systemd_unit_path(service_name)
+    staging_unit_path = str(repo_root / ".tmp" / "run" / service_name)
+    result = LaunchdServiceResult(
+        service=spec.name,
+        label=service_name,
+        plist_path=unit_path,
+        staging_plist_path=staging_unit_path,
+        process_pattern=spec.process_pattern,
+    )
+    result.plist_content = generate_systemd_unit(spec)
+    log_dir = _sh_quote(str(repo_root / "logs"))
+    result.commands = systemd_commands(
+        service_name=service_name,
+        staging_unit_path=staging_unit_path,
+        unit_path=unit_path,
+        setup_command=f"mkdir -p {_sh_quote(str(repo_root / '.tmp' / 'run'))} {log_dir}",
+        interactive_sudo=interactive_sudo,
+        admin_user=admin_user,
+    )
+    return result, local_base_url(port)
+
+
 def _sh_quote(value: str) -> str:
     import shlex
 
@@ -1040,24 +1089,42 @@ def run_edge_service_restart(
     interactive_sudo: bool = False,
     admin_user: str = "",
 ) -> LaunchdServiceResult:
-    """Install/update and restart TF edge as a frontend launchd service."""
+    """Install/update and restart TF edge as a frontend service."""
     normalized_manager = manager.lower()
-    if normalized_manager not in {"launchd", "daemon"}:
-        msg = "TF edge service manager must be 'launchd' or 'daemon'"
+    if normalized_manager not in {"launchd", "daemon", "systemd"}:
+        msg = "TF edge service manager must be 'launchd', 'daemon', or 'systemd'"
         raise ValueError(msg)
+    host_os = platform.system()
+    if normalized_manager == "systemd" and host_os != "Linux":
+        msg = "TF edge service manager 'systemd' is only supported on Linux hosts"
+        raise ValueError(msg)
+    effective_manager = "systemd" if normalized_manager == "daemon" and host_os != "Darwin" else normalized_manager
     resolved_port = resolve_port(port, default=EDGE_DEFAULT_PORT)
-    result, base_url = _build_edge_launchd_result(
-        repo_root=repo_root,
-        host=host,
-        port=resolved_port,
-        olla_base_url=olla_base_url or local_base_url(DEFAULT_OLLA_PORT),
-        users_env=users_env,
-        access_log_path=access_log_path,
-        user=user or os.environ.get("USER", "shag"),
-        manager=normalized_manager,
-        interactive_sudo=interactive_sudo,
-        admin_user=admin_user,
-    )
+    if effective_manager == "systemd":
+        result, base_url = _build_edge_systemd_result(
+            repo_root=repo_root,
+            host=host,
+            port=resolved_port,
+            olla_base_url=olla_base_url or local_base_url(DEFAULT_OLLA_PORT),
+            users_env=users_env,
+            access_log_path=access_log_path,
+            user=user or os.environ.get("USER", "shag"),
+            interactive_sudo=interactive_sudo,
+            admin_user=admin_user,
+        )
+    else:
+        result, base_url = _build_edge_launchd_result(
+            repo_root=repo_root,
+            host=host,
+            port=resolved_port,
+            olla_base_url=olla_base_url or local_base_url(DEFAULT_OLLA_PORT),
+            users_env=users_env,
+            access_log_path=access_log_path,
+            user=user or os.environ.get("USER", "shag"),
+            manager=effective_manager,
+            interactive_sudo=interactive_sudo,
+            admin_user=admin_user,
+        )
     if not apply:
         return result
     return _apply_local_edge_service(result, base_url=base_url, timeout=timeout, stream=interactive_sudo)

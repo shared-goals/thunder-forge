@@ -1,5 +1,6 @@
 """CLI tests for node-level runtime commands."""
 
+import platform
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -564,7 +565,12 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     assert calls == ["olla", "config", "gateway", "cache", "tooling", "inference"]
     assert gateway_calls[0]["edge_host"] == "0.0.0.0"
     assert "== Gateway: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
-    assert "auth: operator=shag admin=serpo reason=install Olla + TF edge LaunchDaemons" in result.stdout
+    frontend_reason = (
+        "install Olla + TF edge systemd services"
+        if platform.system() == "Linux"
+        else "install Olla + TF edge LaunchDaemons"
+    )
+    assert f"auth: operator=shag admin=serpo reason={frontend_reason}" in result.stdout
     assert "== Cache Hub: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
     assert "== Inference: infer-03 (infer-03.lan) ==" in result.stdout
     assert "auth: ssh=shag@infer-03.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
@@ -897,6 +903,49 @@ def test_service_restart_edge_dry_run_prints_frontend_daemon_plan(tmp_path: Path
     assert "plist_path: /Library/LaunchDaemons/com.thunder-forge.edge-45116.plist" in result.stdout
     assert "mode: dry-run" in result.stdout
     assert "launchctl bootstrap system" in result.stdout
+
+
+def test_service_restart_edge_systemd_dry_run_prints_unit_plan(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            services:
+              edge:
+                port: 45116
+              olla:
+                port: 45115
+            models: {}
+            nodes: {}
+        """)
+    )
+    calls = []
+
+    def fake_run_edge_service_restart(**kwargs):
+        calls.append(kwargs)
+        return LaunchdServiceResult(
+            service="edge",
+            label="com.thunder-forge.edge-45116.service",
+            plist_path="/etc/systemd/system/com.thunder-forge.edge-45116.service",
+            staging_plist_path=str(repo / ".tmp/run/com.thunder-forge.edge-45116.service"),
+            plist_content="[Unit]\nDescription=TF edge\n",
+            commands=["/usr/bin/sudo -n /bin/systemctl restart com.thunder-forge.edge-45116.service"],
+        )
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "run_edge_service_restart", fake_run_edge_service_restart)
+
+    result = runner.invoke(app, ["service", "restart", "--service", "edge", "--manager", "systemd"])
+
+    assert result.exit_code == 0
+    assert calls[0]["manager"] == "systemd"
+    assert "manager: systemd" in result.stdout
+    assert "unit_path: /etc/systemd/system/com.thunder-forge.edge-45116.service" in result.stdout
+    assert "staging_unit_path:" in result.stdout
+    assert "unit:" in result.stdout
+    assert "systemctl restart" in result.stdout
 
 
 def test_service_restart_edge_apply_exits_on_early_error(tmp_path: Path, monkeypatch) -> None:
