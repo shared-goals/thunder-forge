@@ -1,58 +1,101 @@
-COMPOSE = docker compose -f docker/docker-compose.yml --env-file .env
+UV ?= uv run
+
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync config usage-report usage-report-json usage-trim usage-duckdb opencode hermes
+ARG ?= $(word 2,$(MAKECMDGOALS))
+
+ifneq ($(ARG),)
+$(ARG):
+	@:
+endif
 
 help:
-	@echo "Usage: make <target>"
+	@echo "Thunder Forge make targets"
 	@echo ""
-	@echo "  sync            Update local uv environment"
-	@echo "  up              Build and start all services, removing orphaned containers"
-	@echo "  down            Stop all services and remove orphaned containers"
-	@echo "  restart         Stop and restart all services, removing orphaned containers"
-	@echo "  ps              Show service status"
-	@echo "  logs            Show logs (optional: s=<service>)"
-	@echo "  setup-gateway   Bootstrap this machine as gateway node"
-	@echo "  setup-node      Bootstrap this machine as compute node"
-	@echo "  config          Regenerate LiteLLM config from node-assignments.yaml"
-	@echo "  check           Verify gateway setup and service health"
-	@echo "  check-docker    Test Docker network connectivity to PyPI"
+	@echo "Usage:"
+	@echo "  make <target> [node|client]"
+	@echo ""
+	@echo "Cluster:"
+	@printf "  %-24s %s\n" "bootstrap [node]" "setup gateway/cache/inference daemons"
+	@printf "  %-24s %s\n" "restart [node]" "restart gateway and inference daemons"
+	@printf "  %-24s %s\n" "smoke [node]" "smoke runtime, Olla, and edge"
+	@printf "  %-24s %s\n" "status [node]" "check oMLX health on inference nodes"
+	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
+	@printf "  %-24s %s\n" "config" "generate configs/olla-config.yaml"
+	@printf "  %-24s %s\n" "usage-report [day]" "print usage summary (day: YYYY-MM-DD)"
+	@printf "  %-24s %s\n" "usage-report-json [day]" "print usage summary as JSON"
+	@printf "  %-24s %s\n" "usage-trim [days]" "trim local TF logs (default 3 days)"
+	@printf "  %-24s %s\n" "usage-duckdb [day]" "run DuckDB daily usage SQL over JSONL logs"
+	@printf "  %-24s %s\n" "opencode [id]" "create client key and print/copy OpenCode config"
+	@printf "  %-24s %s\n" "hermes [id]" "create client key and print/copy Hermes config"
+	@echo ""
+	@echo "Developer:"
+	@printf "  %-24s %s\n" "dev-sync" "update the uv environment"
+	@printf "  %-24s %s\n" "dev-test" "run pytest"
+	@printf "  %-24s %s\n" "dev-lint" "run ruff"
+	@printf "  %-24s %s\n" "dev-check" "run tests and lint"
+	@echo ""
+	@echo "Reference:"
+	@printf "  %-24s %s\n" "cli-help" "show thunder-forge CLI help"
+	@echo ""
+	@echo "Common variables:"
+	@printf "  %-24s %s\n" "UV" "$(UV)"
+	@echo ""
+	@echo "Operator defaults live in tfconfig.yaml under operations. Secrets live in .env."
 
-sync:
+cli-help:
+	@$(UV) thunder-forge --help
+
+dev-sync:
 	uv sync --upgrade
 
-up: sync
-	$(COMPOSE) up -d --build --remove-orphans
+dev-test:
+	$(UV) pytest --tb=short -q
 
-down:
-	$(COMPOSE) down --remove-orphans
+dev-lint:
+	$(UV) ruff check .
 
-restart: sync
-	$(COMPOSE) down --remove-orphans && $(COMPOSE) up -d --build --remove-orphans
+dev-check: dev-test dev-lint
 
-ps:
-	$(COMPOSE) ps
+bootstrap:
+	$(UV) thunder-forge cluster prepare $(ARG) --apply
 
-logs:
-	$(COMPOSE) logs --tail=50 $(s)
+restart:
+	$(UV) thunder-forge cluster restart $(ARG) --apply
 
-setup-gateway:
-	zsh scripts/setup-node.sh gateway
+smoke:
+	$(UV) thunder-forge cluster smoke $(ARG)
 
-setup-node:
-	zsh scripts/setup-node.sh node
+status:
+	$(UV) thunder-forge cluster status $(ARG)
+
+sync:
+	@if [ -z "$(ARG)" ]; then echo 'usage: make sync <node>'; exit 2; fi
+	$(UV) thunder-forge cluster sync "$(ARG)" --apply
 
 config:
-	uv run thunder-forge generate-config
+	$(UV) thunder-forge generate-olla-config
 
-check:
-	zsh scripts/setup-node.sh gateway --check
+usage-report:
+	$(UV) thunder-forge usage report $(if $(strip $(ARG)),--period "$(ARG)")
 
-check-docker:
-	@echo "==> Proxy config inside container..."
-	@docker run --rm python:3.12-slim env | grep -iE '^(https?_proxy|no_proxy)=' || echo "  (none — if behind a proxy, configure ~/.docker/config.json proxies)"
-	@echo "==> Testing DNS resolution..."
-	@docker run --rm python:3.12-slim python -c "import socket; ip = socket.getaddrinfo('pypi.org', 443)[0][4][0]; print(f'  pypi.org -> {ip}')" || echo "  FAIL: DNS resolution failed"
-	@echo "==> Testing HTTPS connectivity to PyPI (timeout 30s)..."
-	@docker run --rm python:3.12-slim pip install --dry-run --timeout 30 hatchling 2>&1 | tail -5
-	@echo "==> Done. If DNS or HTTPS failed, check Docker DNS config (daemon.json) or firewall/VPN settings."
+usage-report-json:
+	$(UV) thunder-forge usage report --json $(if $(strip $(ARG)),--period "$(ARG)")
 
-.PHONY: help sync up down restart ps logs config setup-gateway setup-node check check-docker
+usage-trim:
+	$(UV) thunder-forge usage trim-logs $(if $(strip $(ARG)),--retention-days "$(ARG)")
+
+usage-duckdb:
+	@if ! command -v duckdb >/dev/null 2>&1; then \
+		echo 'duckdb is not installed. Install duckdb CLI first.'; \
+		exit 2; \
+	fi
+	duckdb -readonly -cmd ".mode table" -cmd ".headers on" -cmd ".param set period $(if $(strip $(ARG)),$(ARG),$(shell date -u +%F))" -f docs/operations/daily-usage-duckdb.sql
+
+opencode:
+	@$(UV) thunder-forge edge client-config opencode --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key "$(ARG)")
+
+hermes:
+	@$(UV) thunder-forge edge client-config hermes --copy $(if $(strip $(ARG)),--create-missing-key "$(ARG)")
+
+.PHONY: $(_TARGETS)
 .DEFAULT_GOAL := help

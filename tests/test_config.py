@@ -7,56 +7,165 @@ import pytest
 import yaml as yaml_lib
 
 from thunder_forge.cluster.config import (
-    check_config_sync,
-    generate_litellm_config,
+    DEFAULT_EDGE_ACCESS_LOG,
+    DEFAULT_EDGE_HOST,
+    DEFAULT_LOG_RETENTION_DAYS,
+    find_repo_root,
+    generate_olla_config,
+    lint_cluster_config,
     load_cluster_config,
     parse_cluster_config,
-    validate_memory,
 )
 
 
 @pytest.fixture()
-def assignments_yaml(tmp_path: Path) -> Path:
-    """Create a minimal node-assignments.yaml for testing."""
+def cluster_yaml(tmp_path: Path) -> Path:
+    """Create a minimal tfconfig.yaml for testing."""
     content = dedent("""\
         models:
           coder:
             source:
-              type: huggingface
               repo: "mlx-community/Qwen3-Coder-Next-4bit"
-              revision: "main"
+            runtime_model_id: Qwen3-Coder-Next-4bit
             disk_gb: 44.8
             kv_per_32k_gb: 8
             max_context: 131072
 
         nodes:
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
+          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", roles: [gateway] }
+          infer-01:
+            host: "infer-01.lan"
+            ram_gb: 128
+            user: "admin"
+            roles: [inference]
+            admin_user: admin
+            runtime: { type: omlx, port: 8018 }
+            models: [coder]
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    return p
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
+    return path
 
 
-def test_load_cluster_config(assignments_yaml: Path) -> None:
-    config = load_cluster_config(assignments_yaml)
+def test_load_cluster_config(cluster_yaml: Path) -> None:
+    config = load_cluster_config(cluster_yaml)
     assert "coder" in config.models
     assert config.models["coder"].source.type == "huggingface"
+    assert config.models["coder"].runtime_model_id == "Qwen3-Coder-Next-4bit"
     assert config.models["coder"].disk_gb == 44.8
-    assert "msm1" in config.nodes
-    assert config.nodes["msm1"].host == "msm1-wifi.lan"
-    assert config.nodes["msm1"].ip == "msm1-wifi.lan"
-    assert config.nodes["msm1"].role == "node"
+    assert "infer-01" in config.nodes
+    assert config.nodes["infer-01"].host == "infer-01.lan"
+    assert config.nodes["infer-01"].role == "inference"
+    assert config.nodes["infer-01"].admin_user == "admin"
+    assert config.nodes["infer-01"].models == ["coder"]
     assert "rock" in config.nodes
     assert config.nodes["rock"].role == "gateway"
-    assert len(config.assignments["msm1"]) == 1
-    assert config.assignments["msm1"][0].model == "coder"
-    assert config.assignments["msm1"][0].port == 8000
+
+
+def test_parse_config_admin_users() -> None:
+    config = parse_cluster_config(
+        {
+            "services": {
+                "log_retention_days": 5,
+                "frontend": {"admin_user": "serpo"},
+                "olla": {"version": "v9.9.9", "bin_dir": ".tmp/custom-olla"},
+            },
+            "operations": {
+                "smoke": {"alias": "memory", "client_id": "admin", "timeout": 12},
+                "sync": {"transport": "management", "timeout": 123, "restart_runtime": False},
+            },
+            "models": {},
+            "nodes": {
+                "gateway-cache-01": {
+                    "host": "gateway-cache-01.lan",
+                    "ram_gb": 128,
+                    "user": "shag",
+                    "admin_user": "serpo",
+                    "roles": ["gateway", "cache"],
+                },
+                "infer-03": {
+                    "host": "infer-03.lan",
+                    "ram_gb": 128,
+                    "user": "shag",
+                    "admin_user": "admin",
+                    "roles": ["inference"],
+                },
+            },
+        }
+    )
+
+    assert config.services.frontend_admin_user == "serpo"
+    assert config.services.log_retention_days == 5
+    assert config.services.olla_version == "v9.9.9"
+    assert config.services.olla_version_pinned is True
+    assert config.services.olla_bin_dir == ".tmp/custom-olla"
+    assert config.operations.smoke.alias == "memory"
+    assert config.operations.smoke.client_id == "admin"
+    assert config.operations.smoke.timeout == 12
+    assert config.operations.sync.transport == "management"
+    assert config.operations.sync.timeout == 123
+    assert config.operations.sync.restart_runtime is False
+    assert config.nodes["gateway-cache-01"].roles == ["gateway", "cache"]
+    assert config.nodes["gateway-cache-01"].admin_user == "serpo"
+    assert config.nodes["infer-03"].user == "shag"
+    assert config.nodes["infer-03"].admin_user == "admin"
+
+
+def test_parse_config_olla_version_is_unpinned_when_olla_block_omits_version() -> None:
+    config = parse_cluster_config(
+        {
+            "services": {
+                "olla": {
+                    "os": "linux",
+                    "arch": "arm64",
+                }
+            },
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.services.olla_version == "v0.0.27"
+    assert config.services.olla_version_pinned is False
+
+
+def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing() -> None:
+    config = parse_cluster_config(
+        {
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.services.olla_version == "v0.0.27"
+    assert config.services.olla_version_pinned is True
+
+
+def test_parse_config_log_retention_days_default() -> None:
+    config = parse_cluster_config(
+        {
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.services.log_retention_days == DEFAULT_LOG_RETENTION_DAYS
+
+
+def test_parse_config_rejects_role_field() -> None:
+    with pytest.raises(ValueError, match="'role' is not supported"):
+        parse_cluster_config(
+            {
+                "models": {},
+                "nodes": {
+                    "gateway-cache-01": {
+                        "host": "gateway-cache-01.lan",
+                        "ram_gb": 128,
+                        "role": "gateway",
+                    }
+                },
+            }
+        )
 
 
 def test_load_cluster_config_user_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,51 +183,162 @@ def test_load_cluster_config_user_defaults(tmp_path: Path, monkeypatch: pytest.M
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          rock: { host: "rock.lan", ram_gb: 32, role: gateway }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
+          rock: { host: "rock.lan", ram_gb: 32, roles: [gateway] }
+          infer-01: { host: "infer-01.lan", ram_gb: 128, roles: [inference] }
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    assert config.nodes["msm1"].user == "testuser"
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
+    config = load_cluster_config(path)
+    assert config.nodes["infer-01"].user == "testuser"
     assert config.nodes["rock"].user == "testuser"
 
 
-def test_load_cluster_config_role_migration(tmp_path: Path) -> None:
-    """Old role names (inference, infra) are migrated with a deprecation warning."""
+def test_load_cluster_config_rejects_node_role(tmp_path: Path) -> None:
     content = dedent("""\
         models:
           coder:
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: infra }
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: inference }
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
+          infer-01: { host: "infer-01.lan", ram_gb: 128, user: "admin", roles: [node] }
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        config = load_cluster_config(p)
-    assert config.nodes["msm1"].role == "node"
-    assert config.nodes["rock"].role == "gateway"
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
+    with pytest.raises(ValueError, match="not a valid"):
+        load_cluster_config(path)
 
 
-def test_node_resolved_fields_default_to_none(assignments_yaml: Path) -> None:
-    """Resolved fields are None after initial load — populated later by pre-flight."""
-    config = load_cluster_config(assignments_yaml)
+def test_load_cluster_config_rejects_scalar_roles(tmp_path: Path) -> None:
+        content = dedent("""\
+                models: {}
+                nodes:
+                    infer-01: { host: "infer-01.lan", ram_gb: 128, user: "admin", roles: inference }
+        """)
+        path = tmp_path / "tfconfig.yaml"
+        path.write_text(content)
+        with pytest.raises(ValueError, match="roles must be a non-empty list"):
+                load_cluster_config(path)
+
+
+def test_node_resolved_fields_default_to_none(cluster_yaml: Path) -> None:
+    """Resolved fields are None after initial load - populated later by pre-flight."""
+    config = load_cluster_config(cluster_yaml)
     for node in config.nodes.values():
         assert node.platform is None
         assert node.shell is None
         assert node.home_dir is None
         assert node.homebrew_prefix is None
+
+
+def test_parse_node_runtime_identity_defaults_to_omlx_model_dir(tmp_path: Path) -> None:
+    """A v2 node can declare management host, fabric probing, and node-level oMLX runtime."""
+    content = dedent("""\
+        models: {}
+        nodes:
+          infer-03:
+            host: infer-03.lan
+            fabric_host: true
+            ram_gb: 128
+            user: shag
+            roles: [inference]
+            home_dir: /srv/shag
+            runtime:
+              type: omlx
+              port: 8018
+    """)
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
+
+    config = load_cluster_config(path)
+    node = config.nodes["infer-03"]
+
+    assert node.host == "infer-03.lan"
+    assert node.fabric_host is True
+    assert node.home_dir == "/srv/shag"
+    assert node.runtime is not None
+    assert node.runtime.type == "omlx"
+    assert node.runtime.port == 8018
+    assert node.runtime.model_dir is None
+    assert node.models == []
+
+
+def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
+    content = dedent("""\
+        models: {}
+        nodes:
+          infer-03:
+            host: infer-03.lan
+            ram_gb: 128
+            user: shag
+            roles: [inference]
+            runtime:
+              type: omlx
+              port: 8018
+              bind_host: 127.0.0.1
+              base_path: /Users/shag/.omlx-tf
+              log_level: warning
+              max_model_memory: 90GB
+              max_process_memory: auto
+              max_concurrent_requests: 4
+              paged_ssd_cache_dir: /Users/shag/.omlx/cache
+              paged_ssd_cache_max_size: 50GB
+              hot_cache_max_size: 8GB
+              no_cache: true
+              mcp_config: /Users/shag/.omlx/mcp.json
+              hf_endpoint: https://hf.example
+              trusted_network: true
+    """)
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
+
+    config = load_cluster_config(path)
+    runtime = config.nodes["infer-03"].runtime
+
+    assert runtime is not None
+    assert runtime.bind_host == "127.0.0.1"
+    assert runtime.base_path == "/Users/shag/.omlx-tf"
+    assert runtime.log_level == "warning"
+    assert runtime.max_model_memory == "90GB"
+    assert runtime.max_process_memory == "auto"
+    assert runtime.max_concurrent_requests == 4
+    assert runtime.paged_ssd_cache_dir == "/Users/shag/.omlx/cache"
+    assert runtime.paged_ssd_cache_max_size == "50GB"
+    assert runtime.hot_cache_max_size == "8GB"
+    assert runtime.no_cache is True
+    assert runtime.mcp_config == "/Users/shag/.omlx/mcp.json"
+    assert runtime.hf_endpoint == "https://hf.example"
+    assert runtime.trusted_network is True
+
+
+def test_example_config_keeps_active_omlx_runtime_blocks_consistent() -> None:
+    example_path = Path(__file__).parents[1] / "tfconfig.example.yaml"
+    raw = yaml_lib.safe_load(example_path.read_text())
+    runtime_blocks = [
+        node["runtime"]
+        for node in raw.get("nodes", {}).values()
+        if isinstance(node, dict) and node.get("runtime", {}).get("type") == "omlx"
+    ]
+
+    assert len(runtime_blocks) >= 1
+    assert all(runtime == runtime_blocks[0] for runtime in runtime_blocks)
+
+
+def test_parse_node_rejects_string_fabric_host(tmp_path: Path) -> None:
+    content = dedent("""\
+        models: {}
+        nodes:
+          infer-03:
+            host: infer-03.lan
+            fabric_host: infer-03-fabric
+            ram_gb: 128
+            user: shag
+            roles: [inference]
+    """)
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
+
+    with pytest.raises(ValueError, match="fabric_host must be boolean"):
+        load_cluster_config(path)
 
 
 def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,316 +349,231 @@ def test_load_cluster_config_user_from_env(tmp_path: Path, monkeypatch: pytest.M
             source: { type: huggingface, repo: "test/coder" }
             disk_gb: 10
         nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, role: node }
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
+          infer-01: { host: "infer-01.lan", ram_gb: 128, roles: [inference] }
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
     monkeypatch.setenv("GATEWAY_SSH_USER", "deploy_bot")
-    config = load_cluster_config(p)
-    assert config.nodes["msm1"].user == "deploy_bot"
+    config = load_cluster_config(path)
+    assert config.nodes["infer-01"].user == "deploy_bot"
 
 
-def test_validate_memory_single_model_passes(assignments_yaml: Path) -> None:
-    config = load_cluster_config(assignments_yaml)
-    errors = validate_memory(config)
-    assert errors == []
-
-
-@pytest.fixture()
-def overloaded_yaml(tmp_path: Path) -> Path:
+def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path: Path) -> None:
     content = dedent("""\
         models:
-          big_model:
-            source: { type: huggingface, repo: "test/big" }
-            disk_gb: 100
-            kv_per_32k_gb: 30
-            max_context: 32768
-
+          qwen3-1.7b-omlx-infer-03-test:
+            source: { repo: mlx-community/Qwen3-1.7B-4bit }
+            runtime_model_id: Qwen3-1.7B-4bit
         nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: big_model
-              port: 8000
+          gateway-cache-01:
+            host: gateway-cache-01.lan
+            ram_gb: 64
+            user: shag
+            roles: [gateway]
+          infer-03:
+            host: infer-03.lan
+            ram_gb: 128
+            user: shag
+            roles: [inference]
+            runtime:
+              type: omlx
+              port: 8018
+            models:
+              - qwen3-1.7b-omlx-infer-03-test
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    return p
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
+    config = load_cluster_config(path)
 
-
-def test_validate_memory_overloaded_fails(overloaded_yaml: Path) -> None:
-    config = load_cluster_config(overloaded_yaml)
-    errors = validate_memory(config)
-    assert len(errors) == 1
-    assert "msm1" in errors[0]
-
-
-@pytest.fixture()
-def multi_model_yaml(tmp_path: Path) -> Path:
-    content = dedent("""\
-        models:
-          coder:
-            source: { type: huggingface, repo: "test/coder" }
-            disk_gb: 44.8
-            kv_per_32k_gb: 8
-            max_context: 131072
-          general:
-            source: { type: huggingface, repo: "test/general" }
-            disk_gb: 44.8
-            kv_per_32k_gb: 8
-            max_context: 131072
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
-            - model: general
-              port: 8001
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    return p
-
-
-def test_validate_memory_multi_model_passes(multi_model_yaml: Path) -> None:
-    config = load_cluster_config(multi_model_yaml)
-    errors = validate_memory(config)
-    assert errors == []
-
-
-def test_validate_memory_uses_ram_gb_override(tmp_path: Path) -> None:
-    content = dedent("""\
-        models:
-          video:
-            source: { type: pip, package: "mlx-video" }
-            disk_gb: 5
-            ram_gb: 120
-            max_context: 0
-            serving: cli
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: video
-              port: 8000
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    errors = validate_memory(config)
-    assert errors == []
-
-
-def test_generate_litellm_config_basic(assignments_yaml: Path) -> None:
-    config = load_cluster_config(assignments_yaml)
-    result = generate_litellm_config(config)
+    result = generate_olla_config(config)
     parsed = yaml_lib.safe_load(result)
+
     assert result.startswith("# AUTO-GENERATED")
-    assert len(parsed["model_list"]) == 1
-    entry = parsed["model_list"][0]
-    assert entry["model_name"] == "coder"
-    assert entry["litellm_params"]["model"] == "openai/mlx-community/Qwen3-Coder-Next-4bit"
-    assert entry["litellm_params"]["api_base"] == "http://msm1-wifi.lan:8000/v1"
-    assert entry["litellm_params"]["api_key"] == "none"
-    assert entry["litellm_params"]["max_input_tokens"] == 131072
-    assert entry["litellm_params"]["max_output_tokens"] == 16384
-    assert parsed["litellm_settings"]["callbacks"] == ["prometheus"]
-    assert parsed["litellm_settings"]["use_chat_completions_url_for_anthropic_messages"] is True
-    assert parsed["router_settings"]["routing_strategy"] == "least-busy"
-    assert parsed["general_settings"]["master_key"] == "os.environ/LITELLM_MASTER_KEY"
+    assert parsed["server"]["host"] == "127.0.0.1"
+    assert parsed["server"]["port"] == 40115
+    assert parsed["proxy"]["engine"] == "olla"
+    assert parsed["proxy"]["sticky_sessions"]["enabled"] is True
+    endpoints = parsed["discovery"]["static"]["endpoints"]
+    assert endpoints == [
+        {
+            "url": "http://infer-03.lan:8018",
+            "name": "infer-03-omlx-live",
+            "type": "openai-compatible",
+            "priority": 100,
+            "model_url": "/v1/models",
+            "health_check_url": "/health",
+            "check_interval": "3s",
+            "check_timeout": "2s",
+        }
+    ]
+    assert parsed["model_aliases"] == {
+        "qwen3-1.7b-omlx-infer-03-test": ["Qwen3-1.7B-4bit"],
+    }
 
 
-def test_generate_litellm_config_multi_node(multi_model_yaml: Path) -> None:
-    config = load_cluster_config(multi_model_yaml)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    assert len(parsed["model_list"]) == 2
-    names = {e["model_name"] for e in parsed["model_list"]}
-    assert names == {"coder", "general"}
+def test_generate_olla_config_uses_service_port_and_ignores_env(monkeypatch) -> None:
+    monkeypatch.setenv("TF_OLLA_PORT", "45115")
+    config = parse_cluster_config(
+        {
+            "services": {"olla": {"port": 46115}},
+            "models": {
+                "memory": {
+                    "source": {"repo": "mlx-community/gpt-oss-20b-MXFP4-Q8"},
+                    "runtime_model_id": "gpt-oss-20b-MXFP4-Q8",
+                }
+            },
+            "nodes": {
+                "infer-03": {
+                    "host": "infer-03.lan",
+                    "ram_gb": 128,
+                    "roles": ["inference"],
+                    "runtime": {"type": "omlx", "port": 8018},
+                    "models": ["memory"],
+                }
+            },
+        },
+    )
+
+    parsed = yaml_lib.safe_load(generate_olla_config(config))
+
+    assert parsed["server"]["port"] == 46115
 
 
-def test_generate_litellm_config_embedding_slot(tmp_path: Path) -> None:
+def test_runtime_port_defaults_to_shared_omlx_service_port() -> None:
+    config = parse_cluster_config(
+        {
+            "services": {"omlx": {"port": 8818}},
+            "models": {},
+            "nodes": {
+                "infer-03": {
+                    "host": "infer-03.lan",
+                    "ram_gb": 128,
+                    "roles": ["inference"],
+                    "runtime": {"type": "omlx"},
+                }
+            },
+        },
+    )
+
+    assert config.nodes["infer-03"].runtime is not None
+    assert config.nodes["infer-03"].runtime.port == 8818
+
+
+def test_edge_defaults_and_overrides() -> None:
+    default_config = parse_cluster_config({"models": {}, "nodes": {}})
+    assert default_config.services.edge_host == DEFAULT_EDGE_HOST
+    assert default_config.services.edge_access_log == DEFAULT_EDGE_ACCESS_LOG
+
+    configured = parse_cluster_config(
+        {
+            "services": {"edge": {"host": "127.0.0.1", "access_log": "logs/custom-edge.jsonl"}},
+            "models": {},
+            "nodes": {},
+        }
+    )
+    assert configured.services.edge_host == "127.0.0.1"
+    assert configured.services.edge_access_log == "logs/custom-edge.jsonl"
+
+
+def test_generate_olla_config_rejects_unknown_node_model(tmp_path: Path) -> None:
+    content = dedent("""\
+        models: {}
+        nodes:
+          infer-03:
+            host: infer-03.lan
+            ram_gb: 128
+            user: shag
+            roles: [inference]
+            runtime:
+              type: omlx
+              port: 8018
+            models:
+              - missing-model
+    """)
+    path = tmp_path / "tfconfig.yaml"
+    path.write_text(content)
+    config = load_cluster_config(path)
+
+    with pytest.raises(ValueError, match="unknown model 'missing-model'"):
+        generate_olla_config(config)
+
+
+def test_lint_cluster_config_reports_unknown_models_and_exposure_warnings(tmp_path: Path) -> None:
     content = dedent("""\
         models:
-          coder:
-            source: { type: huggingface, repo: "test/coder" }
-            disk_gb: 44.8
-            kv_per_32k_gb: 8
-            max_context: 131072
-          embedding:
-            source: { type: huggingface, repo: "test/embedding-model" }
-            disk_gb: 0.5
-            serving: embedding
-
+          memory:
+            source: { repo: mlx-community/gpt-oss-20b-MXFP4-Q8 }
+            runtime_model_id: gpt-oss-20b-MXFP4-Q8
+          memory-copy:
+            source: { repo: mlx-community/gpt-oss-20b-MXFP4-Q8 }
+            runtime_model_id: gpt-oss-20b-MXFP4-Q8
+          memory-bf16:
+            source: { repo: mlx-community/gpt-oss-20b-mxfp4-bf16 }
+            benchmark_only: true
+            runtime_model_id: gpt-oss-20b-mxfp4-bf16
         nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
-              embedding: true
+          infer-03:
+            host: infer-03.lan
+            ram_gb: 128
+            user: shag
+            roles: [inference]
+            runtime:
+              type: omlx
+              port: 8018
+            models:
+              - memory
+              - memory-bf16
+              - missing
     """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    assert len(parsed["model_list"]) == 2
-    names = [e["model_name"] for e in parsed["model_list"]]
-    assert "coder" in names
-    assert "embedding" in names
-    emb_entry = next(e for e in parsed["model_list"] if e["model_name"] == "embedding")
-    assert emb_entry["litellm_params"]["model"] == "openai/test/embedding-model"
-    assert emb_entry["litellm_params"]["api_base"] == "http://msm1-wifi.lan:8000/v1"
+    path = tmp_path / "node-assignments.yaml"
+    path.write_text(content)
+    config = load_cluster_config(path)
+
+    issues = lint_cluster_config(config)
+
+    assert ("error", "nodes.infer-03.models", "unknown model 'missing'") in [
+        (issue.severity, issue.path, issue.message) for issue in issues
+    ]
+    assert ("warning", "nodes.infer-03.models", "benchmark-only model 'memory-bf16' is assigned to node") in [
+        (issue.severity, issue.path, issue.message) for issue in issues
+    ]
+    assert ("warning", "models.memory-copy.runtime_model_id", "runtime model id also used by 'memory'") in [
+        (issue.severity, issue.path, issue.message) for issue in issues
+    ]
+    assert ("warning", "nodes.infer-03.runtime", "oMLX runtime binds 0.0.0.0 without trusted_network: true") in [
+        (issue.severity, issue.path, issue.message) for issue in issues
+    ]
 
 
-def test_generate_litellm_config_skips_cli_serving(tmp_path: Path) -> None:
-    content = dedent("""\
-        models:
-          video:
-            source: { type: pip, package: "mlx-video" }
-            disk_gb: 5
-            ram_gb: 20
-            max_context: 0
-            serving: cli
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: video
-              port: 8000
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    assert len(parsed["model_list"]) == 0
-
-
-def test_check_config_sync_matches(assignments_yaml: Path, tmp_path: Path) -> None:
-    config = load_cluster_config(assignments_yaml)
-    generated = generate_litellm_config(config)
-    committed = tmp_path / "litellm-config.yaml"
-    committed.write_text(generated)
-    assert check_config_sync(config, committed) is True
-
-
-def test_check_config_sync_mismatch(assignments_yaml: Path, tmp_path: Path) -> None:
-    config = load_cluster_config(assignments_yaml)
-    committed = tmp_path / "litellm-config.yaml"
-    committed.write_text("stale content")
-    assert check_config_sync(config, committed) is False
-
-
-def test_generate_litellm_config_litellm_params_override(tmp_path: Path) -> None:
-    """litellm_params in model config overrides defaults and adds routing fields."""
-    content = dedent("""\
-        models:
-          coder:
-            source: { type: huggingface, repo: "test/coder" }
-            disk_gb: 44.8
-            max_context: 131072
-            litellm_params:
-              max_output_tokens: 32768
-              timeout: 300
-              stream_timeout: 600
-              weight: 2
-              tpm: 100000
-              rpm: 100
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    entry = parsed["model_list"][0]
-    assert entry["litellm_params"]["max_output_tokens"] == 32768
-    assert entry["litellm_params"]["max_input_tokens"] == 131072
-    assert entry["litellm_params"]["timeout"] == 300
-    assert entry["litellm_params"]["stream_timeout"] == 600
-    assert entry["litellm_params"]["weight"] == 2
-    assert entry["litellm_params"]["tpm"] == 100000
-    assert entry["litellm_params"]["rpm"] == 100
-
-
-def test_generate_litellm_config_litellm_params_partial(tmp_path: Path) -> None:
-    """Only set litellm_params fields appear in output; unset fields are absent."""
-    content = dedent("""\
-        models:
-          coder:
-            source: { type: huggingface, repo: "test/coder" }
-            disk_gb: 44.8
-            max_context: 131072
-            litellm_params:
-              max_output_tokens: 65536
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    entry = parsed["model_list"][0]
-    assert entry["litellm_params"]["max_output_tokens"] == 65536
-    assert "timeout" not in entry["litellm_params"]
-    assert "rpm" not in entry["litellm_params"]
-
-
-def test_load_cluster_config_loads_dotenv(assignments_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_cluster_config_loads_dotenv(cluster_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """load_cluster_config loads .env from repo root."""
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.delenv("HF_HOME", raising=False)
 
     # Create .env next to configs/ (find_repo_root() will find this)
-    repo_root = assignments_yaml.parent.parent
+    repo_root = cluster_yaml.parent.parent
     (repo_root / ".git").mkdir(exist_ok=True)  # find_repo_root() needs a git marker
     dotenv_path = repo_root / ".env"
     dotenv_path.write_text("HF_HOME=/test/hf/cache\n")
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo_root)
 
-    load_cluster_config(assignments_yaml)
+    load_cluster_config(cluster_yaml)
 
     import os
 
     assert os.environ.get("HF_HOME") == "/test/hf/cache"
+
+
+def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "node-assignments.yaml").write_text("models: {}\nnodes: {}\n")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="tfconfig.yaml"):
+        find_repo_root()
 
 
 def test_parse_model_info() -> None:
@@ -461,19 +596,18 @@ def test_parse_model_info() -> None:
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
-    mi = config.models["coder"].model_info
-    assert mi is not None
-    assert mi.base_model == "meta-llama/Llama-3-70b"
-    assert mi.mode == "chat"
-    assert mi.input_cost_per_token == 0.000001
-    assert mi.output_cost_per_token == 0.000002
-    assert mi.supports_vision is True
-    assert mi.supports_function_calling is True
-    assert mi.supports_parallel_function_calling is False
-    assert mi.supports_response_schema is True
+    model_info = config.models["coder"].model_info
+    assert model_info is not None
+    assert model_info.base_model == "meta-llama/Llama-3-70b"
+    assert model_info.mode == "chat"
+    assert model_info.input_cost_per_token == 0.000001
+    assert model_info.output_cost_per_token == 0.000002
+    assert model_info.supports_vision is True
+    assert model_info.supports_function_calling is True
+    assert model_info.supports_parallel_function_calling is False
+    assert model_info.supports_response_schema is True
 
 
 def test_parse_model_info_absent() -> None:
@@ -486,134 +620,6 @@ def test_parse_model_info_absent() -> None:
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     assert config.models["coder"].model_info is None
-
-
-def test_parse_litellm_params_new_fields() -> None:
-    """New litellm_params fields (temperature, max_tokens, seed) are parsed."""
-    raw = {
-        "models": {
-            "coder": {
-                "source": {"type": "huggingface", "repo": "test/coder"},
-                "disk_gb": 10,
-                "litellm_params": {
-                    "temperature": 0.7,
-                    "max_tokens": 4096,
-                    "seed": 42,
-                },
-            }
-        },
-        "nodes": {},
-        "assignments": {},
-    }
-    config = parse_cluster_config(raw)
-    lp = config.models["coder"].litellm_params
-    assert lp is not None
-    assert lp.temperature == 0.7
-    assert lp.max_tokens == 4096
-    assert lp.seed == 42
-
-
-def test_generate_litellm_config_model_info(tmp_path: Path) -> None:
-    """model_info section appears in generated config when set."""
-    content = dedent("""\
-        models:
-          coder:
-            source: { type: huggingface, repo: "test/coder" }
-            disk_gb: 44.8
-            max_context: 131072
-            model_info:
-              base_model: meta-llama/Llama-3-70b
-              mode: chat
-              input_cost_per_token: 0.000001
-              output_cost_per_token: 0.000002
-              supports_vision: true
-              supports_function_calling: true
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    entry = parsed["model_list"][0]
-    assert "model_info" in entry
-    assert entry["model_info"]["base_model"] == "meta-llama/Llama-3-70b"
-    assert entry["model_info"]["mode"] == "chat"
-    assert entry["model_info"]["input_cost_per_token"] == 0.000001
-    assert entry["model_info"]["output_cost_per_token"] == 0.000002
-    assert entry["model_info"]["supports_vision"] is True
-    assert entry["model_info"]["supports_function_calling"] is True
-    assert "supports_parallel_function_calling" not in entry["model_info"]
-    assert "supports_response_schema" not in entry["model_info"]
-
-
-def test_generate_litellm_config_no_model_info(tmp_path: Path) -> None:
-    """model_info section is absent when not configured."""
-    content = dedent("""\
-        models:
-          coder:
-            source: { type: huggingface, repo: "test/coder" }
-            disk_gb: 44.8
-            max_context: 131072
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    entry = parsed["model_list"][0]
-    assert "model_info" not in entry
-
-
-def test_generate_litellm_config_new_litellm_params(tmp_path: Path) -> None:
-    """New litellm_params fields (temperature, max_tokens, seed) appear in generated config."""
-    content = dedent("""\
-        models:
-          coder:
-            source: { type: huggingface, repo: "test/coder" }
-            disk_gb: 44.8
-            max_context: 131072
-            litellm_params:
-              temperature: 0.7
-              max_tokens: 4096
-              seed: 42
-
-        nodes:
-          msm1: { host: "msm1-wifi.lan", ram_gb: 128, user: "admin", role: node }
-          rock: { host: "rock.lan", ram_gb: 32, user: "infra_user", role: gateway }
-
-        assignments:
-          msm1:
-            - model: coder
-              port: 8000
-    """)
-    p = tmp_path / "node-assignments.yaml"
-    p.write_text(content)
-    config = load_cluster_config(p)
-    result = generate_litellm_config(config)
-    parsed = yaml_lib.safe_load(result)
-    entry = parsed["model_list"][0]
-    assert entry["litellm_params"]["temperature"] == 0.7
-    assert entry["litellm_params"]["max_tokens"] == 4096
-    assert entry["litellm_params"]["seed"] == 42

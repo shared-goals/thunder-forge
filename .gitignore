@@ -1,7 +1,10 @@
 # Secrets
-docker/.env
+.env
 
-# Cluster config (contains local IPs, per-cluster)
+# Local cluster config (contains local hosts/users/placement)
+tfconfig.yaml
+
+# Generated configs
 configs/*.yaml
 configs/*.yaml.bak*
 
@@ -15,9 +18,9 @@ __pycache__/
 dist/
 build/
 .coverage
-.env
 
 # Logs
+logs/
 *.log
 *.err
 
@@ -30,3 +33,6 @@ build/
 
 # Worktrees
 .worktrees/
+
+# Temporary local spike artifacts
+.tmp/

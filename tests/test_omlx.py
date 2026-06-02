@@ -1,0 +1,198 @@
+"""Tests for oMLX node-level runtime helpers."""
+
+import httpx
+
+from thunder_forge.cluster.config import Node, NodeRuntime
+from thunder_forge.cluster.omlx import build_omlx_serve_command, check_omlx_health, smoke_omlx_chat
+
+
+def test_build_omlx_serve_command_omits_default_model_dir() -> None:
+    node = Node(
+        host="infer-03.lan",
+        ram_gb=128,
+        user="shag",
+        roles=["inference"],
+        runtime=NodeRuntime(type="omlx", port=8018),
+        home_dir="/Users/shag",
+    )
+
+    command = build_omlx_serve_command(node)
+
+    assert command == "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018"
+    assert "--model-dir" not in command
+
+
+def test_build_omlx_serve_command_includes_memory_caps_when_configured() -> None:
+    node = Node(
+        host="infer-03.lan",
+        ram_gb=128,
+        user="shag",
+        roles=["inference"],
+        runtime=NodeRuntime(
+            type="omlx",
+            port=8018,
+            max_model_memory="90GB",
+            max_process_memory="auto",
+        ),
+        home_dir="/Users/shag",
+    )
+
+    command = build_omlx_serve_command(node)
+
+    assert command == (
+        "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 --max-model-memory 90GB --max-process-memory auto"
+    )
+
+
+def test_build_omlx_serve_command_includes_explicit_model_dir_only_when_configured() -> None:
+    node = Node(
+        host="infer-03.lan",
+        ram_gb=128,
+        user="shag",
+        roles=["inference"],
+        runtime=NodeRuntime(type="omlx", port=8018, model_dir="/Volumes/cache/omlx-models"),
+        home_dir="/Users/shag",
+    )
+
+    command = build_omlx_serve_command(node)
+
+    assert command == (
+        "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 --model-dir /Volumes/cache/omlx-models"
+    )
+
+
+def test_check_omlx_health_collects_models_and_optional_status() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "mlx-community/test-model"}]})
+        if request.url.path == "/v1/models/status":
+            return httpx.Response(200, json={"ready": True})
+        return httpx.Response(404)
+
+    result = check_omlx_health("http://infer-03.lan:8018", transport=httpx.MockTransport(handler))
+
+    assert result.base_url == "http://infer-03.lan:8018"
+    assert result.health_ok is True
+    assert result.models_ok is True
+    assert result.status_ok is True
+    assert result.models == ["mlx-community/test-model"]
+    assert result.errors == []
+
+
+def test_check_omlx_health_can_probe_service_only() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(500)
+
+    result = check_omlx_health(
+        "http://infer-03.lan:8018",
+        include_models=False,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.health_ok is True
+    assert result.models_ok is False
+    assert result.status_ok is None
+    assert result.errors == []
+    assert paths == ["/health"]
+
+
+def test_check_omlx_health_parses_model_statuses() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "Qwen3-1.7B-4bit"}]})
+        if request.url.path == "/v1/models/status":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "id": "Qwen3-1.7B-4bit",
+                            "loaded": True,
+                            "is_loading": False,
+                            "estimated_size": 123,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    result = check_omlx_health("http://infer-03.lan:8018", transport=httpx.MockTransport(handler))
+
+    assert result.status_ok is True
+    assert result.model_statuses["Qwen3-1.7B-4bit"]["loaded"] is True
+    assert result.model_statuses["Qwen3-1.7B-4bit"]["is_loading"] is False
+
+
+def test_check_omlx_health_keeps_health_when_optional_status_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": []})
+        if request.url.path == "/v1/models/status":
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    result = check_omlx_health("http://infer-03.lan:8018/", transport=httpx.MockTransport(handler))
+
+    assert result.health_ok is True
+    assert result.models_ok is True
+    assert result.status_ok is False
+    assert result.errors == []
+
+
+def test_check_omlx_health_reports_failed_required_probe() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(503, json={"status": "starting"})
+        if request.url.path == "/v1/models":
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(404)
+
+    result = check_omlx_health("http://infer-03.lan:8018", transport=httpx.MockTransport(handler))
+
+    assert result.health_ok is False
+    assert result.models_ok is False
+    assert result.status_ok is False
+    assert result.models == []
+    assert "GET /health returned 503" in result.errors
+    assert "GET /v1/models failed: connection refused" in result.errors
+
+
+def test_smoke_omlx_chat_skips_chat_when_model_is_still_loading() -> None:
+    paths: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append((request.method, request.url.path))
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "Qwen3-1.7B-4bit"}]})
+        if request.url.path == "/v1/models/status":
+            return httpx.Response(
+                200,
+                json={"models": [{"id": "Qwen3-1.7B-4bit", "loaded": False, "is_loading": True}]},
+            )
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(200, json={"unexpected": True})
+        return httpx.Response(404)
+
+    result = smoke_omlx_chat(
+        "http://infer-03.lan:8018",
+        model="Qwen3-1.7B-4bit",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.model_visible is True
+    assert result.chat_ok is False
+    assert "model 'Qwen3-1.7B-4bit' is still loading" in result.errors
+    assert ("POST", "/v1/chat/completions") not in paths

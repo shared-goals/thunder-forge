@@ -11,67 +11,78 @@ def test_parse_cluster_config_basic():
         "models": {
             "coder": {
                 "source": {"type": "huggingface", "repo": "mlx-community/Qwen3-Coder-Next-4bit", "revision": "main"},
+                "runtime_model_id": "Qwen3-Coder-Next-4bit",
                 "disk_gb": 44.8,
                 "kv_per_32k_gb": 8,
                 "max_context": 131072,
             }
         },
         "nodes": {
-            "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "role": "gateway"},
-            "msm1": {"host": "msm1-wifi.lan", "ram_gb": 128, "user": "admin", "role": "node"},
+            "rock": {"host": "rock.lan", "ram_gb": 32, "user": "infra_user", "roles": ["gateway"]},
+            "infer-01": {
+                "host": "infer-01.lan",
+                "ram_gb": 128,
+                "user": "admin",
+                "roles": ["inference"],
+                "models": ["coder"],
+            },
         },
-        "assignments": {"msm1": [{"model": "coder", "port": 8000}]},
     }
     config = parse_cluster_config(raw)
     assert "coder" in config.models
     assert config.models["coder"].source.type == "huggingface"
+    assert config.models["coder"].runtime_model_id == "Qwen3-Coder-Next-4bit"
     assert config.models["coder"].disk_gb == 44.8
-    assert config.nodes["msm1"].user == "admin"
+    assert config.nodes["infer-01"].user == "admin"
+    assert config.nodes["infer-01"].models == ["coder"]
     assert config.nodes["rock"].role == "gateway"
-    assert config.assignments["msm1"][0].model == "coder"
+
+
+def test_parse_cluster_config_defaults_source_type_and_runtime_model_id():
+    raw = {
+        "models": {
+            "memory": {
+                "source": {"repo": "mlx-community/gpt-oss-20b-MXFP4-Q8"},
+                "benchmark_only": True,
+            }
+        },
+        "nodes": {},
+    }
+    config = parse_cluster_config(raw)
+    model = config.models["memory"]
+    assert model.source.type == "huggingface"
+    assert model.runtime_model_id == "gpt-oss-20b-MXFP4-Q8"
+    assert model.benchmark_only is True
 
 
 def test_parse_cluster_config_user_stored_as_is():
     """User field is stored as-is — no env var resolution."""
     raw = {
         "models": {},
-        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "role": "node"}},
-        "assignments": {},
+        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "roles": ["inference"]}},
     }
     config = parse_cluster_config(raw)
     assert config.nodes["n1"].user == ""
 
 
-def test_parse_cluster_config_role_migration():
-    """Deprecated role names are migrated."""
+def test_parse_cluster_config_rejects_node_role():
     raw = {
         "models": {},
         "nodes": {
-            "n1": {"host": "n1.lan", "ram_gb": 64, "role": "inference"},
-            "gw": {"host": "gw.lan", "ram_gb": 32, "role": "infra"},
+            "n1": {"host": "n1.lan", "ram_gb": 64, "roles": ["node"]},
         },
-        "assignments": {},
     }
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        config = parse_cluster_config(raw)
-    assert config.nodes["n1"].role == "node"
-    assert config.nodes["gw"].role == "gateway"
+    with pytest.raises(ValueError, match="not a valid"):
+        parse_cluster_config(raw)
 
 
-def test_parse_cluster_config_external_endpoints():
-    """External endpoints are parsed correctly."""
+def test_parse_cluster_config_rejects_scalar_roles():
     raw = {
         "models": {},
-        "nodes": {},
-        "assignments": {},
-        "external_endpoints": [
-            {"model_name": "qwen3-30b", "api_base": "http://example.com/v1", "api_key_env": "MY_KEY"}
-        ],
+        "nodes": {"n1": {"host": "n1.lan", "ram_gb": 64, "roles": "inference"}},
     }
-    config = parse_cluster_config(raw)
-    assert len(config.external_endpoints) == 1
-    assert config.external_endpoints[0].model_name == "qwen3-30b"
-    assert config.external_endpoints[0].api_key_env == "MY_KEY"
+    with pytest.raises(ValueError, match="roles must be a non-empty list"):
+        parse_cluster_config(raw)
 
 
 def test_parse_model_server_args_populated():
@@ -92,7 +103,6 @@ def test_parse_model_server_args_populated():
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     sa = config.models["coder"].server_args
@@ -115,7 +125,6 @@ def test_parse_model_server_args_absent():
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     assert config.models["coder"].server_args is None
@@ -132,7 +141,6 @@ def test_parse_model_server_args_partial():
             }
         },
         "nodes": {},
-        "assignments": {},
     }
     config = parse_cluster_config(raw)
     sa = config.models["coder"].server_args

@@ -49,6 +49,7 @@ def ssh_run(
     stream: bool = False,
     shell: str | None = None,
     node_name: str | None = None,
+    tty: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command on a remote node via SSH, or locally if the target is this machine."""
     capture = not stream
@@ -68,9 +69,10 @@ def ssh_run(
         "ConnectTimeout=10",
         "-o",
         "StrictHostKeyChecking=no",
-        f"{user}@{ip}",
-        wrapped,
     ]
+    if tty:
+        ssh_cmd.append("-tt")
+    ssh_cmd.extend([f"{user}@{ip}", wrapped])
     return subprocess.run(
         ssh_cmd,
         capture_output=capture,
@@ -113,6 +115,8 @@ def scp_content(
         "ConnectTimeout=10",
         "-o",
         "StrictHostKeyChecking=no",
+        "-o",
+        "BatchMode=yes",
         f"{user}@{ip}",
         f"cat > {remote_path}",
     ]
@@ -121,5 +125,5 @@ def scp_content(
         input=content,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=30,
     )
