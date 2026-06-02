@@ -1,186 +1,137 @@
 # Daily Summary Contract
 
-**Status:** Draft  
-**Last Updated:** 2026-05-26  
+**Status:** Implemented (MVP)  
+**Last Updated:** 2026-06-02  
 **Owner:** Thunder Forge
 
 ## Overview
 
-This document defines the minimal JSON contract for daily utilization and audit summaries that feed Daily Compass and operator review. The design intentionally avoids databases, log ingestion systems, or web dashboards until the direct runtime and Olla+edge stack are proven in production.
+Thunder Forge daily usage reporting is file-backed and CLI-first:
 
-## JSON Schema
+- request events: `logs/tf-edge-access.jsonl`
+- node snapshots: `logs/tf-node-metrics.jsonl`
+- node snapshots are collected by `thunder-forge edge serve` in-process every 60s by default
+- summary command: `thunder-forge usage report`
+- shared retention command: `thunder-forge usage trim-logs`
+- ad hoc SQL: DuckDB CLI over JSONL
 
-```json
-{
-  "period": "2026-05-26",
-  "generated_at": "2026-05-27T00:15:23Z",
-  "source": "thunder-forge",
-  "version": "1.0",
+This keeps operations simple and avoids a metrics backend while still supporting daily rollups by user, node, model, and hour.
 
-  "requests": {
-    "total": 142,
-    "by_client": {
-      "shag-dev": 89,
-      "hermes-cron": 53
-    },
-    "by_model": {
-      "qwen3-1.7b-omlx-infer-03-test": 142
-    },
-    "by_status": {
-      "200": 138,
-      "401": 3,
-      "502": 1
-    },
-    "by_path": {
-      "/v1/chat/completions": 139,
-      "/v1/models": 3
-    }
-  },
-
-  "latency": {
-    "p50_ms": 1245,
-    "p95_ms": 3890,
-    "p99_ms": 8920,
-    "max_ms": 12100
-  },
-
-  "nodes": [
-    {
-      "name": "infer-03",
-      "host": "infer-03.lan",
-      "port": 8018,
-      "health_ok": true,
-      "models_served": ["Qwen3-1.7B-4bit"],
-      "requests_routed": 142
-    }
-  ],
-
-  "workloads": [
-    {
-      "client_id": "shag-dev",
-      "description": "Interactive Olla dev-smoke testing",
-      "requests": 89,
-      "latency_avg_ms": 1180
-    },
-    {
-      "client_id": "hermes-cron",
-      "description": "Daily Compass morning projection",
-      "requests": 53,
-      "latency_avg_ms": 1310
-    }
-  ],
-
-  "failures": [
-    {
-      "timestamp": "2026-05-26T14:23:18Z",
-      "client_id": "shag-dev",
-      "path": "/v1/chat/completions",
-      "model": "qwen3-1.7b-omlx-infer-03-test",
-      "status_code": 502,
-      "error": "upstream_failed: ConnectError: [Errno 61] Connection refused",
-      "olla_endpoint": ""
-    }
-  ],
-
-  "model_freshness": {
-    "qwen3-1.7b-omlx-infer-03-test": {
-      "model_dir": "/Users/shag/.omlx/models/Qwen3-1.7B-4bit",
-      "last_modified": "2026-05-20T10:15:00Z",
-      "age_days": 6,
-      "notes": "No updates available"
-    }
-  },
-
-  "configuration_changes": [
-    {
-      "timestamp": "2026-05-26T09:30:00Z",
-      "commit": "60f2d5b",
-      "message": "feat(runtime): add launchd install command for node-level oMLX daemon",
-      "files_changed": 4
-    }
-  ]
-}
-```
-
-## Data Sources
-
-### Edge Proxy Access Logs
-
-**Source:** `src/thunder_forge/cluster/edge.py` `EdgeAccessLog`  
-**Fields captured per request:**
-- `timestamp` (ISO 8601, UTC)
-- `request_id` (UUID)
-- `client_id` (from API key mapping)
-- `path` (/v1/chat/completions, /v1/models)
-- `model` (from request body)
-- `status_code` (200/401/502)
-- `latency_ms` (edge-to-edge)
-- `olla_endpoint` (from X-Olla-Endpoint header, if routed)
-
-**Current limitation:** Edge proxy logs to `access_log_sink` callback (stdout by default). For daily summary, logs need to be written to a file or aggregated in-memory.
-
-### oMLX Runtime Health
-
-**Source:** `src/thunder_forge/cluster/omlx.py` `check_omlx_health()`  
-**Fields:**
-- `base_url`
-- `health_ok` (from /health)
-- `models_ok` (from /v1/models)
-- `status_ok` (from /v1/models/status, optional)
-- `models` (list of served model IDs)
-
-### Model Freshness
-
-**Source:** Filesystem metadata on model directories  
-**Computation:** Compare `last_modified` timestamp against current date.
-
-### Configuration Changes
-
-**Source:** `git log --oneline --since "2026-05-26 00:00:00"` in Thunder Forge repo  
-**Fields:** timestamp, commit hash, message, files changed.
-
-## CLI Command (Future)
+## Implemented Commands
 
 ```bash
-uv run thunder-forge summary --period 2026-05-26 --output summary.json
-uv run thunder-forge summary --period 2026-05-26 --feed-daily-compass
+uv run thunder-forge usage collect-node-metrics
+uv run thunder-forge usage collect-node-metrics --continuous --interval-seconds 60
+uv run thunder-forge edge serve --metrics-interval-seconds 60
+uv run thunder-forge usage report --period 2026-06-02
+uv run thunder-forge usage report --period 2026-06-02 --json
+uv run thunder-forge usage trim-logs
+
+# Make wrappers
+make usage-report 2026-06-02
+make usage-report-json 2026-06-02
 ```
 
-**Behavior:**
-1. Read edge access logs for the period (file or stdin).
-2. Aggregate by client, model, status, path.
-3. Compute latency percentiles.
-4. Query oMLX runtime health for each node.
-5. Check model freshness.
-6. Parse git log for configuration changes.
-7. Emit JSON conforming to the schema above.
+## Data Model
 
-## Integration with Daily Compass
+### Request Event JSONL
 
-Daily Compass (Shared Goals) consumes the summary JSON and extracts:
-- **Mind:** Configuration changes, model freshness notes
-- **Feelings:** Workload descriptions, failure patterns
-- **Work:** Request counts, latency trends, model utilization
+Source: TF edge access log.
 
-The summary is intentionally coarse-grained (daily aggregates) to avoid overwhelming Daily Compass with raw request logs.
+Expected keys:
+
+- `timestamp`
+- `request_id`
+- `client_id` (tf user identity)
+- `path`
+- `model`
+- `status_code`
+- `latency_ms`
+- `olla_endpoint`
+- `node_name` (derived from endpoint when available)
+- optional token fields: `prompt_tokens`, `completion_tokens`, `total_tokens`
+
+### Node Snapshot JSONL
+
+Source: `usage collect-node-metrics` (one row per inference node per run).
+
+Expected keys:
+
+- `timestamp`
+- `node_name`
+- `health_ok`
+- `models_ok`
+- `status_ok`
+- `hot_loaded_models` (status entries where `loaded=true`, ordered by latest access)
+- `hot_loaded_count`
+- `errors`
+
+## Summary Contract
+
+`usage report --json` returns a summary with:
+
+- `requests.total`
+- `requests.by_user`
+- `requests.by_node`
+- `requests.by_node_model`
+- `requests.by_node_hour` (0-23 buckets)
+- `requests.by_model`
+- `requests.by_hour`
+- `consumed_ms.total`
+- `consumed_ms.by_user`
+- `consumed_ms.by_node`
+- `consumed_ms.by_model`
+- `tokens.by_user` (when available)
+- `tokens.by_node` (when available)
+- `tokens.by_model` (when available)
+- `invalid_lines`
+
+`consumed_ms` is defined as sum of edge-observed `latency_ms`.
+
+## Retention Contract
+
+- Config key: `services.log_retention_days`
+- Default: `3`
+- Scope: local TF-managed logs
+  - `logs/tf-edge-access.jsonl`
+  - `logs/tf-node-metrics.jsonl`
+  - `logs/olla.log`
+  - `logs/*.stdout.log`, `logs/*.stderr.log`, `logs/*.log.gz`
+- Behavior:
+  - JSONL files are trimmed by record `timestamp`
+  - plain/archive logs are pruned by file mtime
+
+## DuckDB CLI Workflow
+
+Run parameterized daily SQL directly on JSONL:
+
+```bash
+duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
+  -cmd ".param set period 2026-06-02" \
+  -f docs/operations/daily-usage-duckdb.sql
+
+# or
+make usage-duckdb 2026-06-02
+```
+
+The SQL script emits daily tables for:
+
+- by user: requests, consumed time, tokens
+- by node: requests, consumed time, tokens
+- by node/model: request split
+- by node/hour: request split
+- by model: requests, consumed time, tokens
+- node hot-loaded summary from collected snapshots
 
 ## Guardrails
 
-- **No PostgreSQL:** Until we know which data already exists in LiteLLM/oMLX logs.
-- **No log ingestion system:** Edge proxy logs to stdout/file; no Elasticsearch/Loki/Grafana until necessary.
-- **No web dashboard:** CLI output only until runtime MVP is proven.
-- **No token counting:** Edge proxy does not parse response bodies; token stats deferred until oMLX or LiteLLM expose them.
+- no PostgreSQL, no queue, no dashboard for MVP
+- edge traffic is the request source of truth for now
+- token fields are optional and consumed only when present
+- hot-loaded model sets come from oMLX model status snapshots
 
-## Open Questions
+## Evolution
 
-1. **Log persistence:** Should edge proxy write to a rotating file, or rely on systemd/journald?
-2. **Token counts:** How do we extract prompt/completion tokens from oMLX or LiteLLM responses?
-3. **Streaming requests:** How do we log streaming chat completions (multiple chunks, partial responses)?
-4. **Multi-node aggregation:** When multiple oMLX nodes are active, how do we attribute requests to specific nodes? (Partially solved by X-Olla-Endpoint header.)
-
-## Evolution Path
-
-1. **MVP:** File-based logs, manual `summary` CLI command, JSON output.
-2. **Iteration 1:** Auto-feed Daily Compass via cron job.
-3. **Iteration 2:** Add token counts from oMLX/LiteLLM.
-4. **Iteration 3:** Consider PostgreSQL + Grafana if scale demands it.
+1. keep file-backed JSONL + CLI until operator pain appears
+2. enrich token coverage when upstream usage fields are reliable
+3. only then evaluate durable metrics backends

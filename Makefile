@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync config opencode hermes
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync config usage-report usage-report-json usage-trim usage-duckdb opencode hermes
 ARG ?= $(word 2,$(MAKECMDGOALS))
 
 ifneq ($(ARG),)
@@ -21,6 +21,10 @@ help:
 	@printf "  %-24s %s\n" "status [node]" "check oMLX health on inference nodes"
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
 	@printf "  %-24s %s\n" "config" "generate configs/olla-config.yaml"
+	@printf "  %-24s %s\n" "usage-report [day]" "print usage summary (day: YYYY-MM-DD)"
+	@printf "  %-24s %s\n" "usage-report-json [day]" "print usage summary as JSON"
+	@printf "  %-24s %s\n" "usage-trim [days]" "trim local TF logs (default 3 days)"
+	@printf "  %-24s %s\n" "usage-duckdb [day]" "run DuckDB daily usage SQL over JSONL logs"
 	@printf "  %-24s %s\n" "opencode [id]" "create client key and print/copy OpenCode config"
 	@printf "  %-24s %s\n" "hermes [id]" "create client key and print/copy Hermes config"
 	@echo ""
@@ -70,6 +74,22 @@ sync:
 
 config:
 	$(UV) thunder-forge generate-olla-config
+
+usage-report:
+	$(UV) thunder-forge usage report $(if $(strip $(ARG)),--period "$(ARG)")
+
+usage-report-json:
+	$(UV) thunder-forge usage report --json $(if $(strip $(ARG)),--period "$(ARG)")
+
+usage-trim:
+	$(UV) thunder-forge usage trim-logs $(if $(strip $(ARG)),--retention-days "$(ARG)")
+
+usage-duckdb:
+	@if ! command -v duckdb >/dev/null 2>&1; then \
+		echo 'duckdb is not installed. Install duckdb CLI first.'; \
+		exit 2; \
+	fi
+	duckdb -readonly -cmd ".mode table" -cmd ".headers on" -cmd ".param set period $(if $(strip $(ARG)),$(ARG),$(shell date -u +%F))" -f docs/operations/daily-usage-duckdb.sql
 
 opencode:
 	@$(UV) thunder-forge edge client-config opencode --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key "$(ARG)")

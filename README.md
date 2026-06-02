@@ -301,6 +301,70 @@ make edge-keys EDGE_CLIENTS="opencode hindsight"
 
 `edge serve` loads all `TF_USER_<CLIENT>` entries and accepts requests with `Authorization: Bearer <api-key>`. The access log records the mapped `client_id`, model, endpoint, status, and latency, but never the API key. `edge smoke --client-id hindsight` reads that client's key from `TF_USER_HINDSIGHT`; `make edge-usage` summarizes the JSONL access log.
 
+## Daily Usage Reporting
+
+Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/YAGNI operation:
+
+- Request events come from `logs/tf-edge-access.jsonl`.
+- Node snapshots (health + hot-loaded models) come from `logs/tf-node-metrics.jsonl`.
+- Daily rollups are produced by the TF CLI and can also be queried with DuckDB CLI.
+- Shared log retention is controlled by `services.log_retention_days` in `tfconfig.yaml` (default: `3`).
+
+TF edge now collects node metrics in-process every 60 seconds by default, so no separate metrics process is required.
+
+Manual collector commands remain available for diagnostics:
+
+```bash
+uv run thunder-forge usage collect-node-metrics
+
+# continuous collector every minute
+uv run thunder-forge usage collect-node-metrics --continuous --interval-seconds 60
+```
+
+Edge serve flags for this behavior:
+
+```bash
+uv run thunder-forge edge serve --metrics-interval-seconds 60
+uv run thunder-forge edge serve --no-collect-node-metrics
+```
+
+Manually run shared log trimming across edge access logs, node metrics, and local service logs:
+
+```bash
+uv run thunder-forge usage trim-logs
+# optional override
+uv run thunder-forge usage trim-logs --retention-days 7
+```
+
+Print daily summary from structured logs:
+
+```bash
+uv run thunder-forge usage report --period 2026-06-02
+uv run thunder-forge usage report --period 2026-06-02 --json
+
+# or
+make usage-report 2026-06-02
+make usage-report-json 2026-06-02
+```
+
+Summary dimensions include:
+
+- by user (`tf_user`/`client_id`): requests, consumed time (`latency_ms` sum), tokens when present
+- by node (`msm1`-`msm4`): requests, consumed time, tokens, by-model split, by-hour split
+- by model: requests, consumed time, tokens when present
+- node hot-loaded model sets from collected node snapshots
+
+For ad hoc SQL analysis, use DuckDB directly over JSONL:
+
+```bash
+duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
+	-cmd ".param set period 2026-06-02" \
+	-f docs/operations/daily-usage-duckdb.sql
+
+# or
+make usage-duckdb 2026-06-02
+```
+
 ### OpenCode Provider
 
 TF edge owns the client-facing model catalog. Authenticated `GET /v1/models` returns Thunder Forge public aliases such as `coder` and `agent-better`, not raw oMLX runtime ids. Each model object includes a `description` containing the underlying model id/repo plus TF metadata fields such as `tf_runtime_model_id` and `tf_source_repo`. Raw Olla still reports backend runtime ids from discovery, so clients that should choose TF aliases should call TF edge, not Olla directly.

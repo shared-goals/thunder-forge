@@ -18,7 +18,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
@@ -203,6 +203,10 @@ class EdgeAccessLog:
     status_code: int
     latency_ms: int
     olla_endpoint: str = ""
+    node_name: str = ""
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
     def to_json_dict(self) -> dict[str, str | int]:
         payload: dict[str, str | int] = {
@@ -216,6 +220,14 @@ class EdgeAccessLog:
         }
         if self.olla_endpoint:
             payload["olla_endpoint"] = self.olla_endpoint
+        if self.node_name:
+            payload["node_name"] = self.node_name
+        if self.prompt_tokens is not None:
+            payload["prompt_tokens"] = self.prompt_tokens
+        if self.completion_tokens is not None:
+            payload["completion_tokens"] = self.completion_tokens
+        if self.total_tokens is not None:
+            payload["total_tokens"] = self.total_tokens
         return payload
 
 
@@ -526,7 +538,7 @@ def build_edge_access_log(
     """Build a secret-free access/accounting log record."""
     _ = api_key  # Accepted only so callers cannot accidentally include it in the record.
     return EdgeAccessLog(
-        timestamp=datetime.now(UTC).isoformat(),
+        timestamp=datetime.now().astimezone().isoformat(),
         request_id=request_id,
         client_id=client_id,
         path=path,
@@ -534,7 +546,18 @@ def build_edge_access_log(
         status_code=status_code,
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
+        node_name=derive_olla_node_name(olla_endpoint),
     )
+
+
+def derive_olla_node_name(olla_endpoint: str) -> str:
+    """Derive the TF node name from a routed Olla endpoint label when possible."""
+    endpoint = olla_endpoint.strip()
+    if not endpoint:
+        return ""
+    if "-omlx-" in endpoint:
+        return endpoint.split("-omlx-", 1)[0]
+    return endpoint
 
 
 def _header_value(headers: dict[str, str], name: str) -> str | None:
@@ -760,6 +783,10 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
     """Serve the minimal TF edge proxy with OpenAI-compatible buffered and streaming responses."""
 
     class Handler(BaseHTTPRequestHandler):
+        @staticmethod
+        def _is_client_disconnect(exc: BaseException) -> bool:
+            return isinstance(exc, (BrokenPipeError, ConnectionResetError))
+
         def do_GET(self) -> None:  # noqa: N802
             self._handle_edge_request()
 
@@ -786,8 +813,12 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
             for name, value in result.headers.items():
                 self.send_header(name, value)
             self.send_header("Content-Length", str(len(result.body)))
-            self.end_headers()
-            self.wfile.write(result.body)
+            try:
+                self.end_headers()
+                self.wfile.write(result.body)
+            except OSError as exc:
+                if not self._is_client_disconnect(exc):
+                    raise
 
         def _handle_streaming_edge_request(self, body: bytes) -> None:
             upstream = _prepare_edge_upstream_request(
@@ -815,11 +846,21 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         response_headers.setdefault("Content-Type", "text/event-stream")
                         for name, value in response_headers.items():
                             self.send_header(name, value)
-                        self.end_headers()
+                        try:
+                            self.end_headers()
+                        except OSError as exc:
+                            if self._is_client_disconnect(exc):
+                                return
+                            raise
                         for chunk in response.iter_bytes():
                             if chunk:
-                                self.wfile.write(chunk)
-                                self.wfile.flush()
+                                try:
+                                    self.wfile.write(chunk)
+                                    self.wfile.flush()
+                                except OSError as exc:
+                                    if self._is_client_disconnect(exc):
+                                        return
+                                    raise
                         _record_edge_access(
                             config,
                             upstream=upstream,
@@ -835,8 +876,12 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
             for name, value in result.headers.items():
                 self.send_header(name, value)
             self.send_header("Content-Length", str(len(result.body)))
-            self.end_headers()
-            self.wfile.write(result.body)
+            try:
+                self.end_headers()
+                self.wfile.write(result.body)
+            except OSError as exc:
+                if not self._is_client_disconnect(exc):
+                    raise
 
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 

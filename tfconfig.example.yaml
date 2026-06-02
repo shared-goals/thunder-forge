@@ -1,6 +1,9 @@
 # ── Service defaults ──────────────────────────────────
 # Non-secret local ports live here. Secrets stay in .env.
 services:
+  # Shared retention policy for local TF-managed logs and JSONL records.
+  # Default is 3 days when omitted.
+  log_retention_days: 3
   frontend:
     # Admin account used only for frontend system-daemon sudo operations.
     admin_user: admin

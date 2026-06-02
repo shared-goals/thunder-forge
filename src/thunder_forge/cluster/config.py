@@ -24,6 +24,7 @@ TF_CONFIG_EXAMPLE_FILENAME = "tfconfig.example.yaml"
 GENERATED_CONFIG_DIR = "configs"
 GENERATED_OLLA_CONFIG_FILENAME = "olla-config.yaml"
 DEFAULT_EDGE_ACCESS_LOG = "logs/tf-edge-access.jsonl"
+DEFAULT_LOG_RETENTION_DAYS = 3
 DEFAULT_EDGE_HOST = "0.0.0.0"
 DEFAULT_OLLA_VERSION = "v0.0.27"
 DEFAULT_OLLA_OS = "macos"
@@ -165,6 +166,7 @@ class ServiceConfig:
     olla_bin_dir: str = DEFAULT_OLLA_BIN_DIR
     omlx_port: int = DEFAULT_OMLX_PORT
     edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
+    log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     frontend_admin_user: str = ""
 
 
@@ -380,6 +382,11 @@ def _parse_services(raw: object) -> ServiceConfig:
     if not edge_access_log:
         msg = "services.edge.access_log must not be empty"
         raise ValueError(msg)
+    log_retention_days = _parse_positive_int(
+        raw.get("log_retention_days"),
+        name="services.log_retention_days",
+        default=DEFAULT_LOG_RETENTION_DAYS,
+    )
     edge_host = str(edge_raw.get("host", DEFAULT_EDGE_HOST)).strip()
     if not edge_host:
         msg = "services.edge.host must not be empty"
@@ -408,6 +415,7 @@ def _parse_services(raw: object) -> ServiceConfig:
         olla_bin_dir=str(olla_raw.get("bin_dir", DEFAULT_OLLA_BIN_DIR)).strip() or DEFAULT_OLLA_BIN_DIR,
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
         edge_access_log=edge_access_log,
+        log_retention_days=log_retention_days,
         frontend_admin_user=frontend_admin_user,
     )
 

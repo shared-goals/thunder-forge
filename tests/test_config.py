@@ -9,6 +9,7 @@ import yaml as yaml_lib
 from thunder_forge.cluster.config import (
     DEFAULT_EDGE_ACCESS_LOG,
     DEFAULT_EDGE_HOST,
+    DEFAULT_LOG_RETENTION_DAYS,
     find_repo_root,
     generate_olla_config,
     lint_cluster_config,
@@ -65,6 +66,7 @@ def test_parse_config_admin_users() -> None:
     config = parse_cluster_config(
         {
             "services": {
+                "log_retention_days": 5,
                 "frontend": {"admin_user": "serpo"},
                 "olla": {"version": "v9.9.9", "bin_dir": ".tmp/custom-olla"},
             },
@@ -93,6 +95,7 @@ def test_parse_config_admin_users() -> None:
     )
 
     assert config.services.frontend_admin_user == "serpo"
+    assert config.services.log_retention_days == 5
     assert config.services.olla_version == "v9.9.9"
     assert config.services.olla_version_pinned is True
     assert config.services.olla_bin_dir == ".tmp/custom-olla"
@@ -136,6 +139,17 @@ def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing(
 
     assert config.services.olla_version == "v0.0.27"
     assert config.services.olla_version_pinned is True
+
+
+def test_parse_config_log_retention_days_default() -> None:
+    config = parse_cluster_config(
+        {
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.services.log_retention_days == DEFAULT_LOG_RETENTION_DAYS
 
 
 def test_parse_config_rejects_role_field() -> None:
