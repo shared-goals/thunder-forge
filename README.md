@@ -23,7 +23,7 @@ The current v2 direction is agent-managed operation. Instead of assuming a human
 
 Thunder Forge has three operational roles:
 
-- `frontend`: runs TF edge, Olla, routing config, auth, accounting, and external API surface.
+- `gateway`: runs TF edge, Olla, routing config, auth, accounting, and external API surface.
 - `cache/download`: prepares model artifacts under the oMLX-native `~/.omlx/models/<owner>/<repo>` layout and syncs them to inference nodes.
 - `inference node`: runs oMLX as the node-level inference daemon and serves the local model set.
 
@@ -238,11 +238,11 @@ Future TF daemon restarts use `sudo -n`, so a missing or invalid setup rule fail
 
 ## Config
 
-Copy the tracked examples, then edit the local files:
+Copy the tracked config example, then create/edit local files:
 
 ```bash
 cp tfconfig.example.yaml tfconfig.yaml
-cp .env.example .env
+touch .env
 ```
 
 For TF v2, `tfconfig.yaml` is the local source of truth. `models.<id>` is the public alias and Thunder Forge model identity. Each model declares `runtime_model_id`, the id exposed by oMLX. Nodes declare which model ids they can serve with `nodes.<node>.models`, and Olla config generation derives endpoints and aliases from that placement. Temporary comparison aliases such as `memory-bf16` may be used for benchmarks, but they are not canonical role names.
@@ -252,7 +252,7 @@ Run `uv run thunder-forge config lint` before generating runtime/router config. 
 ### Parameter Sources
 
 - Cache artifact root: `.env` key `TF_CACHE_OMLX_MODELS_DIR`, default `~/.omlx/models`. Artifact `status`, `download`, and `sync` use this path on the cache execution host (local cache role or remotely dispatched cache role).
-- Node oMLX process args: `configs/node-assignments.yaml` under `nodes.<node>.runtime`. `type` and `port` are required; optional keys map directly to `omlx serve` flags: `model_dir`, `bind_host`, `base_path`, `log_level`, `max_model_memory`, `max_process_memory`, `max_concurrent_requests`, `paged_ssd_cache_dir`, `paged_ssd_cache_max_size`, `hot_cache_max_size`, `no_cache`, `mcp_config`, and `hf_endpoint`.
+- Node oMLX process args: `tfconfig.yaml` under `nodes.<node>.runtime`. `type` and `port` are required; optional keys map directly to `omlx serve` flags: `model_dir`, `bind_host`, `base_path`, `log_level`, `max_model_memory`, `max_process_memory`, `max_concurrent_requests`, `paged_ssd_cache_dir`, `paged_ssd_cache_max_size`, `hot_cache_max_size`, `no_cache`, `mcp_config`, and `hf_endpoint`.
 - Olla generated endpoints: `generate-olla-config` reads `nodes.<node>.host`, `nodes.<node>.runtime.port`, and node names. Endpoint names are `<node>-omlx-live`.
 - Olla model aliases: generated from `models.<alias>.runtime_model_id` and `nodes.<node>.models`.
 - Olla router defaults: still owned by `thunder_forge.cluster.config.generate_olla_config` rather than a YAML schema. Use `olla smoke --expected-endpoint <node>-omlx-live` or `olla dev-smoke --expected-endpoint <node>-omlx-live` when you want smoke tests to pin a specific generated endpoint.
@@ -541,6 +541,3 @@ uv run pytest --tb=short -q
 uv run ruff check .
 ```
 
-## V1
-
-Previous architecture is preserved in `v1/` for reference.
