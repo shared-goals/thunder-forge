@@ -686,6 +686,54 @@ def test_edge_client_config_hermes_creates_missing_key_without_printing_secret(m
     assert api_key not in result.stderr
 
 
+def test_edge_client_config_hermes_skips_prompt_when_key_exists(monkeypatch, tmp_path) -> None:
+    import thunder_forge.cli as cli_module
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("TF_USER_SHAG=already-there\n")
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (tmp_path, env_file), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            tmp_path,
+        ),
+        raising=False,
+    )
+
+    called = {"prompt": False}
+
+    def fail_prompt(*args, **kwargs):
+        called["prompt"] = True
+        raise AssertionError("prompt should not be called when key already exists")
+
+    monkeypatch.setattr(cli_module, "_confirm_create_edge_key", fail_prompt, raising=False)
+
+    result = runner.invoke(app, ["edge", "client-config", "hermes", "shag", "--create-missing-key"])
+
+    assert result.exit_code == 0
+    assert called["prompt"] is False
+    assert "TF_USER_SHAG: present" in result.stderr
+    assert "key_env: TF_USER_SHAG" in result.stdout
+
+
 def test_edge_smoke_cli_uses_config_default(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 

@@ -964,6 +964,9 @@ def _ensure_edge_client_key_if_requested(
 
     resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
     _repo_root, env_file = _load_repo_dotenv()
+    if _dotenv_value(env_file, resolved_env):
+        typer.echo(f"{resolved_env}: present in {env_file}", err=True)
+        return
     if not yes and not _confirm_create_edge_key(resolved_env, env_file):
         typer.echo(f"Error: {resolved_env} was not created", err=True)
         raise typer.Exit(1)
