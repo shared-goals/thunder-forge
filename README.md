@@ -357,7 +357,7 @@ Generate or refresh the OpenCode config from `tfconfig.yaml` after changing mode
 make opencode
 ```
 
-Pass a TF edge client id to inject that client's API key directly into the generated config. If the key is missing, the command creates `TF_USER_<CLIENT>` in `.env`, then prints and copies the config:
+Pass a TF edge client id to inject that client's API key directly into the generated config. If the key is missing, the command asks before creating `TF_USER_<CLIENT>` in `.env`, then prints and copies the config:
 
 ```bash
 make opencode shag
@@ -431,7 +431,7 @@ Generate or refresh the Hermes provider snippet from `tfconfig.yaml` after chang
 make hermes shag
 ```
 
-Hermes output always uses `key_env`; it does not embed API keys. Use the direct command when a custom base URL or output file is needed:
+Hermes output always uses `key_env`; it does not embed API keys. `make hermes <client>` asks before creating a missing key. Use the direct command when a custom base URL or output file is needed:
 
 ```bash
 uv run thunder-forge edge client-config hermes shag --create-missing-key --yes --copy --base-url http://studio.lan:40116/v1 --output $HOME/.hermes/thunder-forge.yaml
@@ -449,7 +449,8 @@ uv run thunder-forge edge client-config hermes [client-id] --copy
 Behavior:
 
 - Both renderers use the same assigned alias catalog from `tfconfig.yaml`.
-- `--create-missing-key --yes <client-id>` creates or reads `TF_USER_<CLIENT>` in `.env`.
+- `--create-missing-key <client-id>` asks before creating `TF_USER_<CLIENT>` in `.env` when it is missing.
+- `--create-missing-key --yes <client-id>` creates or reads `TF_USER_<CLIENT>` in `.env` without prompting.
 - OpenCode can use `--inject-api-key` when the client config must contain the real key.
 - Hermes always emits `key_env: TF_USER_<CLIENT>` and never embeds the secret.
 - Keep OpenCode output as JSONC/JSON because OpenCode needs static `provider.<id>.models`.

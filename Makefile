@@ -72,10 +72,10 @@ config:
 	$(UV) thunder-forge generate-olla-config
 
 opencode:
-	@$(UV) thunder-forge edge client-config opencode --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key --yes "$(ARG)")
+	@$(UV) thunder-forge edge client-config opencode --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key "$(ARG)")
 
 hermes:
-	@$(UV) thunder-forge edge client-config hermes --copy $(if $(strip $(ARG)),--create-missing-key --yes "$(ARG)")
+	@$(UV) thunder-forge edge client-config hermes --copy $(if $(strip $(ARG)),--create-missing-key "$(ARG)")
 
 .PHONY: $(_TARGETS)
 .DEFAULT_GOAL := help
