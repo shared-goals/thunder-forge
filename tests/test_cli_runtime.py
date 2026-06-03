@@ -841,23 +841,33 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
 
     repo = tmp_path
     (repo / "tfconfig.yaml").write_text(
-        dedent("""\
-            models: {}
-            nodes:
-              infer-03:
-                host: infer-03.lan
-                ram_gb: 128
-                roles: [inference]
-                user: shag
-                runtime:
-                  type: omlx
-        """)
+        """models:
+  memory:
+    source:
+      repo: mlx-community/gpt-oss-20b-MXFP4-Q8
+    runtime_model_id: gpt-oss-20b-MXFP4-Q8
+nodes:
+  infer-03:
+    host: infer-03.lan
+    ram_gb: 128
+    roles: [inference]
+    user: shag
+    models: [memory]
+    runtime:
+      type: omlx
+"""
     )
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
     monkeypatch.setattr(
         cli_module,
         "check_omlx_health",
-        lambda base_url: OmlxHealthResult(base_url=base_url, health_ok=True, models_ok=True, models=["memory"]),
+        lambda base_url, **kwargs: OmlxHealthResult(
+            base_url=base_url,
+            health_ok=True,
+            models_ok=True,
+            models=["gpt-oss-20b-MXFP4-Q8"],
+            model_statuses={"gpt-oss-20b-MXFP4-Q8": {"id": "gpt-oss-20b-MXFP4-Q8", "loaded": True}},
+        ),
     )
 
     result = runner.invoke(app, ["cluster", "status"])
@@ -866,6 +876,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     assert "Thunder Forge cluster status" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "served_models: memory" in result.stdout
+    assert "hot_loaded_models: memory" in result.stdout
 
 
 def test_cluster_smoke_runs_runtime_olla_and_edge(tmp_path: Path, monkeypatch) -> None:

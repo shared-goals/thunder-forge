@@ -48,6 +48,7 @@ from thunder_forge.cluster.edge import (
 from thunder_forge.cluster.fabric import TransportPlan, build_transport_plan
 from thunder_forge.cluster.gateway import GatewayDaemonSetupResult, run_gateway_daemon_setup
 from thunder_forge.cluster.log_retention import trim_local_logs
+from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases
 from thunder_forge.cluster.olla import dev_smoke_olla, run_olla_service_restart, smoke_olla_router
 from thunder_forge.cluster.omlx import (
     check_omlx_health,
@@ -171,11 +172,7 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         base_url = f"http://{node.host}:{_runtime(node).port}"
         health = check_omlx_health(base_url, timeout=timeout, include_models=True)
         hot_loaded_runtime_ids = extract_hot_loaded_models(health.model_statuses)
-        hot_loaded_models = _map_hot_loaded_to_aliases(
-            config,
-            node,
-            hot_loaded_runtime_ids,
-        )
+        hot_loaded_models = map_runtime_models_to_aliases(config, node, hot_loaded_runtime_ids)
         snapshots.append(
             {
                 "timestamp": datetime.now().astimezone().isoformat(),
@@ -189,37 +186,6 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
             }
         )
     return snapshots
-
-
-def _map_hot_loaded_to_aliases(
-    config: ClusterConfig,
-    node: Node,
-    hot_loaded_model_ids: list[str],
-) -> list[str]:
-    runtime_to_aliases: dict[str, list[str]] = {}
-    for alias in node.models:
-        model = config.models.get(alias)
-        if model is None:
-            continue
-        runtime_id = model.runtime_model_id.strip()
-        if not runtime_id:
-            continue
-        runtime_to_aliases.setdefault(runtime_id, []).append(alias)
-
-    aliases: list[str] = []
-    seen: set[str] = set()
-    for model_id in hot_loaded_model_ids:
-        mapped = runtime_to_aliases.get(model_id)
-        if mapped:
-            for alias in mapped:
-                if alias not in seen:
-                    aliases.append(alias)
-                    seen.add(alias)
-            continue
-        if model_id not in seen:
-            aliases.append(model_id)
-            seen.add(model_id)
-    return aliases
 
 
 def _append_snapshots(metrics_path: Path, snapshots: list[dict[str, object]]) -> None:
@@ -1234,6 +1200,114 @@ def _gateway_restart_notice(config: ClusterConfig) -> str:
     )
 
 
+def _assigned_repo_ids_for_node(config: ClusterConfig, node_name: str, runtime_node: Node) -> list[str]:
+    if not runtime_node.models:
+        typer.echo(f"Error: node '{node_name}' has no models configured", err=True)
+        raise typer.Exit(1)
+
+    repo_ids: list[str] = []
+    for model_id in runtime_node.models:
+        configured_model = config.models.get(model_id)
+        if configured_model is None:
+            typer.echo(f"Error: node '{node_name}' references unknown model '{model_id}'", err=True)
+            raise typer.Exit(1)
+        repo_id = configured_model.source.repo.strip()
+        if not repo_id:
+            typer.echo(f"Error: models.{model_id}.source.repo is required for full node sync", err=True)
+            raise typer.Exit(1)
+        if repo_id not in repo_ids:
+            repo_ids.append(repo_id)
+    return repo_ids
+
+
+def _assigned_model_dirs_for_node(config: ClusterConfig, node_name: str, runtime_node: Node) -> set[str]:
+    return {build_artifact_identity(repo_id).model_dir_name for repo_id in _assigned_repo_ids_for_node(config, node_name, runtime_node)}
+
+
+def _list_node_cache_model_dirs(runtime_node: Node, *, timeout: int) -> list[str]:
+    if runtime_node.home_dir is None:
+        runtime_node.home_dir = f"/Users/{runtime_node.user}"
+    models_dir = f"{runtime_node.home_dir}/.omlx/models"
+    command = (
+        "set -euo pipefail; "
+        f"MODELS_DIR={shlex.quote(models_dir)}; "
+        "if [ ! -d \"$MODELS_DIR\" ]; then exit 0; fi; "
+        "find \"$MODELS_DIR\" -mindepth 2 -maxdepth 2 -type d"
+    )
+    result = ssh_run(
+        runtime_node.user,
+        runtime_node.host,
+        command,
+        timeout=timeout,
+        shell=runtime_node.shell,
+    )
+    if result.returncode != 0:
+        typer.echo(f"Error: failed to list node cache model directories on {runtime_node.host}", err=True)
+        if result.stderr:
+            typer.echo(result.stderr.strip(), err=True)
+        raise typer.Exit(result.returncode)
+
+    model_dirs: list[str] = []
+    prefix = f"{models_dir}/"
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(prefix):
+            line = line[len(prefix) :]
+        if "/" not in line:
+            continue
+        model_dirs.append(line)
+    return sorted(dict.fromkeys(model_dirs))
+
+
+def _prune_node_cache_models(
+    *,
+    config: ClusterConfig,
+    node_name: str,
+    runtime_node: Node,
+    dry_run: bool,
+    timeout: int,
+) -> None:
+    if runtime_node.home_dir is None:
+        runtime_node.home_dir = f"/Users/{runtime_node.user}"
+    assigned_model_dirs = _assigned_model_dirs_for_node(config, node_name, runtime_node)
+    current_model_dirs = _list_node_cache_model_dirs(runtime_node, timeout=timeout)
+    stale_model_dirs = [model_dir for model_dir in current_model_dirs if model_dir not in assigned_model_dirs]
+
+    typer.echo("")
+    typer.echo("== Cache Prune ==")
+    typer.echo(f"assigned_models: {len(assigned_model_dirs)}")
+    typer.echo(f"cached_models: {len(current_model_dirs)}")
+    if not stale_model_dirs:
+        typer.echo("status: prune not needed")
+        return
+
+    for model_dir in stale_model_dirs:
+        typer.echo(f"prune_model_dir: {model_dir}")
+
+    if dry_run:
+        typer.echo("mode: dry-run")
+        return
+
+    for model_dir in stale_model_dirs:
+        absolute_model_dir = f"{runtime_node.home_dir}/.omlx/models/{model_dir}"
+        result = ssh_run(
+            runtime_node.user,
+            runtime_node.host,
+            f"rm -rf {shlex.quote(absolute_model_dir)}",
+            timeout=timeout,
+            shell=runtime_node.shell,
+        )
+        if result.returncode != 0:
+            typer.echo(f"Error: prune failed for {model_dir} on {runtime_node.host}", err=True)
+            if result.stderr:
+                typer.echo(result.stderr.strip(), err=True)
+            raise typer.Exit(result.returncode)
+
+    typer.echo(f"status: pruned {len(stale_model_dirs)} model_dir(s)")
+
+
 def _resolve_cluster_smoke_inputs(
     config: ClusterConfig,
     *,
@@ -1728,12 +1802,17 @@ def cluster_status(
     for node_name in inference_names:
         runtime_node = _get_runtime_node(config, node_name)
         base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
-        result = check_omlx_health(base_url)
+        result = check_omlx_health(base_url, include_models=True)
         health_status = "ok" if result.health_ok else "fail"
         models_status = "ok" if result.models_ok else "fail"
         typer.echo(f"{node_name}: health={health_status} models={models_status}")
         if result.models:
-            typer.echo(f"  served_models: {', '.join(result.models)}")
+            served_models = map_runtime_models_to_aliases(config, runtime_node, result.models)
+            typer.echo(f"  served_models: {', '.join(served_models)}")
+        hot_loaded_runtime_ids = extract_hot_loaded_models(result.model_statuses)
+        hot_loaded_models = map_runtime_models_to_aliases(config, runtime_node, hot_loaded_runtime_ids)
+        if hot_loaded_models:
+            typer.echo(f"  hot_loaded_models: {', '.join(hot_loaded_models)}")
         for error in result.errors:
             typer.echo(f"Error: {node_name}: {error}", err=True)
         failed = failed or not (result.health_ok and result.models_ok)
@@ -1764,6 +1843,11 @@ def cluster_sync(
     timeout: int | None = typer.Option(None, "--timeout", help="Timeout in seconds for rsync when applying."),
     restart_runtime: bool = typer.Option(False, "--restart-runtime", help="Restart node runtime after sync."),
     no_restart_runtime: bool = typer.Option(False, "--no-restart-runtime", help="Skip node runtime restart."),
+    prune: bool = typer.Option(
+        False,
+        "--prune",
+        help="Prune node cache models that are not assigned to this inference node before restart.",
+    ),
 ) -> None:
     """Sync configured model artifacts to a node and optionally restart its runtime."""
     if restart_runtime and no_restart_runtime:
@@ -1792,6 +1876,15 @@ def cluster_sync(
         management=management,
         timeout=resolved_timeout,
     )
+
+    if prune:
+        _prune_node_cache_models(
+            config=config,
+            node_name=target,
+            runtime_node=runtime_node,
+            dry_run=dry_run,
+            timeout=resolved_timeout,
+        )
 
     if resolved_restart:
         if dry_run:
@@ -2303,13 +2396,16 @@ def usage_report(
 
     _print_mapping("requests_by_user", summary.requests_by_user)
     _print_mapping("consumed_ms_by_user", summary.consumed_ms_by_user)
-    _print_mapping("tokens_by_user", summary.tokens_by_user)
+    if summary.requests_by_user_model:
+        typer.echo("requests_by_user_model:")
+        for client_id, models in summary.requests_by_user_model.items():
+            typer.echo(f"  - {client_id}:")
+            for model, count in models.items():
+                typer.echo(f"      {model}: {count}")
     _print_mapping("requests_by_node", summary.requests_by_node)
     _print_mapping("consumed_ms_by_node", summary.consumed_ms_by_node)
-    _print_mapping("tokens_by_node", summary.tokens_by_node)
     _print_mapping("requests_by_model", summary.requests_by_model)
     _print_mapping("consumed_ms_by_model", summary.consumed_ms_by_model)
-    _print_mapping("tokens_by_model", summary.tokens_by_model)
     _print_mapping("requests_by_hour", summary.requests_by_hour)
     if summary.requests_by_node_model:
         typer.echo("requests_by_node_model:")
@@ -2317,12 +2413,6 @@ def usage_report(
             typer.echo(f"  - {node_name}:")
             for model, count in models.items():
                 typer.echo(f"      {model}: {count}")
-    if summary.requests_by_node_hour:
-        typer.echo("requests_by_node_hour:")
-        for node_name, hours in summary.requests_by_node_hour.items():
-            typer.echo(f"  - {node_name}:")
-            for hour, count in hours.items():
-                typer.echo(f"      {hour}: {count}")
 @usage_app.command("collect-node-metrics")
 def usage_collect_node_metrics(
     output: Path | None = typer.Option(
@@ -2968,20 +3058,7 @@ def _run_artifact_sync_workflow(
     cache_omlx_models_dir = cache_omlx_models_dir_from_env()
     repo_ids = [model] if model else []
     if not repo_ids:
-        if not runtime_node.models:
-            typer.echo(f"Error: node '{node}' has no models configured", err=True)
-            raise typer.Exit(1)
-        for model_id in runtime_node.models:
-            configured_model = config.models.get(model_id)
-            if configured_model is None:
-                typer.echo(f"Error: node '{node}' references unknown model '{model_id}'", err=True)
-                raise typer.Exit(1)
-            repo_id = configured_model.source.repo.strip()
-            if not repo_id:
-                typer.echo(f"Error: models.{model_id}.source.repo is required for full node sync", err=True)
-                raise typer.Exit(1)
-            if repo_id not in repo_ids:
-                repo_ids.append(repo_id)
+        repo_ids = _assigned_repo_ids_for_node(config, node, runtime_node)
 
     requested_transport = "management" if management else transport
     transport_plan = _resolve_transport_plan_for_sync(

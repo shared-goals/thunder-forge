@@ -46,31 +46,6 @@ def _derive_node_name(raw: object) -> str:
     return endpoint
 
 
-def _token_total(payload: dict[str, object]) -> int | None:
-    def _int_value(value: object) -> int | None:
-        return value if isinstance(value, int) else None
-
-    usage = payload.get("usage")
-    if isinstance(usage, dict):
-        total = _int_value(usage.get("total_tokens"))
-        if total is not None:
-            return total
-        prompt = _int_value(usage.get("prompt_tokens")) or 0
-        completion = _int_value(usage.get("completion_tokens")) or 0
-        if prompt or completion:
-            return prompt + completion
-
-    total = _int_value(payload.get("total_tokens"))
-    if total is not None:
-        return total
-
-    prompt = _int_value(payload.get("prompt_tokens")) or 0
-    completion = _int_value(payload.get("completion_tokens")) or 0
-    if prompt or completion:
-        return prompt + completion
-    return None
-
-
 def _load_jsonl_lines(path: Path) -> tuple[list[dict[str, object]], int]:
     records: list[dict[str, object]] = []
     invalid_lines = 0
@@ -132,15 +107,12 @@ class DailyUsageSummary:
     consumed_ms_total: int
     requests_by_user: dict[str, int] = field(default_factory=dict)
     consumed_ms_by_user: dict[str, int] = field(default_factory=dict)
-    tokens_by_user: dict[str, int] = field(default_factory=dict)
+    requests_by_user_model: dict[str, dict[str, int]] = field(default_factory=dict)
     requests_by_node: dict[str, int] = field(default_factory=dict)
     consumed_ms_by_node: dict[str, int] = field(default_factory=dict)
-    tokens_by_node: dict[str, int] = field(default_factory=dict)
     requests_by_node_model: dict[str, dict[str, int]] = field(default_factory=dict)
-    requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     requests_by_model: dict[str, int] = field(default_factory=dict)
     consumed_ms_by_model: dict[str, int] = field(default_factory=dict)
-    tokens_by_model: dict[str, int] = field(default_factory=dict)
     requests_by_hour: dict[str, int] = field(default_factory=dict)
 
     def to_json_dict(self) -> dict[str, object]:
@@ -152,9 +124,9 @@ class DailyUsageSummary:
             "requests": {
                 "total": self.requests_total,
                 "by_user": self.requests_by_user,
+                "by_user_model": self.requests_by_user_model,
                 "by_node": self.requests_by_node,
                 "by_node_model": self.requests_by_node_model,
-                "by_node_hour": self.requests_by_node_hour,
                 "by_model": self.requests_by_model,
                 "by_hour": self.requests_by_hour,
             },
@@ -163,11 +135,6 @@ class DailyUsageSummary:
                 "by_user": self.consumed_ms_by_user,
                 "by_node": self.consumed_ms_by_node,
                 "by_model": self.consumed_ms_by_model,
-            },
-            "tokens": {
-                "by_user": self.tokens_by_user,
-                "by_node": self.tokens_by_node,
-                "by_model": self.tokens_by_model,
             },
             "invalid_lines": self.invalid_lines,
         }
@@ -182,16 +149,13 @@ def summarize_daily_usage(
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
     requests_by_user: Counter[str] = Counter()
     consumed_ms_by_user: Counter[str] = Counter()
-    tokens_by_user: Counter[str] = Counter()
+    requests_by_user_model: dict[str, Counter[str]] = defaultdict(Counter)
     requests_by_node: Counter[str] = Counter()
     consumed_ms_by_node: Counter[str] = Counter()
-    tokens_by_node: Counter[str] = Counter()
     requests_by_model: Counter[str] = Counter()
     consumed_ms_by_model: Counter[str] = Counter()
-    tokens_by_model: Counter[str] = Counter()
     requests_by_hour: Counter[str] = Counter()
     requests_by_node_model: dict[str, Counter[str]] = defaultdict(Counter)
-    requests_by_node_hour: dict[str, Counter[str]] = defaultdict(Counter)
 
     requests_total = 0
     invalid_lines = 0
@@ -224,28 +188,22 @@ def summarize_daily_usage(
 
         model = payload.get("model")
         model_name = model.strip() if isinstance(model, str) else ""
-        token_total = _token_total(payload)
         hour_bucket = _hour_bucket(timestamp)
 
         requests_by_user[client_id] += 1
         consumed_ms_by_user[client_id] += latency_ms
-        if token_total is not None:
-            tokens_by_user[client_id] += token_total
+        if model_name:
+            requests_by_user_model[client_id][model_name] += 1
 
         if node_name:
             requests_by_node[node_name] += 1
             consumed_ms_by_node[node_name] += latency_ms
-            if token_total is not None:
-                tokens_by_node[node_name] += token_total
-            requests_by_node_hour[node_name][hour_bucket] += 1
             if model_name:
                 requests_by_node_model[node_name][model_name] += 1
 
         if model_name:
             requests_by_model[model_name] += 1
             consumed_ms_by_model[model_name] += latency_ms
-            if token_total is not None:
-                tokens_by_model[model_name] += token_total
 
         if timestamp is not None:
             requests_by_hour[hour_bucket] += 1
@@ -266,14 +224,11 @@ def summarize_daily_usage(
         consumed_ms_total=consumed_ms_total,
         requests_by_user=_ordered_counter(requests_by_user),
         consumed_ms_by_user=_ordered_counter(consumed_ms_by_user),
-        tokens_by_user=_ordered_counter(tokens_by_user),
+        requests_by_user_model=_ordered_nested_counter(requests_by_user_model),
         requests_by_node=_ordered_counter(requests_by_node),
         consumed_ms_by_node=_ordered_counter(consumed_ms_by_node),
-        tokens_by_node=_ordered_counter(tokens_by_node),
         requests_by_node_model=_ordered_nested_counter(requests_by_node_model),
-        requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
         requests_by_model=_ordered_counter(requests_by_model),
         consumed_ms_by_model=_ordered_counter(consumed_ms_by_model),
-        tokens_by_model=_ordered_counter(tokens_by_model),
         requests_by_hour=_ordered_counter(requests_by_hour),
     )

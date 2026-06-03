@@ -8,7 +8,7 @@ from pathlib import Path
 from thunder_forge.cluster.usage import extract_hot_loaded_models, summarize_daily_usage
 
 
-def test_summarize_daily_usage_groups_by_user_node_model_hour_and_tokens(tmp_path: Path) -> None:
+def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path) -> None:
     access_log = tmp_path / "tf-edge-access.jsonl"
     access_log.write_text(
         "\n".join(
@@ -20,7 +20,6 @@ def test_summarize_daily_usage_groups_by_user_node_model_hour_and_tokens(tmp_pat
                         "model": "coder",
                         "latency_ms": 100,
                         "olla_endpoint": "msm1-omlx-live",
-                        "total_tokens": 12,
                     }
                 ),
                 json.dumps(
@@ -30,7 +29,6 @@ def test_summarize_daily_usage_groups_by_user_node_model_hour_and_tokens(tmp_pat
                         "model": "coder",
                         "latency_ms": 200,
                         "node_name": "msm1",
-                        "usage": {"prompt_tokens": 3, "completion_tokens": 7},
                     }
                 ),
                 json.dumps(
@@ -40,7 +38,6 @@ def test_summarize_daily_usage_groups_by_user_node_model_hour_and_tokens(tmp_pat
                         "model": "agent",
                         "latency_ms": 150,
                         "olla_endpoint": "msm2-omlx-live",
-                        "usage": {"total_tokens": 20},
                     }
                 ),
                 "not json",
@@ -66,10 +63,9 @@ def test_summarize_daily_usage_groups_by_user_node_model_hour_and_tokens(tmp_pat
     assert summary.invalid_lines == 1
     assert summary.requests_by_user == {"alice": 2, "bob": 1}
     assert summary.consumed_ms_by_user == {"alice": 300, "bob": 150}
-    assert summary.tokens_by_user == {"alice": 22, "bob": 20}
+    assert summary.requests_by_user_model == {"alice": {"coder": 2}, "bob": {"agent": 1}}
     assert summary.requests_by_node == {"msm1": 2, "msm2": 1}
     assert summary.requests_by_node_model == {"msm1": {"coder": 2}, "msm2": {"agent": 1}}
-    assert summary.requests_by_node_hour == {"msm1": {"08": 2}, "msm2": {"09": 1}}
     assert summary.requests_by_model == {"agent": 1, "coder": 2}
     assert summary.requests_by_hour == {"08": 2, "09": 1}
 

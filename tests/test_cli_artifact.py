@@ -934,6 +934,83 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
     assert "run `make restart gateway-cache-01` only after changing model placement or node topology" in result.stdout
 
 
+def test_cluster_sync_with_prune_removes_unassigned_node_cache_models(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    _write_runtime_config_with_models(repo)
+    calls = []
+    restarts = []
+    removed: list[str] = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setenv("TF_CACHE_REMOTE_EXEC", "1")
+    monkeypatch.setattr(
+        cli_module,
+        "probe_artifact_presence",
+        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+            cache_omlx_model_dir=True,
+            node_omlx_model_dir=False,
+        ),
+    )
+
+    def fake_run_artifact_sync(plan, *, timeout):
+        calls.append((plan.repo_id, timeout))
+        return subprocess.CompletedProcess(args=plan.rsync_args, returncode=0)
+
+    def fake_ssh_run(user, ip, cmd, *, timeout=30, stream=False, shell=None, node_name=None, tty=False):
+        if "find \"$MODELS_DIR\" -mindepth 2 -maxdepth 2 -type d" in cmd:
+            return subprocess.CompletedProcess(
+                args=[cmd],
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        "/Users/shag/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8",
+                        "/Users/shag/.omlx/models/mlx-community/Qwen3-Coder-Next-4bit",
+                        "/Users/shag/.omlx/models/mlx-community/old-unused-model",
+                    ]
+                )
+                + "\n",
+                stderr="",
+            )
+        if cmd.startswith("rm -rf "):
+            removed.append(cmd)
+            return subprocess.CompletedProcess(args=[cmd], returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected ssh command: {cmd}")
+
+    def fake_run_omlx_daemon_restart(runtime_node, *, apply, timeout):
+        restarts.append((runtime_node.host, runtime_node.home_dir, apply, timeout))
+        return LaunchdServiceResult(
+            service="omlx",
+            label="com.thunder-forge.omlx-8018",
+            plist_path="/Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist",
+            applied=True,
+            service_label_verified=True,
+            health_ok=True,
+        )
+
+    monkeypatch.setattr(cli_module, "run_artifact_sync", fake_run_artifact_sync)
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+    monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_run_omlx_daemon_restart)
+
+    result = runner.invoke(app, ["cluster", "sync", "infer-01", "--apply", "--prune"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("mlx-community/gpt-oss-20b-MXFP4-Q8", 7200),
+        ("mlx-community/Qwen3-Coder-Next-4bit", 7200),
+    ]
+    assert len(removed) == 1
+    assert "old-unused-model" in removed[0]
+    assert restarts == [("infer-01.lan", "/Users/shag", True, 300)]
+    assert "== Cache Prune ==" in result.stdout
+    assert "status: pruned 1 model_dir(s)" in result.stdout
+    assert "== Runtime Restart ==" in result.stdout
+
+
 def test_artifact_download_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     _write_runtime_config(repo)

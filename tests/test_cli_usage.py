@@ -46,7 +46,6 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
                 "model": "coder",
                 "latency_ms": 100,
                 "olla_endpoint": "msm1-omlx-live",
-                "total_tokens": 12,
             }
         )
         + "\n"
@@ -63,11 +62,12 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
     assert payload["period"] == "2026-06-02"
     assert payload["requests"]["total"] == 1
     assert payload["requests"]["by_user"] == {"alice": 1}
+    assert payload["requests"]["by_user_model"] == {"alice": {"coder": 1}}
     assert payload["requests"]["by_node"] == {"msm1": 1}
     assert payload["requests"]["by_model"] == {"coder": 1}
     assert payload["requests"]["by_hour"] == {"08": 1}
     assert payload["consumed_ms"]["total"] == 100
-    assert payload["tokens"]["by_node"] == {"msm1": 12}
+    assert "tokens" not in payload
 
 
 def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkeypatch) -> None:

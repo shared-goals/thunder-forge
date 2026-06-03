@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync config usage-report usage-report-json usage-trim usage-duckdb opencode hermes
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config usage-report usage-report-json usage-trim usage-duckdb opencode hermes
 ARG ?= $(word 2,$(MAKECMDGOALS))
 
 ifneq ($(ARG),)
@@ -20,6 +20,7 @@ help:
 	@printf "  %-24s %s\n" "smoke [node]" "smoke runtime, Olla, and edge"
 	@printf "  %-24s %s\n" "status [node]" "check oMLX health on inference nodes"
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
+	@printf "  %-24s %s\n" "prune [node]" "sync, prune unassigned node cache models, and restart runtime"
 	@printf "  %-24s %s\n" "config" "generate configs/olla-config.yaml"
 	@printf "  %-24s %s\n" "usage-report [day]" "print usage summary (day: YYYY-MM-DD)"
 	@printf "  %-24s %s\n" "usage-report-json [day]" "print usage summary as JSON"
@@ -71,6 +72,10 @@ status:
 sync:
 	@if [ -z "$(ARG)" ]; then echo 'usage: make sync <node>'; exit 2; fi
 	$(UV) thunder-forge cluster sync "$(ARG)" --apply
+
+prune:
+	@if [ -z "$(ARG)" ]; then echo 'usage: make prune <node>'; exit 2; fi
+	$(UV) thunder-forge cluster sync "$(ARG)" --apply --prune
 
 config:
 	$(UV) thunder-forge generate-olla-config
