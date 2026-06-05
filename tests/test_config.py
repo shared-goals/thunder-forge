@@ -545,6 +545,49 @@ def test_lint_cluster_config_reports_unknown_models_and_exposure_warnings(tmp_pa
     ]
 
 
+def test_lint_cluster_config_reports_unusable_topology() -> None:
+    empty_config = parse_cluster_config({"models": {}, "nodes": {}})
+
+    empty_issues = lint_cluster_config(empty_config)
+
+    assert any(issue.severity == "error" and issue.path == "nodes" for issue in empty_issues)
+    assert any("gateway" in issue.message for issue in empty_issues)
+    assert any("inference" in issue.message for issue in empty_issues)
+
+    no_route_config = parse_cluster_config(
+        {
+            "models": {
+                "memory": {
+                    "source": {"repo": "mlx-community/gpt-oss-20b-MXFP4-Q8"},
+                    "runtime_model_id": "gpt-oss-20b-MXFP4-Q8",
+                }
+            },
+            "nodes": {
+                "gateway-cache-01": {
+                    "host": "gateway-cache-01.lan",
+                    "ram_gb": 64,
+                    "roles": ["gateway"],
+                },
+                "infer-03": {
+                    "host": "infer-03.lan",
+                    "ram_gb": 128,
+                    "roles": ["inference"],
+                    "runtime": {"type": "omlx", "port": 8018},
+                },
+            },
+        }
+    )
+
+    no_route_issues = lint_cluster_config(no_route_config)
+
+    assert any(
+        issue.severity == "error"
+        and issue.path == "nodes"
+        and "no routable model placements" in issue.message
+        for issue in no_route_issues
+    )
+
+
 def test_load_cluster_config_loads_dotenv(cluster_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """load_cluster_config loads .env from repo root."""
     import thunder_forge.cluster.config as config_module

@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -268,6 +269,29 @@ def test_edge_serve_cli_exposes_tf_alias_model_catalog(monkeypatch) -> None:
     assert config.model_catalog[0].name == "coder"
     assert "mlx-community/Qwen3-Coder-Next-4bit" in config.model_catalog[0].description
     assert config.model_catalog[0].runtime_model_id == "Qwen3-Coder-Next-4bit"
+
+
+def test_edge_serve_cli_reports_node_metrics_collector_errors(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    observed = threading.Event()
+    monkeypatch.setenv("TF_USER_CLIENT_A", "secret-a")
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
+
+    def fake_collect_node_metric_snapshots(*args, **kwargs):
+        observed.set()
+        raise RuntimeError("metrics unavailable")
+
+    def fake_serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
+        assert observed.wait(timeout=1.0)
+
+    monkeypatch.setattr(cli_module, "_collect_node_metric_snapshots", fake_collect_node_metric_snapshots)
+    monkeypatch.setattr(cli_module, "serve_edge_proxy", fake_serve_edge_proxy, raising=False)
+
+    result = runner.invoke(app, ["edge", "serve", "--metrics-interval-seconds", "60"])
+
+    assert result.exit_code == 0
+    assert "node_metrics_collector_error: metrics unavailable" in result.stdout
 
 
 def test_edge_client_config_opencode_prints_assigned_aliases(monkeypatch) -> None:

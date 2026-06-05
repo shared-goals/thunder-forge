@@ -567,6 +567,8 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             fabric_host=_parse_fabric_host(v.get("fabric_host"), node_name=k),
             runtime=_parse_node_runtime(v.get("runtime"), default_port=services.omlx_port),
             models=list(v.get("models", [])),
+            platform=v.get("platform"),
+            shell=v.get("shell"),
             home_dir=v.get("home_dir"),
             homebrew_prefix=v.get("homebrew_prefix"),
         )
@@ -737,6 +739,38 @@ def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
             )
         else:
             runtime_model_ids[model.runtime_model_id] = model_id
+
+    gateway_nodes = [node for node in config.nodes.values() if node.has_role(NodeRole.GATEWAY)]
+    inference_nodes = [node for node in config.nodes.values() if node.has_role(NodeRole.INFERENCE)]
+    if not gateway_nodes:
+        issues.append(
+            ConfigLintIssue(
+                severity="error",
+                path="nodes",
+                message="no gateway node configured",
+            )
+        )
+    if not inference_nodes:
+        issues.append(
+            ConfigLintIssue(
+                severity="error",
+                path="nodes",
+                message="no inference node configured",
+            )
+        )
+    elif not any(
+        node.runtime is not None
+        and node.runtime.type == RuntimeType.OMLX
+        and any(model_id in config.models for model_id in node.models)
+        for node in inference_nodes
+    ):
+        issues.append(
+            ConfigLintIssue(
+                severity="error",
+                path="nodes",
+                message="no routable model placements configured for inference nodes",
+            )
+        )
 
     for node_name, node in config.nodes.items():
         if node.models and node.runtime is None:

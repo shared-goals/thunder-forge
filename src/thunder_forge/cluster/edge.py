@@ -7,6 +7,7 @@ makes the edge behavior testable before wiring an ASGI/proxy process.
 
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import os
@@ -128,6 +129,15 @@ class EdgeProxyUpstreamRequest:
     started: float
 
 
+@dataclass(frozen=True)
+class EdgeUsageTokens:
+    """Token usage extracted from an upstream OpenAI-compatible JSON response."""
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+
 @dataclass
 class EdgeSmokeResult:
     """Result of a black-box smoke test against a running TF edge."""
@@ -236,10 +246,12 @@ class EdgeAccessLog:
 def _bearer_token(authorization: str | None) -> str:
     if not authorization:
         return ""
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    scheme, separator, token = authorization.partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not token:
         return ""
-    return token.strip()
+    if token != token.strip() or " " in token:
+        return ""
+    return token
 
 
 def validate_edge_client_id(client_id: str) -> str:
@@ -347,6 +359,10 @@ def load_edge_clients_from_env(
     """Load all TF edge clients from TF_USER_<NAME> env vars."""
     clients: dict[str, EdgeClient] = {}
     for client_id, api_key in load_edge_user_keys_from_env(env=env, users_env=users_env).items():
+        existing = clients.get(api_key)
+        if existing is not None and existing.client_id != client_id:
+            msg = f"duplicate API key configured for edge clients: {existing.client_id}, {client_id}"
+            raise ValueError(msg)
         clients[api_key] = EdgeClient(client_id=client_id)
     return clients
 
@@ -437,10 +453,12 @@ def authenticate_edge_request(
 ) -> EdgeAuthResult:
     """Validate a static bearer token and map it to a client identity."""
     token = _bearer_token(authorization)
-    client = clients_by_key.get(token)
-    if client is None:
+    if not token:
         return EdgeAuthResult(allowed=False, status_code=401)
-    return EdgeAuthResult(allowed=True, status_code=200, client_id=client.client_id)
+    for configured_key, client in clients_by_key.items():
+        if hmac.compare_digest(token, configured_key):
+            return EdgeAuthResult(allowed=True, status_code=200, client_id=client.client_id)
+    return EdgeAuthResult(allowed=False, status_code=401)
 
 
 def _nearest_rank_percentile(values: list[int], percentile: float) -> int:
@@ -572,6 +590,9 @@ def build_edge_access_log(
     latency_ms: int,
     olla_endpoint: str = "",
     api_key: str = "",
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
 ) -> EdgeAccessLog:
     """Build a secret-free access/accounting log record."""
     _ = api_key  # Accepted only so callers cannot accidentally include it in the record.
@@ -585,6 +606,9 @@ def build_edge_access_log(
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
         node_name=derive_olla_node_name(olla_endpoint),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
     )
 
 
@@ -621,6 +645,32 @@ def _extract_model(body: bytes) -> str:
         return ""
     model = payload.get("model", "")
     return model if isinstance(model, str) else ""
+
+
+def _as_non_negative_int(raw: object) -> int | None:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if raw >= 0 else None
+
+
+def _extract_usage_tokens(body: bytes) -> EdgeUsageTokens:
+    payload = _decode_json_object(body)
+    if payload is None:
+        return EdgeUsageTokens()
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return EdgeUsageTokens()
+
+    prompt_tokens = _as_non_negative_int(usage.get("prompt_tokens"))
+    completion_tokens = _as_non_negative_int(usage.get("completion_tokens"))
+    total_tokens = _as_non_negative_int(usage.get("total_tokens"))
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    return EdgeUsageTokens(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 def _requests_streaming_response(method: str, body: bytes) -> bool:
@@ -793,6 +843,9 @@ def _record_edge_access_event(
     status_code: int,
     started: float,
     olla_endpoint: str = "",
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
 ) -> None:
     if config.access_log_sink is None:
         return
@@ -805,6 +858,9 @@ def _record_edge_access_event(
         status_code=status_code,
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
     )
     config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
@@ -816,7 +872,9 @@ def _record_edge_access(
     path: str,
     status_code: int,
     olla_endpoint: str = "",
+    usage_tokens: EdgeUsageTokens | None = None,
 ) -> None:
+    tokens = usage_tokens or EdgeUsageTokens()
     _record_edge_access_event(
         config,
         request_id=upstream.request_id,
@@ -826,6 +884,9 @@ def _record_edge_access(
         status_code=status_code,
         started=upstream.started,
         olla_endpoint=olla_endpoint,
+        prompt_tokens=tokens.prompt_tokens,
+        completion_tokens=tokens.completion_tokens,
+        total_tokens=tokens.total_tokens,
     )
 
 
@@ -877,6 +938,7 @@ def proxy_edge_request(
         path=path,
         status_code=response.status_code,
         olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
+        usage_tokens=_extract_usage_tokens(response.content),
     )
 
     return EdgeProxyResponse(

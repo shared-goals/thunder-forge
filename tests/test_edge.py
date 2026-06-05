@@ -3,6 +3,7 @@
 import json
 
 import httpx
+import pytest
 
 from thunder_forge.cluster.edge import (
     EdgeAccessLog,
@@ -49,6 +50,15 @@ def test_edge_auth_maps_valid_bearer_token_to_client_id_without_exposing_secret(
     assert "dev-secret" not in repr(result)
 
 
+def test_edge_auth_rejects_non_canonical_bearer_header_spacing() -> None:
+    clients = {"dev-secret": EdgeClient(client_id="client-a")}
+
+    result = authenticate_edge_request("Bearer  dev-secret", clients)
+
+    assert result.allowed is False
+    assert result.status_code == 401
+
+
 def test_edge_users_and_multi_client_loader() -> None:
     env = {
         "TF_USER_CLIENT_A": "secret-a",
@@ -63,6 +73,16 @@ def test_edge_users_and_multi_client_loader() -> None:
     assert clients["secret-a"].client_id == "client_a"
     assert clients["secret-b"].client_id == "client_b"
     assert "" not in clients
+
+
+def test_edge_client_loader_rejects_duplicate_api_keys() -> None:
+    env = {
+        "TF_USER_CLIENT_A": "shared-secret",
+        "TF_USER_CLIENT_B": "shared-secret",
+    }
+
+    with pytest.raises(ValueError, match="duplicate API key"):
+        load_edge_clients_from_env(env=env)
 
 
 def test_edge_client_env_names_encode_dash_and_dot_without_collisions() -> None:
@@ -447,6 +467,46 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     assert logged["status_code"] == 200
     assert logged["olla_endpoint"] == "infer-03-omlx-live"
     assert "dev-secret" not in logs[0]
+
+
+def test_proxy_edge_request_records_upstream_usage_tokens() -> None:
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"X-Olla-Endpoint": "infer-03-omlx-live"},
+            json={
+                "id": "chatcmpl-1",
+                "choices": [{"message": {"content": "pong"}}],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 8,
+                    "total_tokens": 20,
+                },
+            },
+        )
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps({"model": "memory", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 200
+    logged = json.loads(logs[0])
+    assert logged["prompt_tokens"] == 12
+    assert logged["completion_tokens"] == 8
+    assert logged["total_tokens"] == 20
 
 
 def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:

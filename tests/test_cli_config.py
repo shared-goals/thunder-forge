@@ -20,6 +20,11 @@ def test_config_lint_reports_errors_and_warnings(tmp_path: Path, monkeypatch) ->
                 benchmark_only: true
                 runtime_model_id: gpt-oss-20b-mxfp4-bf16
             nodes:
+              gateway:
+                host: gateway.lan
+                ram_gb: 32
+                user: shag
+                roles: [gateway]
               infer-03:
                 host: infer-03.lan
                 ram_gb: 128
@@ -56,6 +61,11 @@ def test_config_lint_passes_clean_config(tmp_path: Path, monkeypatch) -> None:
                 source: { repo: mlx-community/gpt-oss-20b-MXFP4-Q8 }
                 runtime_model_id: gpt-oss-20b-MXFP4-Q8
             nodes:
+              gateway:
+                host: gateway.lan
+                ram_gb: 32
+                user: shag
+                roles: [gateway]
               infer-03:
                 host: infer-03.lan
                 ram_gb: 128

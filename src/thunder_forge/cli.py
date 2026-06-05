@@ -2875,9 +2875,9 @@ def edge_serve(
                 snapshots = _collect_node_metric_snapshots(cluster_config, timeout=metrics_timeout)
                 if snapshots:
                     _append_snapshots(metrics_path, snapshots)
-            except Exception:
+            except Exception as exc:
                 # Keep edge serving even when metrics sampling fails transiently.
-                pass
+                typer.echo(f"node_metrics_collector_error: {exc}")
             if stop_metrics_collector.wait(metrics_interval_seconds):
                 break
 
