@@ -332,7 +332,7 @@ def run_artifact_download(
             client.close()
         stdout = f"download_task: {task['task_id']}\nstatus: {task['status']}\n"
         return subprocess.CompletedProcess(args=plan.args, returncode=0, stdout=stdout, stderr=stderr)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         stderr = str(exc)
         return subprocess.CompletedProcess(args=plan.args, returncode=1, stdout=stdout, stderr=stderr)
     finally:

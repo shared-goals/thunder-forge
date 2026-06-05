@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -18,8 +20,10 @@ from typing import cast
 import typer
 
 from thunder_forge.cluster.artifacts import (
+    ArtifactDownloadPlan,
     ArtifactPresence,
     ArtifactReadinessAction,
+    ArtifactSyncPlan,
     build_artifact_download_plan,
     build_artifact_identity,
     build_artifact_readiness_plan,
@@ -70,6 +74,18 @@ from thunder_forge.cluster.ports import (
     local_base_url,
     resolve_port,
 )
+from thunder_forge.cluster.remote_cache import (
+    cache_hub_setup_command as _cache_hub_setup_command,
+)
+from thunder_forge.cluster.remote_cache import (
+    remote_artifact_download_command as _remote_artifact_download_command,
+)
+from thunder_forge.cluster.remote_cache import (
+    remote_cache_sync_command as _remote_cache_sync_command,
+)
+from thunder_forge.cluster.remote_cache import (
+    remote_transport_plan_probe_command as _remote_transport_plan_probe_command,
+)
 from thunder_forge.cluster.ssh import ssh_run
 from thunder_forge.cluster.usage import extract_hot_loaded_models, summarize_daily_usage
 
@@ -98,6 +114,17 @@ app.add_typer(usage_app, name="usage")
 DEFAULT_OPENCODE_API_KEY_ENV = "TF_USER_OPENCODE"
 DEFAULT_HERMES_API_KEY_ENV = "TF_USER_HERMES"
 REMOTE_CACHE_EXEC_ENV = "TF_CACHE_REMOTE_EXEC"
+
+
+@dataclass(frozen=True)
+class ArtifactSyncExecutionPlan:
+    source_path: str
+    destination: str
+    command: str
+    runtime_model_id: str
+    model_dir_name: str
+    readiness_actions: list[ArtifactReadinessAction]
+    sync_plan: ArtifactSyncPlan | None = None
 
 
 def _load_config() -> tuple[ClusterConfig, Path]:
@@ -303,15 +330,6 @@ def _dispatch_cache_command_if_remote(
     return True
 
 
-def _cache_hub_setup_command() -> str:
-    return (
-        "set -euo pipefail; "
-        'CACHE_DIR="${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"; '
-        '/bin/mkdir -p "$CACHE_DIR"; '
-        'echo "cache: oMLX model hub ready at $CACHE_DIR"'
-    )
-
-
 def _remote_artifact_complete_on_cache(*, cache_node: Node, model_dir_name: str, timeout: int = 30) -> bool:
     command = (
         "set -euo pipefail; "
@@ -331,443 +349,6 @@ def _remote_artifact_complete_on_cache(*, cache_node: Node, model_dir_name: str,
         shell=cache_node.shell,
     )
     return result.returncode == 0
-
-
-def _remote_artifact_download_command(*, repo_id: str, model_dir_name: str, timeout: int) -> str:
-    payload_b64 = base64.b64encode(
-        json.dumps(
-            {
-                "repo_id": repo_id,
-                "model_dir_name": model_dir_name,
-                "timeout": timeout,
-            }
-        ).encode("utf-8")
-    ).decode("ascii")
-    return (
-        "python3 -u - <<'PY'\n"
-        "import base64\n"
-        "import json\n"
-        "import os\n"
-        "import shutil\n"
-        "import secrets\n"
-        "import subprocess\n"
-        "import sys\n"
-        "import time\n"
-        "import urllib.error\n"
-        "import urllib.request\n"
-        "from http.cookiejar import CookieJar\n"
-        "payload = json.loads(base64.b64decode(" + repr(payload_b64) + ").decode())\n"
-        "repo_id = str(payload['repo_id'])\n"
-        "model_dir_name = str(payload['model_dir_name'])\n"
-        "timeout_seconds = int(payload['timeout'])\n"
-        "cache_root = os.environ.get('TF_CACHE_OMLX_MODELS_DIR') or os.path.expanduser('~/.omlx/models')\n"
-        "model_dir = os.path.join(cache_root, model_dir_name)\n"
-        "base_url = 'http://127.0.0.1:8020'\n"
-        "env = dict(os.environ)\n"
-        "env.pop('ALL_PROXY', None)\n"
-        "env.pop('all_proxy', None)\n"
-        "def _model_complete(path):\n"
-        "    if not os.path.isdir(path):\n"
-        "        return False\n"
-        "    if not os.path.isfile(os.path.join(path, 'config.json')):\n"
-        "        return False\n"
-        "    if os.path.exists(os.path.join(path, '.rsync-partial')):\n"
-        "        return False\n"
-        "    has_weights = False\n"
-        "    for root, _, files in os.walk(path):\n"
-        "        for name in files:\n"
-        "            if name.endswith('.incomplete'):\n"
-        "                return False\n"
-        "            if name.endswith('.safetensors') or name.endswith('.bin'):\n"
-        "                has_weights = True\n"
-        "    return has_weights\n"
-        "def _request(method, path, payload=None, opener=None):\n"
-        "    req = urllib.request.Request(base_url + path, method=method)\n"
-        "    req.add_header('Content-Type', 'application/json')\n"
-        "    data = None\n"
-        "    if payload is not None:\n"
-        "        data = json.dumps(payload).encode('utf-8')\n"
-        "    client = opener if opener is not None else urllib.request\n"
-        "    return client.open(req, data=data, timeout=30)\n"
-        "def _health_ready():\n"
-        "    try:\n"
-        "        with urllib.request.urlopen(base_url + '/health', timeout=2) as response:\n"
-        "            return 200 <= response.status < 300\n"
-        "    except Exception:\n"
-        "        return False\n"
-        "def _resolve_omlx_bin():\n"
-        "    if env.get('OMLX_BIN'):\n"
-        "        candidate = os.path.expanduser(env['OMLX_BIN'])\n"
-        "        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):\n"
-        "            return candidate\n"
-        "    candidate = shutil.which('omlx', path=env.get('PATH'))\n"
-        "    if candidate:\n"
-        "        return candidate\n"
-        "    shell = env.get('SHELL') or '/bin/zsh'\n"
-        "    try:\n"
-        "        probe = subprocess.run(\n"
-        "            [shell, '-lc', 'command -v omlx'],\n"
-        "            check=False,\n"
-        "            capture_output=True,\n"
-        "            text=True,\n"
-        "            timeout=8,\n"
-        "            env=env,\n"
-        "        )\n"
-        "        resolved = (probe.stdout or '').strip()\n"
-        "        if probe.returncode == 0 and resolved:\n"
-        "            return resolved\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    tool_dirs = [\n"
-        "        os.path.expanduser('~/.local/bin'),\n"
-        "        os.path.expanduser('~/.cargo/bin'),\n"
-        "        os.path.expanduser('~/.local/share/uv/tools/omlx/bin'),\n"
-        "    ]\n"
-        "    for directory in tool_dirs:\n"
-        "        candidate = os.path.join(directory, 'omlx')\n"
-        "        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):\n"
-        "            return candidate\n"
-        "    return None\n"
-        "if _model_complete(model_dir):\n"
-        "    print('download_status: already_ready')\n"
-        "    raise SystemExit(0)\n"
-        "downloader_api_key = env.get('TF_OMLX_DOWNLOADER_API_KEY') or env.get('OMLX_API_KEY')\n"
-        "server_proc = None\n"
-        "server_started = False\n"
-        "server_stderr = ''\n"
-        "try:\n"
-        "    if not _health_ready():\n"
-        "        downloader_api_key = secrets.token_urlsafe(24)\n"
-        "        omlx_bin = _resolve_omlx_bin()\n"
-        "        if not omlx_bin:\n"
-        "            raise RuntimeError(\n"
-        "                'oMLX CLI is not on PATH for non-interactive shell; '\n"
-        "                'set OMLX_BIN or ensure command -v omlx works in login shell'\n"
-        "            )\n"
-        "        serve_variants = [\n"
-        "            [\n"
-        "                omlx_bin, 'serve', '--host', '127.0.0.1', '--port', '8020',\n"
-        "                '--model-dir', cache_root, '--max-model-memory', 'disabled',\n"
-        "                '--api-key', downloader_api_key,\n"
-        "            ],\n"
-        "            [\n"
-        "                omlx_bin, 'serve', '--host', '127.0.0.1', '--port', '8020',\n"
-        "                '--model-dir', cache_root, '--api-key', downloader_api_key,\n"
-        "            ],\n"
-        "        ]\n"
-        "        for idx, serve_args in enumerate(serve_variants):\n"
-        "            server_proc = subprocess.Popen(\n"
-        "                serve_args,\n"
-        "                stdout=subprocess.DEVNULL,\n"
-        "                stderr=subprocess.PIPE,\n"
-        "                text=True,\n"
-        "                env=env,\n"
-        "            )\n"
-        "            server_started = True\n"
-        "            deadline = time.monotonic() + 60\n"
-        "            while time.monotonic() < deadline:\n"
-        "                if server_proc.poll() is not None:\n"
-        "                    _, stderr_text = server_proc.communicate()\n"
-        "                    server_stderr = (stderr_text or '').strip()\n"
-        "                    break\n"
-        "                if _health_ready():\n"
-        "                    break\n"
-        "                time.sleep(1)\n"
-        "            if _health_ready():\n"
-        "                break\n"
-        "            if server_proc.poll() is None:\n"
-        "                server_proc.terminate()\n"
-        "                try:\n"
-        "                    _, stderr_text = server_proc.communicate(timeout=10)\n"
-        "                except subprocess.TimeoutExpired:\n"
-        "                    server_proc.kill()\n"
-        "                    _, stderr_text = server_proc.communicate(timeout=10)\n"
-        "                server_stderr = (stderr_text or '').strip()\n"
-        "            if idx == len(serve_variants) - 1:\n"
-        "                detail = (\n"
-        "                    f': {server_stderr}' if server_stderr else ''\n"
-        "                )\n"
-        "                raise RuntimeError(\n"
-        "                    f'oMLX downloader server exited with code {server_proc.returncode}{detail}'\n"
-        "                )\n"
-        "        else:\n"
-        "            raise TimeoutError('oMLX downloader server did not become ready: ' + base_url)\n"
-        "    opener = urllib.request.build_opener(\n"
-        "        urllib.request.HTTPCookieProcessor(CookieJar())\n"
-        "    )\n"
-        "    if downloader_api_key:\n"
-        "        with _request(\n"
-        "            'POST',\n"
-        "            '/admin/api/login',\n"
-        "            {'api_key': downloader_api_key, 'remember': False},\n"
-        "            opener=opener,\n"
-        "        ) as response:\n"
-        "            if response.status >= 400:\n"
-        "                raise RuntimeError('admin login failed')\n"
-        "    hf_token = env.get('HF_TOKEN', '')\n"
-        "    try:\n"
-        "        with _request(\n"
-        "            'POST',\n"
-        "            '/admin/api/hf/download',\n"
-        "            {'repo_id': repo_id, 'hf_token': hf_token},\n"
-        "            opener=opener,\n"
-        "        ) as response:\n"
-        "            task = json.loads(response.read().decode('utf-8')).get('task')\n"
-        "    except urllib.error.HTTPError as exc:\n"
-        "        body = exc.read().decode('utf-8', errors='replace')\n"
-        "        if exc.code == 400 and 'already in progress' in body:\n"
-        "            with _request('GET', '/admin/api/hf/tasks', opener=opener) as response:\n"
-        "                tasks = json.loads(response.read().decode('utf-8')).get('tasks', [])\n"
-        "            task = next(\n"
-        "                (\n"
-        "                    item\n"
-        "                    for item in tasks\n"
-        "                    if item.get('repo_id') == repo_id\n"
-        "                    and item.get('status') in {'pending', 'downloading'}\n"
-        "                ),\n"
-        "                None,\n"
-        "            )\n"
-        "            if task is None:\n"
-        "                raise RuntimeError('No active oMLX download task found for ' + repo_id)\n"
-        "        elif exc.code == 401:\n"
-        "            raise RuntimeError('oMLX downloader admin API requires authentication')\n"
-        "        else:\n"
-        "            raise RuntimeError(body or str(exc))\n"
-        "    if not isinstance(task, dict) or not task.get('task_id'):\n"
-        "        raise RuntimeError('oMLX downloader returned no task for ' + repo_id)\n"
-        "    task_id = task['task_id']\n"
-        "    deadline = time.monotonic() + timeout_seconds\n"
-        "    last_bucket = -1\n"
-        "    while time.monotonic() < deadline:\n"
-        "        with _request('GET', '/admin/api/hf/tasks', opener=opener) as response:\n"
-        "            tasks = json.loads(response.read().decode('utf-8')).get('tasks', [])\n"
-        "        current = next((item for item in tasks if item.get('task_id') == task_id), None)\n"
-        "        if current is None:\n"
-        "            time.sleep(2)\n"
-        "            continue\n"
-        "        status = str(current.get('status') or 'unknown')\n"
-        "        progress = float(current.get('progress') or 0.0)\n"
-        "        bucket = int(progress)\n"
-        "        if bucket != last_bucket:\n"
-        "            print(f'download_progress: {status} {progress:.1f}%')\n"
-        "            last_bucket = bucket\n"
-        "        if status == 'completed':\n"
-        "            print('download_status: completed')\n"
-        "            raise SystemExit(0)\n"
-        "        if status in {'failed', 'cancelled'}:\n"
-        "            error = current.get('error') or ('download ' + status)\n"
-        "            raise RuntimeError('oMLX download failed for ' + repo_id + ': ' + str(error))\n"
-        "        time.sleep(2)\n"
-        "    raise TimeoutError('Timed out waiting for oMLX download ' + repo_id)\n"
-        "finally:\n"
-        "    if server_started and server_proc is not None:\n"
-        "        if server_proc.poll() is None:\n"
-        "            server_proc.terminate()\n"
-        "            try:\n"
-        "                server_proc.wait(timeout=10)\n"
-        "            except subprocess.TimeoutExpired:\n"
-        "                server_proc.kill()\n"
-        "                server_proc.wait(timeout=10)\n"
-        "PY"
-    )
-
-
-def _remote_cache_sync_command(
-    *,
-    repo_id: str,
-    runtime_node: Node,
-    node_home_dir: str,
-    transport_host: str,
-    ssh_host_key_alias: str | None,
-) -> tuple[str, str, str]:
-    identity = build_artifact_identity(repo_id)
-    source_root = '${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}'
-    source_path = f"{source_root}/{identity.model_dir_name}/"
-    remote_omlx_models_dir = f"{node_home_dir}/.omlx/models"
-    remote_model_parent_dir = f"{remote_omlx_models_dir}/{identity.namespace}"
-    destination = f"{runtime_node.user}@{transport_host}:{remote_omlx_models_dir}/{identity.model_dir_name}/"
-
-    ssh_options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
-    if ssh_host_key_alias:
-        ssh_options.extend(["-o", f"HostKeyAlias={ssh_host_key_alias}"])
-
-    ssh_mkdir_cmd = " ".join(
-        shlex.quote(arg)
-        for arg in [
-            "ssh",
-            *ssh_options,
-            f"{runtime_node.user}@{transport_host}",
-            "mkdir",
-            "-p",
-            remote_model_parent_dir,
-        ]
-    )
-    rsync_cmd = " ".join(
-        shlex.quote(arg)
-        for arg in [
-            "rsync",
-            "-a",
-            "--progress",
-            "--partial-dir=.rsync-partial",
-            "--exclude",
-            ".cache/",
-            "-e",
-            "ssh " + " ".join(shlex.quote(option) for option in ssh_options),
-            "__TF_SOURCE_PATH__",
-            destination,
-        ]
-    ).replace(shlex.quote("__TF_SOURCE_PATH__"), '"$SOURCE_PATH"')
-
-    command = (
-        "set -euo pipefail; "
-        'CACHE_ROOT="${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"; '
-        f'SOURCE_PATH="$CACHE_ROOT/{identity.model_dir_name}/"; '
-        'if [[ ! -d "$SOURCE_PATH" ]]; then '
-        'echo "missing cache oMLX model dir: $SOURCE_PATH" >&2; '
-        "exit 2; "
-        "fi; "
-        'test -f "$SOURCE_PATH/config.json" || { '
-        'echo "incomplete cache oMLX model dir: missing config.json: $SOURCE_PATH" >&2; '
-        "exit 2; "
-        "}; "
-        'test -z "$(find "$SOURCE_PATH" -name \'*.incomplete\' -print -quit)" || { '
-        'echo "incomplete cache oMLX model dir: partial artifact present: $SOURCE_PATH" >&2; '
-        "exit 2; "
-        "}; "
-        'test ! -e "$SOURCE_PATH/.rsync-partial" || { '
-        'echo "incomplete cache oMLX model dir: rsync partial dir present: $SOURCE_PATH" >&2; '
-        "exit 2; "
-        "}; "
-        'test -n "$(find "$SOURCE_PATH" \\( -name \'*.safetensors\' -o -name \'*.bin\' \\) -type f -print -quit)" || { '
-        'echo "incomplete cache oMLX model dir: no weight files found: $SOURCE_PATH" >&2; '
-        "exit 2; "
-        "}; "
-        f"{ssh_mkdir_cmd}; "
-        f"{rsync_cmd}"
-    )
-    return source_path, destination, command
-
-
-def _remote_transport_plan_probe_command(*, payload_b64: str) -> str:
-    return (
-        "python3 - <<'PY'\n"
-        "import base64\n"
-        "import ipaddress\n"
-        "import json\n"
-        "import platform\n"
-        "import re\n"
-        "import subprocess\n"
-        f"payload = json.loads(base64.b64decode({payload_b64!r}).decode())\n"
-        "requested_transport = payload['requested_transport']\n"
-        "management_host = payload['management_host']\n"
-        "node_user = payload['node_user']\n"
-        "fabric_host = payload['fabric_host']\n"
-        "timeout = payload['timeout']\n"
-        "plan = {\n"
-        "    'requested_transport': requested_transport,\n"
-        "    'management_host': management_host,\n"
-        "    'transport_host': management_host,\n"
-        "    'resolved_transport_host': management_host,\n"
-        "    'fabric_fallback': '',\n"
-        "    'error': '',\n"
-        "}\n"
-        "if requested_transport not in {'auto', 'fabric', 'management'}:\n"
-        "    plan['error'] = '--transport must be one of: auto, fabric, management'\n"
-        "elif requested_transport == 'management':\n"
-        "    pass\n"
-        "elif not fabric_host:\n"
-        "    if requested_transport == 'fabric':\n"
-        "        plan['error'] = 'fabric probe disabled for node'\n"
-        "else:\n"
-        "    def _run(cmd, extra_timeout=0):\n"
-        "        try:\n"
-        "            return subprocess.run(\n"
-        "                cmd,\n"
-        "                check=False,\n"
-        "                capture_output=True,\n"
-        "                text=True,\n"
-        "                timeout=timeout + extra_timeout,\n"
-        "            )\n"
-        "        except (FileNotFoundError, subprocess.TimeoutExpired):\n"
-        "            return None\n"
-        "    def _extract_thunderbolt_devices(text):\n"
-        "        devices = set()\n"
-        "        for block in re.split(r'\\n\\s*\\n', text):\n"
-        "            if 'Thunderbolt' not in block:\n"
-        "                continue\n"
-        "            match = re.search(r'^Device:\\s*(\\S+)\\s*$', block, flags=re.MULTILINE)\n"
-        "            if match:\n"
-        "                devices.add(match.group(1))\n"
-        "        return devices\n"
-        "    def _acceptable(address):\n"
-        "        try:\n"
-        "            parsed = ipaddress.ip_address(address)\n"
-        "        except ValueError:\n"
-        "            return False\n"
-        "        return parsed.version == 4 and parsed.is_link_local\n"
-        "    def _extract_link_local_ipv4(text, allowed_interfaces):\n"
-        "        addresses = []\n"
-        "        current_interface = ''\n"
-        "        for line in text.splitlines():\n"
-        "            interface_match = re.match(r'^([A-Za-z0-9._-]+):', line)\n"
-        "            if interface_match:\n"
-        "                current_interface = interface_match.group(1)\n"
-        "            if current_interface not in allowed_interfaces:\n"
-        "                continue\n"
-        "            match = re.search(r'\\binet\\s+(169\\.254\\.\\d{1,3}\\.\\d{1,3})\\b', line)\n"
-        "            if match:\n"
-        "                address = match.group(1)\n"
-        "                if _acceptable(address) and address not in addresses:\n"
-        "                    addresses.append(address)\n"
-        "        return addresses\n"
-        "    def _route_uses_allowed_interface(address, allowed_interfaces):\n"
-        "        result = _run(['route', '-n', 'get', address])\n"
-        "        if result is None or result.returncode != 0:\n"
-        "            return False\n"
-        "        match = re.search(r'^\\s*interface:\\s*(\\S+)\\s*$', result.stdout, flags=re.MULTILINE)\n"
-        "        return bool(match and match.group(1) in allowed_interfaces)\n"
-        "    def _ssh_hostname_check(address):\n"
-        "        result = _run([\n"
-        "            'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',\n"
-        "            '-o', f'HostKeyAlias={management_host}',\n"
-        "            f'{node_user}@{address}', 'hostname'\n"
-        "        ], extra_timeout=8)\n"
-        "        return result is not None and result.returncode == 0\n"
-        "    resolved = None\n"
-        "    if platform.system() == 'Darwin':\n"
-        "        local_inventory = _run(['networksetup', '-listallhardwareports'])\n"
-        "        if local_inventory is not None and local_inventory.returncode == 0:\n"
-        "            local_devices = _extract_thunderbolt_devices(local_inventory.stdout)\n"
-        "            if local_devices:\n"
-        "                remote_inventory = _run([\n"
-        "                    'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',\n"
-        "                    f'{node_user}@{management_host}',\n"
-        "                    (\n"
-        "                        \"networksetup -listallhardwareports 2>/dev/null; \"\n"
-        "                        \"printf '\\n__TF_IFCONFIG__\\n'; ifconfig\"\n"
-        "                    ),\n"
-        "                ], extra_timeout=8)\n"
-        "                if remote_inventory is not None and remote_inventory.returncode == 0:\n"
-        "                    inventory, _, ifconfig_text = remote_inventory.stdout.partition('__TF_IFCONFIG__')\n"
-        "                    remote_devices = _extract_thunderbolt_devices(inventory)\n"
-        "                    for address in _extract_link_local_ipv4(\n"
-        "                        ifconfig_text, remote_devices\n"
-        "                    ):\n"
-        "                        if _route_uses_allowed_interface(\n"
-        "                            address, local_devices\n"
-        "                        ) and _ssh_hostname_check(address):\n"
-        "                            resolved = address\n"
-        "                            break\n"
-        "    if resolved is not None:\n"
-        "        plan['transport_host'] = resolved\n"
-        "        plan['resolved_transport_host'] = resolved\n"
-        "    elif requested_transport == 'fabric':\n"
-        "        plan['error'] = 'no reachable fabric address discovered'\n"
-        "    else:\n"
-        "        plan['fabric_fallback'] = 'dynamic probe unresolved'\n"
-        "print('__TF_TRANSPORT_PLAN__' + json.dumps(plan, sort_keys=True))\n"
-        "PY"
-    )
 
 
 def _resolve_transport_plan_for_sync(
@@ -1286,7 +867,7 @@ def _list_node_cache_model_dirs(runtime_node: Node, *, timeout: int) -> list[str
         if not line:
             continue
         if line.startswith(prefix):
-            line = line[len(prefix) :]
+            line = line.removeprefix(prefix)
         if "/" not in line:
             continue
         model_dirs.append(line)
@@ -1628,7 +1209,7 @@ def _omlx_version_for_node(runtime_node: Node) -> str:
 def _latest_olla_release_version(*, timeout: int = 5) -> str:
     request = urllib.request.Request(LATEST_OLLA_RELEASE_API, headers={"User-Agent": "thunder-forge"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode())
     except (OSError, TimeoutError, ValueError, TypeError):
         return ""
@@ -3082,39 +2663,31 @@ def artifact_status(
             typer.echo(f"  - {action.value}")
 
 
-@artifact_app.command("download")
-def artifact_download(
-    model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
-    dry_run: bool = typer.Option(
-        True,
-        "--dry-run/--apply",
-        help="Print download command without executing by default.",
-    ),
-    timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for model download when applying."),
-) -> None:
-    """Download a model directly into cache role's oMLX model directory."""
-    config, _ = _load_config()
-    remote_cache_target = _remote_cache_target(config)
-    identity = build_artifact_identity(model)
+def _artifact_download_display(plan: ArtifactDownloadPlan, *, remote_cache: bool) -> tuple[str, str]:
+    if not remote_cache:
+        return plan.destination, plan.command
 
-    _load_repo_dotenv()
-    plan = build_artifact_download_plan(
-        repo_id=model,
-        cache_omlx_models_dir=cache_omlx_models_dir_from_env(),
+    remote_cache_root = '${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}'
+    display_destination = f"{remote_cache_root}/{plan.model_dir_name}"
+    display_command = (
+        "python3 remote-helper (cache host) -> "
+        "omlx serve --host 127.0.0.1 --port 8020 "
+        f"--model-dir {remote_cache_root}; "
+        f"POST http://127.0.0.1:8020/admin/api/hf/download repo_id={plan.repo_id} hf_token=$HF_TOKEN"
     )
+    return display_destination, display_command
 
-    if remote_cache_target is not None:
-        remote_cache_root = '${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}'
-        display_destination = f"{remote_cache_root}/{identity.model_dir_name}"
-        display_command = (
-            "python3 remote-helper (cache host) -> "
-            "omlx serve --host 127.0.0.1 --port 8020 "
-            f"--model-dir {remote_cache_root}; "
-            f"POST http://127.0.0.1:8020/admin/api/hf/download repo_id={model} hf_token=$HF_TOKEN"
-        )
-    else:
-        display_destination = plan.destination
-        display_command = plan.command
+
+def _print_artifact_download_plan(
+    *,
+    model: str,
+    plan: ArtifactDownloadPlan,
+    remote_cache_target: tuple[str, Node] | None,
+) -> None:
+    display_destination, display_command = _artifact_download_display(
+        plan,
+        remote_cache=remote_cache_target is not None,
+    )
 
     typer.echo(f"model: {model}")
     typer.echo(f"model_dir_name: {plan.model_dir_name}")
@@ -3123,32 +2696,36 @@ def artifact_download(
     typer.echo("action: download_to_cache_omlx")
     typer.echo(f"command: {display_command}")
 
-    if dry_run:
-        typer.echo("mode: dry-run")
-        return
 
-    if remote_cache_target is not None:
-        cache_name, cache_node = remote_cache_target
-        typer.echo(f"cache_exec: remote {cache_name} ({cache_node.host})")
-        result = ssh_run(
-            cache_node.user,
-            cache_node.host,
-            _remote_artifact_download_command(
-                repo_id=model,
-                model_dir_name=plan.model_dir_name,
-                timeout=timeout,
-            ),
-            timeout=max(timeout + 120, 300),
-            stream=True,
-            shell=cache_node.shell,
-            node_name=cache_name,
-        )
-        if result.returncode != 0:
-            typer.echo(f"Error: download failed with exit code {result.returncode}", err=True)
-            raise typer.Exit(result.returncode)
-        typer.echo("status: downloaded")
-        return
+def _run_remote_artifact_download(
+    *,
+    model: str,
+    plan: ArtifactDownloadPlan,
+    remote_cache_target: tuple[str, Node],
+    timeout: int,
+) -> None:
+    cache_name, cache_node = remote_cache_target
+    typer.echo(f"cache_exec: remote {cache_name} ({cache_node.host})")
+    result = ssh_run(
+        cache_node.user,
+        cache_node.host,
+        _remote_artifact_download_command(
+            repo_id=model,
+            model_dir_name=plan.model_dir_name,
+            timeout=timeout,
+        ),
+        timeout=max(timeout + 120, 300),
+        stream=True,
+        shell=cache_node.shell,
+        node_name=cache_name,
+    )
+    if result.returncode != 0:
+        typer.echo(f"Error: download failed with exit code {result.returncode}", err=True)
+        raise typer.Exit(result.returncode)
+    typer.echo("status: downloaded")
 
+
+def _artifact_download_progress_printer() -> Callable[[dict], None]:
     last_progress_bucket: int | None = None
     last_progress_status: str | None = None
 
@@ -3174,13 +2751,198 @@ def artifact_download(
         else:
             typer.echo(f"download_progress: {status}")
 
-    result = run_artifact_download(plan, timeout=timeout, progress_callback=print_progress)
+    return print_progress
+
+
+def _run_local_artifact_download(plan: ArtifactDownloadPlan, *, timeout: int) -> None:
+    result = run_artifact_download(
+        plan,
+        timeout=timeout,
+        progress_callback=_artifact_download_progress_printer(),
+    )
     if result.returncode != 0:
         typer.echo(f"Error: download failed with exit code {result.returncode}", err=True)
         if result.stderr:
             typer.echo(result.stderr, err=True)
         raise typer.Exit(result.returncode)
     typer.echo("status: downloaded")
+
+
+@artifact_app.command("download")
+def artifact_download(
+    model: str = typer.Option(..., "--model", help="Hugging Face model repo id."),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print download command without executing by default.",
+    ),
+    timeout: int = typer.Option(7200, "--timeout", help="Timeout in seconds for model download when applying."),
+) -> None:
+    """Download a model directly into cache role's oMLX model directory."""
+    config, _ = _load_config()
+    remote_cache_target = _remote_cache_target(config)
+
+    _load_repo_dotenv()
+    plan = build_artifact_download_plan(
+        repo_id=model,
+        cache_omlx_models_dir=cache_omlx_models_dir_from_env(),
+    )
+
+    _print_artifact_download_plan(model=model, plan=plan, remote_cache_target=remote_cache_target)
+    if dry_run:
+        typer.echo("mode: dry-run")
+        return
+
+    if remote_cache_target is not None:
+        _run_remote_artifact_download(
+            model=model,
+            plan=plan,
+            remote_cache_target=remote_cache_target,
+            timeout=timeout,
+        )
+        return
+
+    _run_local_artifact_download(plan, timeout=timeout)
+
+
+def _remote_cache_target_for_artifact_workflow(config: ClusterConfig) -> tuple[str, Node] | None:
+    if os.environ.get(REMOTE_CACHE_EXEC_ENV) == "1":
+        return None
+    cache_target = _first_cache_node(config)
+    if cache_target is None:
+        return None
+    cache_name, cache_node = cache_target
+    if _is_local_host(cache_node.host):
+        return None
+    return cache_name, cache_node
+
+
+def _build_artifact_sync_execution_plan(
+    *,
+    repo_id: str,
+    node: str,
+    runtime_node: Node,
+    node_home_dir: str,
+    cache_omlx_models_dir: str,
+    transport_plan: TransportPlan,
+    remote_cache_target: tuple[str, Node] | None,
+) -> ArtifactSyncExecutionPlan:
+    ssh_host_key_alias = runtime_node.host if transport_plan.uses_fabric else None
+    if remote_cache_target is not None:
+        source_path, destination, command = _remote_cache_sync_command(
+            repo_id=repo_id,
+            runtime_node=runtime_node,
+            node_home_dir=node_home_dir,
+            transport_host=transport_plan.resolved_transport_host,
+            ssh_host_key_alias=ssh_host_key_alias,
+        )
+        identity = build_artifact_identity(repo_id)
+        return ArtifactSyncExecutionPlan(
+            source_path=source_path,
+            destination=destination,
+            command=command,
+            runtime_model_id=identity.runtime_model_id,
+            model_dir_name=identity.model_dir_name,
+            readiness_actions=[],
+        )
+
+    presence = probe_artifact_presence(
+        repo_id=repo_id,
+        node_user=runtime_node.user,
+        node_host=runtime_node.host,
+        node_home_dir=node_home_dir,
+        cache_omlx_models_dir=cache_omlx_models_dir,
+    )
+    readiness_plan = build_artifact_readiness_plan(
+        repo_id=repo_id,
+        node=node,
+        node_home_dir=node_home_dir,
+        presence=presence,
+        cache_omlx_models_dir=cache_omlx_models_dir,
+    )
+    sync_plan = build_artifact_sync_plan(
+        repo_id=repo_id,
+        node_user=runtime_node.user,
+        node_host=transport_plan.resolved_transport_host,
+        node_home_dir=node_home_dir,
+        cache_omlx_models_dir=cache_omlx_models_dir,
+        ssh_host_key_alias=ssh_host_key_alias,
+    )
+    return ArtifactSyncExecutionPlan(
+        source_path=sync_plan.source_path,
+        destination=sync_plan.destination,
+        command=sync_plan.command,
+        runtime_model_id=sync_plan.runtime_model_id,
+        model_dir_name=sync_plan.model_dir_name,
+        readiness_actions=readiness_plan.actions,
+        sync_plan=sync_plan,
+    )
+
+
+def _print_artifact_sync_execution_plan(
+    *,
+    node: str,
+    runtime_node: Node,
+    repo_id: str,
+    plan: ArtifactSyncExecutionPlan,
+    transport_plan: TransportPlan,
+) -> None:
+    typer.echo(f"model: {repo_id}")
+    typer.echo(f"model_dir_name: {plan.model_dir_name}")
+    typer.echo(f"runtime_model_id: {plan.runtime_model_id}")
+    _print_runtime_node_header(node, runtime_node)
+    typer.echo("source: cache")
+    typer.echo(f"transport_host: {transport_plan.transport_host}")
+    if transport_plan.resolved_transport_host != transport_plan.transport_host:
+        typer.echo(f"resolved_transport_host: {transport_plan.resolved_transport_host}")
+    if transport_plan.fabric_fallback:
+        typer.echo(f"fabric_fallback: {transport_plan.fabric_fallback}")
+    typer.echo(f"source_path: {plan.source_path}")
+    typer.echo(f"destination: {plan.destination}")
+    typer.echo("action: sync_to_node_omlx")
+    typer.echo(f"command: {plan.command}")
+
+
+def _local_artifact_sync_needed(plan: ArtifactSyncExecutionPlan) -> bool:
+    if ArtifactReadinessAction.DOWNLOAD_TO_CACHE_OMLX in plan.readiness_actions:
+        typer.echo(
+            "Error: cache oMLX model directory is missing or incomplete; "
+            "download the model to cache oMLX models first",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if ArtifactReadinessAction.SYNC_TO_NODE_OMLX not in plan.readiness_actions:
+        typer.echo("status: sync not needed")
+        return False
+    return True
+
+
+def _run_artifact_sync_execution(
+    *,
+    plan: ArtifactSyncExecutionPlan,
+    remote_cache_target: tuple[str, Node] | None,
+    timeout: int,
+) -> None:
+    if remote_cache_target is None:
+        if plan.sync_plan is None:
+            msg = "local artifact sync plan is missing"
+            raise RuntimeError(msg)
+        result = run_artifact_sync(plan.sync_plan, timeout=timeout)
+    else:
+        cache_name, cache_node = remote_cache_target
+        result = ssh_run(
+            cache_node.user,
+            cache_node.host,
+            plan.command,
+            timeout=timeout,
+            stream=True,
+            shell=cache_node.shell,
+            node_name=cache_name,
+        )
+    if result.returncode != 0:
+        typer.echo(f"Error: sync failed with exit code {result.returncode}", err=True)
+        raise typer.Exit(result.returncode)
+    typer.echo("status: synced")
 
 
 def _run_artifact_sync_workflow(
@@ -3193,31 +2955,7 @@ def _run_artifact_sync_workflow(
     management: bool,
     timeout: int,
 ) -> None:
-    remote_cache_target: tuple[str, Node] | None = None
-    if os.environ.get(REMOTE_CACHE_EXEC_ENV) != "1":
-        cache_target = _first_cache_node(config)
-        if cache_target is not None:
-            cache_name, cache_node = cache_target
-            if not _is_local_host(cache_node.host):
-                remote_cache_target = (cache_name, cache_node)
-
-    sync_mode = "--dry-run" if dry_run else "--apply"
-    sync_args = [
-        "artifact",
-        "sync",
-        "--node",
-        node,
-        sync_mode,
-        "--transport",
-        transport,
-        "--timeout",
-        str(timeout),
-    ]
-    if model:
-        sync_args.extend(["--model", model])
-    if management:
-        sync_args.append("--management")
-
+    remote_cache_target = _remote_cache_target_for_artifact_workflow(config)
     runtime_node = _get_runtime_node(config, node)
     node_home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
     cache_omlx_models_dir = cache_omlx_models_dir_from_env()
@@ -3248,93 +2986,34 @@ def _run_artifact_sync_workflow(
         if len(repo_ids) > 1:
             typer.echo("")
             typer.echo(f"== Model {index}/{len(repo_ids)} ==")
-        if remote_cache_target is None:
-            presence = probe_artifact_presence(
-                repo_id=repo_id,
-                node_user=runtime_node.user,
-                node_host=runtime_node.host,
-                node_home_dir=node_home_dir,
-                cache_omlx_models_dir=cache_omlx_models_dir,
-            )
-            readiness_plan = build_artifact_readiness_plan(
-                repo_id=repo_id,
-                node=node,
-                node_home_dir=node_home_dir,
-                presence=presence,
-                cache_omlx_models_dir=cache_omlx_models_dir,
-            )
-            sync_plan = build_artifact_sync_plan(
-                repo_id=repo_id,
-                node_user=runtime_node.user,
-                node_host=transport_plan.resolved_transport_host,
-                node_home_dir=node_home_dir,
-                cache_omlx_models_dir=cache_omlx_models_dir,
-                ssh_host_key_alias=runtime_node.host if transport_plan.uses_fabric else None,
-            )
-            source_path = sync_plan.source_path
-            destination = sync_plan.destination
-            command = sync_plan.command
-            runtime_model_id = sync_plan.runtime_model_id
-            model_dir_name = sync_plan.model_dir_name
-        else:
-            source_path, destination, command = _remote_cache_sync_command(
-                repo_id=repo_id,
-                runtime_node=runtime_node,
-                node_home_dir=node_home_dir,
-                transport_host=transport_plan.resolved_transport_host,
-                ssh_host_key_alias=runtime_node.host if transport_plan.uses_fabric else None,
-            )
-            identity = build_artifact_identity(repo_id)
-            runtime_model_id = identity.runtime_model_id
-            model_dir_name = identity.model_dir_name
+        sync_execution_plan = _build_artifact_sync_execution_plan(
+            repo_id=repo_id,
+            node=node,
+            runtime_node=runtime_node,
+            node_home_dir=node_home_dir,
+            cache_omlx_models_dir=cache_omlx_models_dir,
+            transport_plan=transport_plan,
+            remote_cache_target=remote_cache_target,
+        )
+        _print_artifact_sync_execution_plan(
+            node=node,
+            runtime_node=runtime_node,
+            repo_id=repo_id,
+            plan=sync_execution_plan,
+            transport_plan=transport_plan,
+        )
 
-        typer.echo(f"model: {repo_id}")
-        typer.echo(f"model_dir_name: {model_dir_name}")
-        typer.echo(f"runtime_model_id: {runtime_model_id}")
-        _print_runtime_node_header(node, runtime_node)
-        typer.echo("source: cache")
-        typer.echo(f"transport_host: {transport_plan.transport_host}")
-        if transport_plan.resolved_transport_host != transport_plan.transport_host:
-            typer.echo(f"resolved_transport_host: {transport_plan.resolved_transport_host}")
-        if transport_plan.fabric_fallback:
-            typer.echo(f"fabric_fallback: {transport_plan.fabric_fallback}")
-        typer.echo(f"source_path: {source_path}")
-        typer.echo(f"destination: {destination}")
-        typer.echo("action: sync_to_node_omlx")
-        typer.echo(f"command: {command}")
-
-        if remote_cache_target is None:
-            if ArtifactReadinessAction.DOWNLOAD_TO_CACHE_OMLX in readiness_plan.actions:
-                typer.echo(
-                    "Error: cache oMLX model directory is missing or incomplete; "
-                    "download the model to cache oMLX models first",
-                    err=True,
-                )
-                raise typer.Exit(1)
-            if ArtifactReadinessAction.SYNC_TO_NODE_OMLX not in readiness_plan.actions:
-                typer.echo("status: sync not needed")
-                continue
+        if remote_cache_target is None and not _local_artifact_sync_needed(sync_execution_plan):
+            continue
         if dry_run:
             typer.echo("mode: dry-run")
             continue
 
-        if remote_cache_target is None:
-            result = run_artifact_sync(sync_plan, timeout=timeout)
-        else:
-            cache_name, cache_node = remote_cache_target
-            result = ssh_run(
-                cache_node.user,
-                cache_node.host,
-                command,
-                timeout=timeout,
-                stream=True,
-                shell=cache_node.shell,
-                node_name=cache_name,
-            )
-        if result.returncode != 0:
-            typer.echo(f"Error: sync failed with exit code {result.returncode}", err=True)
-            raise typer.Exit(result.returncode)
-        typer.echo("status: synced")
+        _run_artifact_sync_execution(
+            plan=sync_execution_plan,
+            remote_cache_target=remote_cache_target,
+            timeout=timeout,
+        )
 
     if len(repo_ids) > 1:
         status = "node sync dry-run complete" if dry_run else "node sync complete"

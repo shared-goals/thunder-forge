@@ -27,6 +27,21 @@ def test_ssh_run_uses_strict_host_key_checking_by_default(monkeypatch) -> None:
     assert "StrictHostKeyChecking=no" not in calls[0]
 
 
+def test_ssh_run_uses_batch_mode_for_remote_hosts(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ssh_module, "_is_local", lambda ip: False)
+    monkeypatch.setattr(ssh_module.subprocess, "run", fake_run)
+
+    ssh_module.ssh_run("shag", "infer-01.lan", "true")
+
+    assert "BatchMode=yes" in calls[0]
+
+
 def test_ssh_run_allows_host_key_policy_override(monkeypatch) -> None:
     calls: list[list[str]] = []
 

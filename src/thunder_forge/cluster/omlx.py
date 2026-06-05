@@ -1003,7 +1003,7 @@ def _apply_omlx_launchd_update(
             result.health_ok = health.health_ok
             if not result.health_ok:
                 result.errors.extend(health.errors)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             result.errors.append(f"Health check failed: {exc}")
 
     result.applied = True
@@ -1053,7 +1053,7 @@ def _apply_omlx_daemon_update(
             result.health_ok = health.health_ok
             if not result.health_ok:
                 result.errors.extend(health.errors)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             result.errors.append(f"Health check failed: {exc}")
 
     result.applied = True
@@ -1180,7 +1180,7 @@ def run_omlx_daemon_setup(
             result.health_ok = health.health_ok
             if not result.health_ok:
                 result.errors.extend(health.errors)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             result.errors.append(f"Health check failed: {exc}")
 
     return result
@@ -1212,7 +1212,7 @@ def run_omlx_process_restart(node: Node, *, apply: bool = True, timeout: int = 6
         result.health_ok = health.health_ok
         if not result.health_ok:
             result.errors.extend(health.errors)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         result.errors.append(f"Health check failed: {exc}")
 
     result.applied = True

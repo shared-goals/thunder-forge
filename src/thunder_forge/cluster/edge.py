@@ -956,10 +956,10 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
         def _is_client_disconnect(exc: BaseException) -> bool:
             return isinstance(exc, (BrokenPipeError, ConnectionResetError))
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             self._handle_edge_request()
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             self._handle_edge_request()
 
         def log_message(self, format: str, *args: object) -> None:

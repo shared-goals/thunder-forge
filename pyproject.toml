@@ -4,17 +4,17 @@ version = "0.2.0"
 description = "CLI for managing a local MLX inference cluster"
 requires-python = ">=3.12"
 dependencies = [
-    "httpx>=0.27",
-    "python-dotenv>=1.0",
+    "httpx>=0.28",
+    "python-dotenv>=1.2",
     "pyyaml>=6.0",
-    "typer>=0.15",
+    "typer>=0.26",
 ]
 
 [project.scripts]
 thunder-forge = "thunder_forge.cli:app"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.30"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -22,12 +22,8 @@ packages = ["src/thunder_forge"]
 
 [dependency-groups]
 dev = [
-    "bcrypt>=4.2",
-    "httpx>=0.27",
-    "paramiko>=5.0.0",
-    "psycopg[binary]>=3.2",
-    "pytest>=8.0",
-    "ruff>=0.11",
+    "pytest>=9.0",
+    "ruff>=0.15",
 ]
 
 [tool.ruff]
@@ -37,9 +33,5 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
-[tool.ruff.lint.per-file-ignores]
-"v1/**/*.py" = ["ALL"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--ignore=v1"

@@ -151,7 +151,7 @@ def _download_text(url: str, *, timeout: int) -> str:
 
 def _download_bytes(url: str, *, timeout: int, progress: Progress | None = None) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "thunder-forge"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         total_raw = response.headers.get("Content-Length", "0")
         total = int(total_raw) if total_raw.isdigit() else 0
         chunks: list[bytes] = []

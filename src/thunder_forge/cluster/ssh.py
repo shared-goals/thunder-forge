@@ -120,6 +120,8 @@ def ssh_run(
         "ConnectTimeout=10",
         "-o",
         f"StrictHostKeyChecking={_strict_host_key_checking()}",
+        "-o",
+        "BatchMode=yes",
     ]
     if tty:
         ssh_cmd.append("-tt")
