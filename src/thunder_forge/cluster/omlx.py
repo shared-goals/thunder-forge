@@ -840,6 +840,7 @@ run_root "$CHOWN_BIN" -R "$NODE_USER":staff "$OMLX_RUN_DIR" "$OMLX_CACHE_DIR" "$
 run_root /usr/sbin/visudo -cf "$TMP_SUDOERS"
 
 NODE_UID="$(/usr/bin/id -u "$NODE_USER")"
+echo "launchd: restarting $LABEL"
 echo "launchd: stopping $LABEL"
 {system_launchd_stop_wait_script(uid_var="NODE_UID")}
 

@@ -1221,7 +1221,10 @@ def _assigned_repo_ids_for_node(config: ClusterConfig, node_name: str, runtime_n
 
 
 def _assigned_model_dirs_for_node(config: ClusterConfig, node_name: str, runtime_node: Node) -> set[str]:
-    return {build_artifact_identity(repo_id).model_dir_name for repo_id in _assigned_repo_ids_for_node(config, node_name, runtime_node)}
+    return {
+        build_artifact_identity(repo_id).model_dir_name
+        for repo_id in _assigned_repo_ids_for_node(config, node_name, runtime_node)
+    }
 
 
 def _list_node_cache_model_dirs(runtime_node: Node, *, timeout: int) -> list[str]:

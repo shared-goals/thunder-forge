@@ -193,6 +193,7 @@ THUNDER_FORGE_PLIST_{index}
     PLIST_PATH={shlex.quote(service.plist_path)}
     PROCESS_PATTERN={shlex.quote(process_pattern)}
 
+    echo \"launchd: restarting $LABEL\"
     echo \"launchd: stopping $LABEL\"
     {stop_wait_script}
     echo \"launchd: installing $LABEL\"
