@@ -310,6 +310,82 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
     assert runtime.trusted_network is True
 
 
+def test_parse_node_runtime_requires_type() -> None:
+    with pytest.raises(ValueError, match=r"nodes\.infer-03\.runtime\.type is required"):
+        parse_cluster_config(
+            {
+                "models": {},
+                "nodes": {
+                    "infer-03": {
+                        "host": "infer-03.lan",
+                        "ram_gb": 128,
+                        "roles": ["inference"],
+                        "runtime": {"port": 8018},
+                    }
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["no_cache", "trusted_network"])
+def test_parse_node_runtime_rejects_string_booleans(field: str) -> None:
+    with pytest.raises(ValueError, match=rf"nodes\.infer-03\.runtime\.{field} must be boolean true/false"):
+        parse_cluster_config(
+            {
+                "models": {},
+                "nodes": {
+                    "infer-03": {
+                        "host": "infer-03.lan",
+                        "ram_gb": 128,
+                        "roles": ["inference"],
+                        "runtime": {"type": "omlx", field: "false"},
+                    }
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("value", [0, "many"])
+def test_parse_node_runtime_rejects_invalid_max_concurrent_requests(value: object) -> None:
+    with pytest.raises(ValueError, match=r"nodes\.infer-03\.runtime\.max_concurrent_requests must"):
+        parse_cluster_config(
+            {
+                "models": {},
+                "nodes": {
+                    "infer-03": {
+                        "host": "infer-03.lan",
+                        "ram_gb": 128,
+                        "roles": ["inference"],
+                        "runtime": {
+                            "type": "omlx",
+                            "max_concurrent_requests": value,
+                        },
+                    }
+                },
+            }
+        )
+
+
+def test_parse_node_runtime_rejects_empty_string_options() -> None:
+    with pytest.raises(ValueError, match=r"nodes\.infer-03\.runtime\.mcp_config must not be empty"):
+        parse_cluster_config(
+            {
+                "models": {},
+                "nodes": {
+                    "infer-03": {
+                        "host": "infer-03.lan",
+                        "ram_gb": 128,
+                        "roles": ["inference"],
+                        "runtime": {
+                            "type": "omlx",
+                            "mcp_config": " ",
+                        },
+                    }
+                },
+            }
+        )
+
+
 def test_example_config_keeps_active_omlx_runtime_blocks_consistent() -> None:
     example_path = Path(__file__).parents[1] / "tfconfig.example.yaml"
     raw = yaml_lib.safe_load(example_path.read_text())
@@ -545,6 +621,49 @@ def test_lint_cluster_config_reports_unknown_models_and_exposure_warnings(tmp_pa
     ]
 
 
+def test_lint_cluster_config_reports_unusable_topology() -> None:
+    empty_config = parse_cluster_config({"models": {}, "nodes": {}})
+
+    empty_issues = lint_cluster_config(empty_config)
+
+    assert any(issue.severity == "error" and issue.path == "nodes" for issue in empty_issues)
+    assert any("gateway" in issue.message for issue in empty_issues)
+    assert any("inference" in issue.message for issue in empty_issues)
+
+    no_route_config = parse_cluster_config(
+        {
+            "models": {
+                "memory": {
+                    "source": {"repo": "mlx-community/gpt-oss-20b-MXFP4-Q8"},
+                    "runtime_model_id": "gpt-oss-20b-MXFP4-Q8",
+                }
+            },
+            "nodes": {
+                "gateway-cache-01": {
+                    "host": "gateway-cache-01.lan",
+                    "ram_gb": 64,
+                    "roles": ["gateway"],
+                },
+                "infer-03": {
+                    "host": "infer-03.lan",
+                    "ram_gb": 128,
+                    "roles": ["inference"],
+                    "runtime": {"type": "omlx", "port": 8018},
+                },
+            },
+        }
+    )
+
+    no_route_issues = lint_cluster_config(no_route_config)
+
+    assert any(
+        issue.severity == "error"
+        and issue.path == "nodes"
+        and "no routable model placements" in issue.message
+        for issue in no_route_issues
+    )
+
+
 def test_load_cluster_config_loads_dotenv(cluster_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """load_cluster_config loads .env from repo root."""
     import thunder_forge.cluster.config as config_module
@@ -572,8 +691,9 @@ def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, t
     (config_dir / "node-assignments.yaml").write_text("models: {}\nnodes: {}\n")
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(FileNotFoundError, match="tfconfig.yaml"):
+    with pytest.raises(FileNotFoundError) as exc_info:
         find_repo_root()
+    assert "tfconfig.yaml" in str(exc_info.value)
 
 
 def test_parse_model_info() -> None:
@@ -623,3 +743,18 @@ def test_parse_model_info_absent() -> None:
     }
     config = parse_cluster_config(raw)
     assert config.models["coder"].model_info is None
+
+
+def test_parse_model_rejects_obsolete_serving_key() -> None:
+    with pytest.raises(ValueError, match=r"models\.coder\.serving is not supported"):
+        parse_cluster_config(
+            {
+                "models": {
+                    "coder": {
+                        "source": {"type": "huggingface", "repo": "test/coder"},
+                        "serving": "chat",
+                    }
+                },
+                "nodes": {},
+            }
+        )

@@ -232,26 +232,40 @@ def smoke_olla_router(
 
         auth_headers = {"X-Olla-Session-ID": fixed_session_id}
         started = time.perf_counter()
+        backend_chat_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 16,
+            "temperature": 0,
+            "stream": False,
+        }
         try:
             response = client.post(
                 f"{OLLA_OPENAI_PREFIX}/chat/completions",
                 headers=auth_headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 16,
-                    "temperature": 0,
-                    "stream": False,
-                },
+                json=backend_chat_payload,
             )
             result.latency_ms = int((time.perf_counter() - started) * 1000)
             result.chat_ok = response.is_success
-            result.session_ok = response.request.headers.get("X-Olla-Session-ID") == fixed_session_id
             result.olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
             if not result.chat_ok:
                 result.errors.append(f"POST {OLLA_OPENAI_PREFIX}/chat/completions returned {response.status_code}")
-            if not result.session_ok:
-                result.errors.append("X-Olla-Session-ID was not preserved on backend-model request")
+            elif not result.olla_endpoint:
+                result.errors.append("backend-model response did not include X-Olla-Endpoint for session check")
+            else:
+                repeat = client.post(
+                    f"{OLLA_OPENAI_PREFIX}/chat/completions",
+                    headers=auth_headers,
+                    json=backend_chat_payload,
+                )
+                repeat_endpoint = repeat.headers.get("X-Olla-Endpoint", "")
+                result.session_ok = repeat.is_success and repeat_endpoint == result.olla_endpoint
+                if not repeat.is_success:
+                    result.errors.append(
+                        f"repeat POST {OLLA_OPENAI_PREFIX}/chat/completions returned {repeat.status_code}"
+                    )
+                elif repeat_endpoint != result.olla_endpoint:
+                    result.errors.append("same session routed to different endpoints")
         except httpx.HTTPError as exc:
             result.latency_ms = int((time.perf_counter() - started) * 1000)
             result.errors.append(f"POST {OLLA_OPENAI_PREFIX}/chat/completions failed: {exc}")
@@ -367,6 +381,7 @@ def _olla_service_spec(
     user: str,
 ) -> LaunchdServiceSpec:
     log_dir = repo_root / "logs"
+    user_home = _service_home_for_user(user)
     binary_path = binary.expanduser()
     config_file = config_path.expanduser()
     if not binary_path.is_absolute():
@@ -382,12 +397,21 @@ def _olla_service_spec(
         stdout_log=str(log_dir / f"olla-{port}.stdout.log"),
         stderr_log=str(log_dir / f"olla-{port}.stderr.log"),
         environment={
-            "HOME": str(Path.home()),
-            "PATH": f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": str(user_home),
+            "PATH": f"{user_home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         },
         process_pattern=process_pattern,
         user=user,
     )
+
+
+def _service_home_for_user(user: str) -> Path:
+    try:
+        import pwd
+
+        return Path(pwd.getpwnam(user).pw_dir)
+    except (ImportError, KeyError):
+        return Path.home()
 
 
 def _build_olla_launchd_result(

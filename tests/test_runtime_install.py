@@ -21,10 +21,10 @@ from thunder_forge.cluster.omlx import (
 )
 
 
-def _make_runtime_node(home_dir="/Users/shag", port=8018, model_dir=None):
+def _make_runtime_node(home_dir="/Users/shag", port=8018, model_dir=None, bind_host="0.0.0.0"):
     from thunder_forge.cluster.config import NodeRuntime
 
-    runtime = NodeRuntime(type=RuntimeType.OMLX, port=port, model_dir=model_dir)
+    runtime = NodeRuntime(type=RuntimeType.OMLX, port=port, model_dir=model_dir, bind_host=bind_host)
     return Node(
         host="infer-03.lan",
         fabric_host=False,
@@ -390,6 +390,23 @@ def test_run_omlx_process_restart_dry_run_describes_rootless_commands() -> None:
     assert not result.applied
     assert any("launchctl bootout user/$(id -u)/com.thunder-forge.omlx-8018" in c for c in result.commands)
     assert any("nohup" in c for c in result.commands)
+
+
+def test_omlx_stop_patterns_follow_configured_bind_host() -> None:
+    node = _make_runtime_node(bind_host="127.0.0.1")
+
+    launchd_result = run_omlx_runtime_restart(node, apply=False)
+    daemon_result = run_omlx_daemon_restart(node, apply=False)
+    process_result = run_omlx_process_restart(node, apply=False)
+    setup_script = generate_daemon_setup_script(node)
+
+    assert any(r"--host 127\.0\.0\.1 --port 8018" in command for command in launchd_result.commands)
+    assert any(r"--host 127\.0\.0\.1 --port 8018" in command for command in daemon_result.commands)
+    assert any(r"--host 127\.0\.0\.1 --port 8018" in command for command in process_result.commands)
+    assert r"--host 127\.0\.0\.1 --port 8018" in setup_script
+    assert r"--host 0\.0\.0\.0 --port 8018" not in "\n".join(
+        [*launchd_result.commands, *daemon_result.commands, *process_result.commands, setup_script]
+    )
 
 
 def test_run_omlx_process_restart_apply_records_pid_and_health(monkeypatch) -> None:

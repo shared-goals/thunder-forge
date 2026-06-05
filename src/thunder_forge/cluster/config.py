@@ -36,13 +36,6 @@ DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
 
 
-class ServingMode(StrEnum):
-    CHAT = "chat"
-    EMBEDDING = "embedding"
-    CLI = "cli"
-    MLX_OPENAI_SERVER = "mlx-openai-server"
-
-
 class RuntimeType(StrEnum):
     OMLX = "omlx"
 
@@ -119,7 +112,6 @@ class Model:
     ram_gb: float | None = None
     active_params: str = ""
     max_context: int = 0
-    serving: ServingMode | str = ""
     notes: str = ""
     extra_args: list[str] | None = None
     enable_thinking: bool | None = None
@@ -326,6 +318,9 @@ def _parse_service_port(raw: dict, service_name: str, default: int) -> int:
 def _parse_positive_int(raw: object, *, name: str, default: int) -> int:
     if raw is None:
         return default
+    if isinstance(raw, bool):
+        msg = f"{name} must be an integer"
+        raise ValueError(msg)
     try:
         value = int(raw)
     except (TypeError, ValueError) as exc:
@@ -358,6 +353,25 @@ def _parse_bool(raw: object, *, name: str, default: bool) -> bool:
         return raw
     msg = f"{name} must be boolean true/false"
     raise ValueError(msg)
+
+
+def _parse_optional_positive_int(raw: object, *, name: str) -> int | None:
+    if raw is None:
+        return None
+    return _parse_positive_int(raw, name=name, default=1)
+
+
+def _parse_optional_non_empty_string(raw: object, *, name: str, default: str | None = None) -> str | None:
+    if raw is None:
+        return default
+    if not isinstance(raw, str):
+        msg = f"{name} must be a string"
+        raise ValueError(msg)
+    value = raw.strip()
+    if not value:
+        msg = f"{name} must not be empty"
+        raise ValueError(msg)
+    return value
 
 
 def _parse_transport(raw: object, *, name: str, default: str) -> str:
@@ -465,26 +479,60 @@ def _parse_operations(raw: object) -> OperationConfig:
     )
 
 
-def _parse_node_runtime(raw: dict | None, *, default_port: int = DEFAULT_OMLX_PORT) -> NodeRuntime | None:
+def _parse_node_runtime(
+    raw: object,
+    *,
+    node_name: str,
+    default_port: int = DEFAULT_OMLX_PORT,
+) -> NodeRuntime | None:
     if raw is None:
         return None
+    path = f"nodes.{node_name}.runtime"
+    if not isinstance(raw, dict):
+        msg = f"{path} must be a mapping"
+        raise ValueError(msg)
+    runtime_type_raw = _parse_optional_non_empty_string(raw.get("type"), name=f"{path}.type")
+    if runtime_type_raw is None:
+        msg = f"{path}.type is required"
+        raise ValueError(msg)
+    try:
+        runtime_type = RuntimeType(runtime_type_raw)
+    except ValueError as exc:
+        msg = f"{path}.type must be one of: {', '.join(item.value for item in RuntimeType)}"
+        raise ValueError(msg) from exc
     return NodeRuntime(
-        type=RuntimeType(raw["type"]),
-        port=parse_port(raw.get("port", default_port), name="runtime.port"),
-        model_dir=raw.get("model_dir"),
-        bind_host=raw.get("bind_host", "0.0.0.0"),
-        base_path=raw.get("base_path"),
-        log_level=raw.get("log_level"),
-        max_model_memory=raw.get("max_model_memory"),
-        max_process_memory=raw.get("max_process_memory"),
-        max_concurrent_requests=raw.get("max_concurrent_requests"),
-        paged_ssd_cache_dir=raw.get("paged_ssd_cache_dir"),
-        paged_ssd_cache_max_size=raw.get("paged_ssd_cache_max_size"),
-        hot_cache_max_size=raw.get("hot_cache_max_size"),
-        no_cache=raw.get("no_cache", False),
-        mcp_config=raw.get("mcp_config"),
-        hf_endpoint=raw.get("hf_endpoint"),
-        trusted_network=raw.get("trusted_network", False),
+        type=runtime_type,
+        port=parse_port(raw.get("port", default_port), name=f"{path}.port"),
+        model_dir=_parse_optional_non_empty_string(raw.get("model_dir"), name=f"{path}.model_dir"),
+        bind_host=_parse_optional_non_empty_string(raw.get("bind_host"), name=f"{path}.bind_host", default="0.0.0.0")
+        or "0.0.0.0",
+        base_path=_parse_optional_non_empty_string(raw.get("base_path"), name=f"{path}.base_path"),
+        log_level=_parse_optional_non_empty_string(raw.get("log_level"), name=f"{path}.log_level"),
+        max_model_memory=_parse_optional_non_empty_string(raw.get("max_model_memory"), name=f"{path}.max_model_memory"),
+        max_process_memory=_parse_optional_non_empty_string(
+            raw.get("max_process_memory"),
+            name=f"{path}.max_process_memory",
+        ),
+        max_concurrent_requests=_parse_optional_positive_int(
+            raw.get("max_concurrent_requests"),
+            name=f"{path}.max_concurrent_requests",
+        ),
+        paged_ssd_cache_dir=_parse_optional_non_empty_string(
+            raw.get("paged_ssd_cache_dir"),
+            name=f"{path}.paged_ssd_cache_dir",
+        ),
+        paged_ssd_cache_max_size=_parse_optional_non_empty_string(
+            raw.get("paged_ssd_cache_max_size"),
+            name=f"{path}.paged_ssd_cache_max_size",
+        ),
+        hot_cache_max_size=_parse_optional_non_empty_string(
+            raw.get("hot_cache_max_size"),
+            name=f"{path}.hot_cache_max_size",
+        ),
+        no_cache=_parse_bool(raw.get("no_cache"), name=f"{path}.no_cache", default=False),
+        mcp_config=_parse_optional_non_empty_string(raw.get("mcp_config"), name=f"{path}.mcp_config"),
+        hf_endpoint=_parse_optional_non_empty_string(raw.get("hf_endpoint"), name=f"{path}.hf_endpoint"),
+        trusted_network=_parse_bool(raw.get("trusted_network"), name=f"{path}.trusted_network", default=False),
     )
 
 
@@ -520,6 +568,9 @@ def _default_runtime_model_id(model_id: str, raw: dict) -> str:
 
 
 def _parse_model(model_id: str, raw: dict) -> Model:
+    if "serving" in raw:
+        msg = f"models.{model_id}.serving is not supported; use model_info.mode for catalog metadata"
+        raise ValueError(msg)
     server_args_raw = raw.get("server_args")
     model_info_raw = raw.get("model_info")
     return Model(
@@ -531,7 +582,6 @@ def _parse_model(model_id: str, raw: dict) -> Model:
         ram_gb=raw.get("ram_gb"),
         active_params=raw.get("active_params", ""),
         max_context=raw.get("max_context", 0),
-        serving=ServingMode(raw["serving"]) if raw.get("serving") else "",
         notes=raw.get("notes", ""),
         extra_args=raw.get("extra_args"),
         enable_thinking=raw.get("enable_thinking"),
@@ -565,8 +615,10 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             admin_user=str(v.get("admin_user", "")).strip(),
             roles=roles,
             fabric_host=_parse_fabric_host(v.get("fabric_host"), node_name=k),
-            runtime=_parse_node_runtime(v.get("runtime"), default_port=services.omlx_port),
+            runtime=_parse_node_runtime(v.get("runtime"), node_name=k, default_port=services.omlx_port),
             models=list(v.get("models", [])),
+            platform=v.get("platform"),
+            shell=v.get("shell"),
             home_dir=v.get("home_dir"),
             homebrew_prefix=v.get("homebrew_prefix"),
         )
@@ -737,6 +789,38 @@ def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
             )
         else:
             runtime_model_ids[model.runtime_model_id] = model_id
+
+    gateway_nodes = [node for node in config.nodes.values() if node.has_role(NodeRole.GATEWAY)]
+    inference_nodes = [node for node in config.nodes.values() if node.has_role(NodeRole.INFERENCE)]
+    if not gateway_nodes:
+        issues.append(
+            ConfigLintIssue(
+                severity="error",
+                path="nodes",
+                message="no gateway node configured",
+            )
+        )
+    if not inference_nodes:
+        issues.append(
+            ConfigLintIssue(
+                severity="error",
+                path="nodes",
+                message="no inference node configured",
+            )
+        )
+    elif not any(
+        node.runtime is not None
+        and node.runtime.type == RuntimeType.OMLX
+        and any(model_id in config.models for model_id in node.models)
+        for node in inference_nodes
+    ):
+        issues.append(
+            ConfigLintIssue(
+                severity="error",
+                path="nodes",
+                message="no routable model placements configured for inference nodes",
+            )
+        )
 
     for node_name, node in config.nodes.items():
         if node.models and node.runtime is None:

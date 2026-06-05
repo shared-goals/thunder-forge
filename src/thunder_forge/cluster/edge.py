@@ -7,6 +7,7 @@ makes the edge behavior testable before wiring an ASGI/proxy process.
 
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import os
@@ -46,6 +47,7 @@ OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
 EDGE_USER_PREFIX = "TF_USER_"
 EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
 EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
+EDGE_DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"
@@ -89,6 +91,7 @@ class EdgeProxyConfig:
     access_log_sink: Callable[[str], None] | None = None
     model_catalog: list[EdgeModelCatalogEntry] = field(default_factory=list)
     timeout: float = 60.0
+    max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,15 @@ class EdgeProxyUpstreamRequest:
     client_id: str
     model: str
     started: float
+
+
+@dataclass(frozen=True)
+class EdgeUsageTokens:
+    """Token usage extracted from an upstream OpenAI-compatible JSON response."""
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 @dataclass
@@ -234,10 +246,12 @@ class EdgeAccessLog:
 def _bearer_token(authorization: str | None) -> str:
     if not authorization:
         return ""
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    scheme, separator, token = authorization.partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not token:
         return ""
-    return token.strip()
+    if token != token.strip() or " " in token:
+        return ""
+    return token
 
 
 def validate_edge_client_id(client_id: str) -> str:
@@ -250,6 +264,45 @@ def validate_edge_client_id(client_id: str) -> str:
         msg = "client id may contain only letters, numbers, dots, underscores, and dashes"
         raise ValueError(msg)
     return normalized
+
+
+def _client_id_env_suffix(client_id: str) -> str:
+    normalized = validate_edge_client_id(client_id)
+    suffix: list[str] = []
+    lowered = normalized.lower()
+    for index, char in enumerate(normalized):
+        if char == "-":
+            suffix.append("_DASH_")
+        elif char == ".":
+            suffix.append("_DOT_")
+        elif char == "_":
+            if lowered[index:].startswith(("_dash_", "_dot_", "_underscore_")):
+                suffix.append("_UNDERSCORE_")
+            else:
+                suffix.append("_")
+        else:
+            suffix.append(char.upper())
+    return "".join(suffix)
+
+
+def _client_id_from_env_suffix(env_suffix: str) -> str:
+    decoded: list[str] = []
+    index = 0
+    lowered = env_suffix.lower()
+    while index < len(lowered):
+        if lowered.startswith("_dash_", index):
+            decoded.append("-")
+            index += len("_dash_")
+        elif lowered.startswith("_dot_", index):
+            decoded.append(".")
+            index += len("_dot_")
+        elif lowered.startswith("_underscore_", index):
+            decoded.append("_")
+            index += len("_underscore_")
+        else:
+            decoded.append(lowered[index])
+            index += 1
+    return "".join(decoded)
 
 
 def _quote_dotenv_value(value: str) -> str:
@@ -276,7 +329,7 @@ def load_edge_user_keys_from_env(
         if key.startswith(prefix) and value.strip():
             suffix = key[len(prefix) :]
             if suffix:
-                client_id = suffix.lower()
+                client_id = _client_id_from_env_suffix(suffix)
                 try:
                     result[validate_edge_client_id(client_id)] = value.strip()
                 except ValueError:
@@ -292,13 +345,10 @@ def edge_api_key_from_env(
 ) -> tuple[str, str]:
     """Return (env_name, api_key) for one configured client id."""
     normalized = validate_edge_client_id(client_id)
-    # Build env var name: TF_USER_<SUFFIX> where suffix uppercases and replaces - and . with _
-    env_suffix = normalized.upper().replace("-", "_").replace(".", "_")
+    env_suffix = _client_id_env_suffix(normalized)
     env_name = f"{users_env}{env_suffix}"
-    # Effective id used as key in the users dict (lowercased suffix)
-    effective_id = env_suffix.lower()
     users = load_edge_user_keys_from_env(env=env, users_env=users_env)
-    return env_name, users.get(effective_id, "")
+    return env_name, users.get(normalized, "")
 
 
 def load_edge_clients_from_env(
@@ -309,6 +359,10 @@ def load_edge_clients_from_env(
     """Load all TF edge clients from TF_USER_<NAME> env vars."""
     clients: dict[str, EdgeClient] = {}
     for client_id, api_key in load_edge_user_keys_from_env(env=env, users_env=users_env).items():
+        existing = clients.get(api_key)
+        if existing is not None and existing.client_id != client_id:
+            msg = f"duplicate API key configured for edge clients: {existing.client_id}, {client_id}"
+            raise ValueError(msg)
         clients[api_key] = EdgeClient(client_id=client_id)
     return clients
 
@@ -374,7 +428,7 @@ def ensure_edge_api_keys(
         if not normalized or normalized in seen_clients:
             continue
         seen_clients.add(normalized)
-        env_suffix = normalized.upper().replace("-", "_").replace(".", "_")
+        env_suffix = _client_id_env_suffix(normalized)
         env_name = f"{users_env}{env_suffix}"
         existing = _get_env_value_from_lines(lines, env_name)
         if existing.strip():
@@ -399,10 +453,12 @@ def authenticate_edge_request(
 ) -> EdgeAuthResult:
     """Validate a static bearer token and map it to a client identity."""
     token = _bearer_token(authorization)
-    client = clients_by_key.get(token)
-    if client is None:
+    if not token:
         return EdgeAuthResult(allowed=False, status_code=401)
-    return EdgeAuthResult(allowed=True, status_code=200, client_id=client.client_id)
+    for configured_key, client in clients_by_key.items():
+        if hmac.compare_digest(token, configured_key):
+            return EdgeAuthResult(allowed=True, status_code=200, client_id=client.client_id)
+    return EdgeAuthResult(allowed=False, status_code=401)
 
 
 def _nearest_rank_percentile(values: list[int], percentile: float) -> int:
@@ -534,6 +590,9 @@ def build_edge_access_log(
     latency_ms: int,
     olla_endpoint: str = "",
     api_key: str = "",
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
 ) -> EdgeAccessLog:
     """Build a secret-free access/accounting log record."""
     _ = api_key  # Accepted only so callers cannot accidentally include it in the record.
@@ -547,6 +606,9 @@ def build_edge_access_log(
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
         node_name=derive_olla_node_name(olla_endpoint),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
     )
 
 
@@ -583,6 +645,32 @@ def _extract_model(body: bytes) -> str:
         return ""
     model = payload.get("model", "")
     return model if isinstance(model, str) else ""
+
+
+def _as_non_negative_int(raw: object) -> int | None:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if raw >= 0 else None
+
+
+def _extract_usage_tokens(body: bytes) -> EdgeUsageTokens:
+    payload = _decode_json_object(body)
+    if payload is None:
+        return EdgeUsageTokens()
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return EdgeUsageTokens()
+
+    prompt_tokens = _as_non_negative_int(usage.get("prompt_tokens"))
+    completion_tokens = _as_non_negative_int(usage.get("completion_tokens"))
+    total_tokens = _as_non_negative_int(usage.get("total_tokens"))
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    return EdgeUsageTokens(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 def _requests_streaming_response(method: str, body: bytes) -> bool:
@@ -637,20 +725,29 @@ def _edge_models_response(
         return None
 
     started = time.perf_counter()
+    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id="unauthenticated",
+            path=path,
+            model="",
+            status_code=auth.status_code,
+            started=started,
+        )
         return _json_response(401, {"error": "unauthorized"})
 
-    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
-    upstream = EdgeProxyUpstreamRequest(
-        olla_path="",
-        forwarded_headers={},
+    _record_edge_access_event(
+        config,
         request_id=request_id,
         client_id=auth.client_id,
+        path=path,
         model="",
+        status_code=200,
         started=started,
     )
-    _record_edge_access(config, upstream=upstream, path=path, status_code=200)
     return EdgeProxyResponse(
         status_code=200,
         headers={"Content-Type": "application/json"},
@@ -676,16 +773,47 @@ def _prepare_edge_upstream_request(
     config: EdgeProxyConfig,
 ) -> EdgeProxyUpstreamRequest | EdgeProxyResponse:
     started = time.perf_counter()
+    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    model = _extract_model(body)
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id="unauthenticated",
+            path=path,
+            model=model,
+            status_code=auth.status_code,
+            started=started,
+        )
         return _json_response(401, {"error": "unauthorized"})
 
     try:
         olla_path = rewrite_openai_path(path)
     except ValueError:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id=auth.client_id,
+            path=path,
+            model=model,
+            status_code=404,
+            started=started,
+        )
         return _json_response(404, {"error": "not_found"})
 
-    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    if config.max_body_bytes > 0 and len(body) > config.max_body_bytes:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id=auth.client_id,
+            path=path,
+            model=model,
+            status_code=413,
+            started=started,
+        )
+        return _json_response(413, {"error": "request_too_large"})
+
     session = ensure_olla_session_id(headers, request_id=request_id, client_id=auth.client_id)
     forwarded_headers = {
         "X-Olla-Session-ID": session.value,
@@ -700,9 +828,41 @@ def _prepare_edge_upstream_request(
         forwarded_headers=forwarded_headers,
         request_id=request_id,
         client_id=auth.client_id,
-        model=_extract_model(body),
+        model=model,
         started=started,
     )
+
+
+def _record_edge_access_event(
+    config: EdgeProxyConfig,
+    *,
+    request_id: str,
+    client_id: str,
+    path: str,
+    model: str,
+    status_code: int,
+    started: float,
+    olla_endpoint: str = "",
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+) -> None:
+    if config.access_log_sink is None:
+        return
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    log_record = build_edge_access_log(
+        request_id=request_id,
+        client_id=client_id,
+        path=path,
+        model=model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        olla_endpoint=olla_endpoint,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
+    config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
 
 def _record_edge_access(
@@ -712,20 +872,22 @@ def _record_edge_access(
     path: str,
     status_code: int,
     olla_endpoint: str = "",
+    usage_tokens: EdgeUsageTokens | None = None,
 ) -> None:
-    if config.access_log_sink is None:
-        return
-    latency_ms = int((time.perf_counter() - upstream.started) * 1000)
-    log_record = build_edge_access_log(
+    tokens = usage_tokens or EdgeUsageTokens()
+    _record_edge_access_event(
+        config,
         request_id=upstream.request_id,
         client_id=upstream.client_id,
         path=path,
         model=upstream.model,
         status_code=status_code,
-        latency_ms=latency_ms,
+        started=upstream.started,
         olla_endpoint=olla_endpoint,
+        prompt_tokens=tokens.prompt_tokens,
+        completion_tokens=tokens.completion_tokens,
+        total_tokens=tokens.total_tokens,
     )
-    config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
 
 def proxy_edge_request(
@@ -762,6 +924,12 @@ def proxy_edge_request(
         try:
             response = client.request(method, upstream.olla_path, headers=upstream.forwarded_headers, content=body)
         except httpx.HTTPError as exc:
+            _record_edge_access(
+                config,
+                upstream=upstream,
+                path=path,
+                status_code=502,
+            )
             return _json_response(502, {"error": f"upstream_failed: {exc}"})
 
     _record_edge_access(
@@ -770,6 +938,7 @@ def proxy_edge_request(
         path=path,
         status_code=response.status_code,
         olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
+        usage_tokens=_extract_usage_tokens(response.content),
     )
 
     return EdgeProxyResponse(
@@ -787,17 +956,43 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
         def _is_client_disconnect(exc: BaseException) -> bool:
             return isinstance(exc, (BrokenPipeError, ConnectionResetError))
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             self._handle_edge_request()
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             self._handle_edge_request()
 
         def log_message(self, format: str, *args: object) -> None:
             return
 
         def _handle_edge_request(self) -> None:
-            length = int(self.headers.get("Content-Length", "0") or "0")
+            headers = dict(self.headers.items())
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                self._send_edge_response(_json_response(400, {"error": "invalid_content_length"}))
+                return
+            if length < 0:
+                self._send_edge_response(_json_response(400, {"error": "invalid_content_length"}))
+                return
+            if config.max_body_bytes > 0 and length > config.max_body_bytes:
+                started = time.perf_counter()
+                request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+                auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
+                client_id = auth.client_id if auth.allowed else "unauthenticated"
+                status_code = 413 if auth.allowed else auth.status_code
+                _record_edge_access_event(
+                    config,
+                    request_id=request_id,
+                    client_id=client_id,
+                    path=self.path,
+                    model="",
+                    status_code=status_code,
+                    started=started,
+                )
+                error = "request_too_large" if auth.allowed else "unauthorized"
+                self._send_edge_response(_json_response(status_code, {"error": error}))
+                return
             body = self.rfile.read(length) if length else b""
             if _requests_streaming_response(self.command, body):
                 self._handle_streaming_edge_request(body)
@@ -805,7 +1000,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
             result = proxy_edge_request(
                 method=self.command,
                 path=self.path,
-                headers=dict(self.headers.items()),
+                headers=headers,
                 body=body,
                 config=config,
             )
@@ -832,6 +1027,21 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 self._send_edge_response(upstream)
                 return
 
+            logged = False
+
+            def record_stream(status_code: int, *, olla_endpoint: str = "") -> None:
+                nonlocal logged
+                if logged:
+                    return
+                _record_edge_access(
+                    config,
+                    upstream=upstream,
+                    path=self.path,
+                    status_code=status_code,
+                    olla_endpoint=olla_endpoint,
+                )
+                logged = True
+
             normalized_base_url = config.olla_base_url.rstrip("/")
             try:
                 with httpx.Client(base_url=normalized_base_url, timeout=config.timeout, trust_env=False) as client:
@@ -841,6 +1051,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         headers=upstream.forwarded_headers,
                         content=body,
                     ) as response:
+                        olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
                         self.send_response(response.status_code)
                         response_headers = _proxy_response_headers(response.headers)
                         response_headers.setdefault("Content-Type", "text/event-stream")
@@ -850,6 +1061,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                             self.end_headers()
                         except OSError as exc:
                             if self._is_client_disconnect(exc):
+                                record_stream(response.status_code, olla_endpoint=olla_endpoint)
                                 return
                             raise
                         for chunk in response.iter_bytes():
@@ -859,16 +1071,12 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                                     self.wfile.flush()
                                 except OSError as exc:
                                     if self._is_client_disconnect(exc):
+                                        record_stream(response.status_code, olla_endpoint=olla_endpoint)
                                         return
                                     raise
-                        _record_edge_access(
-                            config,
-                            upstream=upstream,
-                            path=self.path,
-                            status_code=response.status_code,
-                            olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
-                        )
+                        record_stream(response.status_code, olla_endpoint=olla_endpoint)
             except httpx.HTTPError as exc:
+                record_stream(502)
                 self._send_edge_response(_json_response(502, {"error": f"upstream_failed: {exc}"}))
 
         def _send_edge_response(self, result: EdgeProxyResponse) -> None:
@@ -893,6 +1101,15 @@ def _thunder_forge_command(repo_root: Path) -> list[str]:
     return [shutil.which("uv") or "/opt/homebrew/bin/uv", "run", "thunder-forge"]
 
 
+def _service_home_for_user(user: str) -> Path:
+    try:
+        import pwd
+
+        return Path(pwd.getpwnam(user).pw_dir)
+    except (ImportError, KeyError):
+        return Path.home()
+
+
 def _edge_service_spec(
     *,
     repo_root: Path,
@@ -904,6 +1121,7 @@ def _edge_service_spec(
     user: str,
 ) -> LaunchdServiceSpec:
     log_dir = repo_root / "logs"
+    user_home = _service_home_for_user(user)
     resolved_access_log_path = access_log_path.expanduser()
     if not resolved_access_log_path.is_absolute():
         resolved_access_log_path = repo_root / resolved_access_log_path
@@ -931,12 +1149,12 @@ def _edge_service_spec(
         stdout_log=str(log_dir / f"edge-{port}.stdout.log"),
         stderr_log=str(log_dir / f"edge-{port}.stderr.log"),
         environment={
-            "HOME": str(Path.home()),
+            "HOME": str(user_home),
             "USER": user,
             "PATH": ":".join(
                 [
                     f"{repo_root}/.venv/bin",
-                    f"{Path.home()}/.local/bin",
+                    f"{user_home}/.local/bin",
                     "/opt/homebrew/bin",
                     "/usr/local/bin",
                     "/usr/bin",
@@ -1216,26 +1434,40 @@ def smoke_edge_contract(
             result.errors.append(f"GET /v1/models failed: {exc}")
 
         started = time.perf_counter()
+        chat_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 16,
+            "temperature": 0,
+            "stream": False,
+        }
         try:
             response = client.post(
                 "/v1/chat/completions",
                 headers=auth_headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 16,
-                    "temperature": 0,
-                    "stream": False,
-                },
+                json=chat_payload,
             )
             result.latency_ms = int((time.perf_counter() - started) * 1000)
             result.chat_ok = response.is_success
-            result.session_ok = response.request.headers.get("X-Olla-Session-ID") == fixed_session_id
             result.olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
             if not result.chat_ok:
                 result.errors.append(f"POST /v1/chat/completions returned {response.status_code}: {response.text}")
-            if not result.session_ok:
-                result.errors.append("X-Olla-Session-ID was not preserved on chat request")
+            elif not result.olla_endpoint:
+                result.errors.append("chat response did not include X-Olla-Endpoint for session check")
+            else:
+                repeat = client.post(
+                    "/v1/chat/completions",
+                    headers=auth_headers,
+                    json=chat_payload,
+                )
+                repeat_endpoint = repeat.headers.get("X-Olla-Endpoint", "")
+                result.session_ok = repeat.is_success and repeat_endpoint == result.olla_endpoint
+                if not repeat.is_success:
+                    result.errors.append(
+                        f"repeat POST /v1/chat/completions returned {repeat.status_code}: {repeat.text}"
+                    )
+                elif repeat_endpoint != result.olla_endpoint:
+                    result.errors.append("same session routed to different endpoints")
         except httpx.HTTPError as exc:
             result.latency_ms = int((time.perf_counter() - started) * 1000)
             result.errors.append(f"POST /v1/chat/completions failed: {exc}")

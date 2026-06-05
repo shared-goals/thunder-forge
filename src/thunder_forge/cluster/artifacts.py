@@ -14,6 +14,8 @@ from pathlib import Path
 
 import httpx
 
+from thunder_forge.cluster.ssh import ssh_run
+
 DEFAULT_OMLX_MODELS_DIR = "~/.omlx/models"
 CACHE_OMLX_MODELS_DIR_ENV = "TF_CACHE_OMLX_MODELS_DIR"
 
@@ -330,7 +332,7 @@ def run_artifact_download(
             client.close()
         stdout = f"download_task: {task['task_id']}\nstatus: {task['status']}\n"
         return subprocess.CompletedProcess(args=plan.args, returncode=0, stdout=stdout, stderr=stderr)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         stderr = str(exc)
         return subprocess.CompletedProcess(args=plan.args, returncode=1, stdout=stdout, stderr=stderr)
     finally:
@@ -468,7 +470,7 @@ def is_local_artifact_complete(model_dir: Path) -> bool:
     return any(model_dir.rglob("*.safetensors")) or any(model_dir.rglob("*.bin"))
 
 
-def _remote_artifact_complete(host: str, path: str) -> bool:
+def _remote_artifact_complete(*, user: str, host: str, path: str) -> bool:
     quoted_path = shlex.quote(path)
     quoted_config = shlex.quote(f"{path}/config.json")
     command = " && ".join(
@@ -480,12 +482,7 @@ def _remote_artifact_complete(host: str, path: str) -> bool:
             (f"test -n \"$(find {quoted_path} \\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""),
         ]
     )
-    result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, command],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    result = ssh_run(user, host, command, timeout=30)
     return result.returncode == 0
 
 
@@ -517,6 +514,7 @@ def _validate_host(host: str, *, name: str) -> None:
 def probe_artifact_presence(
     *,
     repo_id: str,
+    node_user: str,
     node_host: str,
     node_home_dir: str,
     cache_omlx_models_dir: str | None = None,
@@ -529,5 +527,5 @@ def probe_artifact_presence(
 
     return ArtifactPresence(
         cache_omlx_model_dir=is_local_artifact_complete(cache_omlx_model_dir),
-        node_omlx_model_dir=_remote_artifact_complete(node_host, node_omlx_model_dir),
+        node_omlx_model_dir=_remote_artifact_complete(user=node_user, host=node_host, path=node_omlx_model_dir),
     )

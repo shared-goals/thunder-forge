@@ -3,6 +3,7 @@
 import json
 
 import httpx
+import pytest
 
 from thunder_forge.cluster.edge import (
     EdgeAccessLog,
@@ -19,6 +20,7 @@ from thunder_forge.cluster.edge import (
     load_edge_clients_from_env,
     proxy_edge_request,
     rewrite_openai_path,
+    smoke_edge_contract,
     summarize_edge_usage,
 )
 
@@ -48,6 +50,15 @@ def test_edge_auth_maps_valid_bearer_token_to_client_id_without_exposing_secret(
     assert "dev-secret" not in repr(result)
 
 
+def test_edge_auth_rejects_non_canonical_bearer_header_spacing() -> None:
+    clients = {"dev-secret": EdgeClient(client_id="client-a")}
+
+    result = authenticate_edge_request("Bearer  dev-secret", clients)
+
+    assert result.allowed is False
+    assert result.status_code == 401
+
+
 def test_edge_users_and_multi_client_loader() -> None:
     env = {
         "TF_USER_CLIENT_A": "secret-a",
@@ -62,6 +73,52 @@ def test_edge_users_and_multi_client_loader() -> None:
     assert clients["secret-a"].client_id == "client_a"
     assert clients["secret-b"].client_id == "client_b"
     assert "" not in clients
+
+
+def test_edge_client_loader_rejects_duplicate_api_keys() -> None:
+    env = {
+        "TF_USER_CLIENT_A": "shared-secret",
+        "TF_USER_CLIENT_B": "shared-secret",
+    }
+
+    with pytest.raises(ValueError, match="duplicate API key"):
+        load_edge_clients_from_env(env=env)
+
+
+def test_edge_client_env_names_encode_dash_and_dot_without_collisions() -> None:
+    env = {
+        "TF_USER_CLIENT_A": "underscore-secret",
+        "TF_USER_CLIENT_DASH_A": "dash-secret",
+        "TF_USER_CLIENT_DOT_A": "dot-secret",
+        "TF_USER_CLIENT_UNDERSCORE_DASH_A": "literal-dash-word-secret",
+        "TF_USER_CLIENT_UNDERSCORE_DOT_A": "literal-dot-word-secret",
+        "TF_USER_CLIENT_UNDERSCORE_UNDERSCORE_A": "literal-underscore-word-secret",
+    }
+
+    assert edge_api_key_from_env(env=env, client_id="client_a") == ("TF_USER_CLIENT_A", "underscore-secret")
+    assert edge_api_key_from_env(env=env, client_id="client-a") == ("TF_USER_CLIENT_DASH_A", "dash-secret")
+    assert edge_api_key_from_env(env=env, client_id="client.a") == ("TF_USER_CLIENT_DOT_A", "dot-secret")
+    assert edge_api_key_from_env(env=env, client_id="client_dash_a") == (
+        "TF_USER_CLIENT_UNDERSCORE_DASH_A",
+        "literal-dash-word-secret",
+    )
+    assert edge_api_key_from_env(env=env, client_id="client_dot_a") == (
+        "TF_USER_CLIENT_UNDERSCORE_DOT_A",
+        "literal-dot-word-secret",
+    )
+    assert edge_api_key_from_env(env=env, client_id="client_underscore_a") == (
+        "TF_USER_CLIENT_UNDERSCORE_UNDERSCORE_A",
+        "literal-underscore-word-secret",
+    )
+
+    clients = load_edge_clients_from_env(env=env)
+
+    assert clients["underscore-secret"].client_id == "client_a"
+    assert clients["dash-secret"].client_id == "client-a"
+    assert clients["dot-secret"].client_id == "client.a"
+    assert clients["literal-dash-word-secret"].client_id == "client_dash_a"
+    assert clients["literal-dot-word-secret"].client_id == "client_dot_a"
+    assert clients["literal-underscore-word-secret"].client_id == "client_underscore_a"
 
 
 def test_build_edge_clients_reads_only_user_prefixed_keys() -> None:
@@ -208,6 +265,71 @@ def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_oll
     assert invalid.body == b'{"error":"unauthorized"}'
 
 
+def test_proxy_edge_request_logs_auth_failures_without_calling_olla() -> None:
+    requests: list[httpx.Request] = []
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"unexpected": True})
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="GET",
+        path="/v1/models",
+        headers={"Authorization": "Bearer wrong-secret"},
+        body=b"",
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 401
+    assert requests == []
+    assert len(logs) == 1
+    logged = json.loads(logs[0])
+    assert logged["client_id"] == "unauthenticated"
+    assert logged["path"] == "/v1/models"
+    assert logged["status_code"] == 401
+    assert "wrong-secret" not in logs[0]
+
+
+def test_proxy_edge_request_rejects_oversized_body_without_calling_olla() -> None:
+    requests: list[httpx.Request] = []
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"unexpected": True})
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+        max_body_bytes=4,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=b"12345",
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 413
+    assert requests == []
+    assert result.body == b'{"error":"request_too_large"}'
+    logged = json.loads(logs[0])
+    assert logged["client_id"] == "client-a"
+    assert logged["status_code"] == 413
+
+
 def test_proxy_edge_request_serves_tf_alias_model_catalog_without_calling_olla() -> None:
     requests: list[httpx.Request] = []
     logs: list[str] = []
@@ -345,6 +467,110 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     assert logged["status_code"] == 200
     assert logged["olla_endpoint"] == "infer-03-omlx-live"
     assert "dev-secret" not in logs[0]
+
+
+def test_proxy_edge_request_records_upstream_usage_tokens() -> None:
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"X-Olla-Endpoint": "infer-03-omlx-live"},
+            json={
+                "id": "chatcmpl-1",
+                "choices": [{"message": {"content": "pong"}}],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 8,
+                    "total_tokens": 20,
+                },
+            },
+        )
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps({"model": "memory", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 200
+    logged = json.loads(logs[0])
+    assert logged["prompt_tokens"] == 12
+    assert logged["completion_tokens"] == 8
+    assert logged["total_tokens"] == 20
+
+
+def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps({"model": "memory", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 502
+    assert len(logs) == 1
+    logged = json.loads(logs[0])
+    assert logged["client_id"] == "client-a"
+    assert logged["model"] == "memory"
+    assert logged["status_code"] == 502
+    assert "dev-secret" not in logs[0]
+
+
+def test_smoke_edge_contract_fails_when_same_session_routes_to_different_endpoints() -> None:
+    chat_endpoints = ["infer-01-omlx-live", "infer-02-omlx-live"]
+    chat_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal chat_count
+        if request.method == "GET" and request.url.path == "/v1/models":
+            if request.headers.get("Authorization") == "Bearer dev-secret":
+                return httpx.Response(200, json={"object": "list", "data": [{"id": "memory"}]})
+            return httpx.Response(401, json={"error": "unauthorized"})
+        if request.method == "POST" and request.url.path == "/v1/chat/completions":
+            assert request.headers.get("X-Olla-Session-ID") == "tf-smoke-session"
+            endpoint = chat_endpoints[min(chat_count, len(chat_endpoints) - 1)]
+            chat_count += 1
+            return httpx.Response(
+                200,
+                headers={"X-Olla-Endpoint": endpoint},
+                json={"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]},
+            )
+        return httpx.Response(500, text=f"unexpected path: {request.url.path}")
+
+    result = smoke_edge_contract(
+        base_url="http://edge.local:40116",
+        api_key="dev-secret",
+        model="memory",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.chat_ok is True
+    assert result.session_ok is False
+    assert chat_count == 2
+    assert "same session routed to different endpoints" in result.errors
 
 
 def test_summarize_edge_usage_groups_requests_by_client(tmp_path) -> None:

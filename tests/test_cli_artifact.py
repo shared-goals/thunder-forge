@@ -142,7 +142,7 @@ def test_artifact_status_prints_readiness_plan(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -290,7 +290,7 @@ def test_artifact_status_checks_remote_cache_host_over_ssh(tmp_path: Path, monke
     monkeypatch.setattr(
         artifacts_module,
         "_remote_artifact_complete",
-        lambda host, path: True,
+        lambda *, user, host, path: True,
     )
 
     def fake_ssh_run(user, ip, cmd, **kwargs):
@@ -405,6 +405,10 @@ def test_artifact_sync_apply_runs_directly_on_remote_cache_host(tmp_path: Path, 
     assert "TF_CACHE_REMOTE_EXEC=1" not in calls[0][2]
     assert "mkdir -p" in calls[0][2]
     assert "missing cache oMLX model dir" in calls[0][2]
+    assert 'test -f "$SOURCE_PATH/config.json"' in calls[0][2]
+    assert "find \"$SOURCE_PATH\" -name '*.incomplete'" in calls[0][2]
+    assert 'test ! -e "$SOURCE_PATH/.rsync-partial"' in calls[0][2]
+    assert "find \"$SOURCE_PATH\" \\( -name '*.safetensors' -o -name '*.bin' \\)" in calls[0][2]
     assert '"$SOURCE_PATH"' in calls[0][2]
     assert "'$SOURCE_PATH'" not in calls[0][2]
     assert calls[0][3]["timeout"] == 123
@@ -483,7 +487,7 @@ def test_artifact_sync_dry_run_prints_cache_to_node_plan(tmp_path: Path, monkeyp
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -528,7 +532,7 @@ def test_artifact_sync_without_model_syncs_all_node_models(tmp_path: Path, monke
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -567,7 +571,7 @@ def test_artifact_sync_dry_run_uses_cache_omlx_dir_env(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -602,7 +606,7 @@ def test_artifact_sync_uses_dynamic_fabric_by_default_when_enabled(tmp_path: Pat
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -648,7 +652,7 @@ def test_artifact_sync_falls_back_to_management_host_when_fabric_is_unresolved(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -689,7 +693,7 @@ def test_artifact_sync_can_force_management_host_when_fabric_host_is_configured(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -730,7 +734,7 @@ def test_artifact_sync_without_fabric_host_uses_management_even_when_probe_would
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -774,7 +778,7 @@ def test_artifact_sync_apply_invokes_runner(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -823,7 +827,7 @@ def test_artifact_sync_apply_without_model_invokes_runner_for_each_node_model(
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -894,7 +898,7 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -951,7 +955,7 @@ def test_cluster_sync_with_prune_removes_unassigned_node_cache_models(tmp_path: 
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),
@@ -1070,7 +1074,7 @@ def test_artifact_sync_apply_propagates_runner_failure(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         cli_module,
         "probe_artifact_presence",
-        lambda *, repo_id, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
+        lambda *, repo_id, node_user, node_host, node_home_dir, cache_omlx_models_dir=None: ArtifactPresence(
             cache_omlx_model_dir=True,
             node_omlx_model_dir=False,
         ),

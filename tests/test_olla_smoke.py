@@ -113,3 +113,56 @@ def test_smoke_olla_router_accepts_alias_on_different_healthy_endpoint() -> None
     assert result.alias_endpoint == "infer-03-omlx-live"
     assert result.alias_ok is True
     assert result.errors == []
+
+
+def test_smoke_olla_router_fails_when_same_session_routes_to_different_endpoints() -> None:
+    backend_endpoints = ["infer-01-omlx-live", "infer-02-omlx-live"]
+    backend_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal backend_count
+        if request.url.path == "/internal/health":
+            return httpx.Response(200, json={"status": "healthy"})
+        if request.url.path == "/internal/status/endpoints":
+            return httpx.Response(
+                200,
+                json={
+                    "endpoints": [
+                        {"name": "infer-01-omlx-live", "status": "healthy"},
+                        {"name": "infer-02-omlx-live", "status": "healthy"},
+                    ]
+                },
+            )
+        if request.url.path == "/olla/openai-compatible/v1/models":
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "Qwen3-1.7B-4bit", "object": "model"}]},
+            )
+        if request.url.path == "/olla/openai-compatible/v1/chat/completions":
+            payload = json.loads(request.read().decode())
+            if payload["model"] == "Qwen3-1.7B-4bit":
+                assert request.headers.get("X-Olla-Session-ID") == "tf-olla-smoke-session"
+                endpoint = backend_endpoints[min(backend_count, len(backend_endpoints) - 1)]
+                backend_count += 1
+            else:
+                endpoint = "infer-01-omlx-live"
+            return httpx.Response(
+                200,
+                headers={"X-Olla-Endpoint": endpoint},
+                json={"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]},
+            )
+        if request.url.path == "/v1/models":
+            return httpx.Response(404, text="not found")
+        return httpx.Response(500, text=f"unexpected path: {request.url.path}")
+
+    result = smoke_olla_router(
+        base_url="http://127.0.0.1:40115",
+        model="Qwen3-1.7B-4bit",
+        alias="memory",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.chat_ok is True
+    assert result.session_ok is False
+    assert backend_count == 2
+    assert "same session routed to different endpoints" in result.errors

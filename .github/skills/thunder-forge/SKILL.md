@@ -28,8 +28,8 @@ uv run thunder-forge runtime setup-daemon --node infer-01 --admin-user <admin> -
 uv run thunder-forge runtime restart --node infer-01 --manager daemon --apply
 uv run thunder-forge service restart --service omlx --node infer-01 --manager daemon --apply
 uv run thunder-forge runtime smoke --node infer-01 --model <model>
-make olla-install
-make olla-restart
+make bootstrap
+make restart
 make bootstrap infer-01
 make restart infer-01
 make smoke infer-01
