@@ -400,6 +400,7 @@ class OmlxToolingResult:
     omlx_path: str
     tool_spec: str
     resolved_omlx_path: str = ""
+    resolved_omlx_version: str = ""
     command: str = ""
     applied: bool = False
     verified: bool = False
@@ -422,6 +423,19 @@ def _uv_binary_path(node: Node) -> str:
         msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
         raise ValueError(msg)
     return f"{node.home_dir}/.local/bin/uv"
+
+
+def _extract_omlx_version(raw_output: str) -> str:
+    for line in raw_output.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        normalized_line = stripped_line.replace("(", " ").replace(")", " ").replace(":", " ")
+        for token in normalized_line.split():
+            if token and any(char.isdigit() for char in token) and "." in token:
+                return token
+        return stripped_line
+    return ""
 
 
 def _omlx_tooling_command(
@@ -532,6 +546,18 @@ def ensure_omlx_tooling(
     else:
         resolved_path = (verify_res.stdout or "").strip()
         result.resolved_omlx_path = resolved_path or result.omlx_path
+
+    version_command = f"{shlex.quote(result.resolved_omlx_path)} --version"
+    version_res = ssh_run(
+        node.user,
+        node.host,
+        version_command,
+        timeout=min(timeout, 60),
+        shell=node.shell,
+    )
+    if version_res.returncode == 0:
+        output = "\n".join(part for part in [version_res.stdout, version_res.stderr] if part)
+        result.resolved_omlx_version = _extract_omlx_version(output)
 
     result.verified = True
     if progress:

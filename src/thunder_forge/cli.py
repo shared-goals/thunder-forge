@@ -4,11 +4,13 @@ import base64
 import json
 import os
 import platform
+import re
 import shlex
 import socket
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -28,6 +30,7 @@ from thunder_forge.cluster.artifacts import (
     run_artifact_sync,
 )
 from thunder_forge.cluster.bootstrap import (
+    LATEST_OLLA_RELEASE_API,
     ensure_cache_hub_dir,
     ensure_olla_binary,
     write_generated_olla_config,
@@ -1541,6 +1544,98 @@ def _print_prepare_plan(
         typer.echo("  inference: skipped")
 
 
+def _extract_version_token(raw_output: str) -> str:
+    semver_pattern = re.compile(r"^v?\d+(?:\.\d+)*(?:\.[A-Za-z0-9]+)*(?:[-+][A-Za-z0-9.-]+)?$")
+    fallback = ""
+    for line in raw_output.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        if not fallback:
+            fallback = stripped_line
+        normalized_line = (
+            stripped_line.replace("(", " ")
+            .replace(")", " ")
+            .replace(",", " ")
+            .replace(";", " ")
+            .replace(":", " ")
+            .replace("=", " ")
+        )
+        for token in normalized_line.split():
+            normalized = token.strip()
+            if not normalized:
+                continue
+            if semver_pattern.match(normalized):
+                return normalized
+    return fallback
+
+
+def _probe_node_version(node: Node, command: str, *, timeout: int = 8) -> str:
+    try:
+        result = ssh_run(
+            node.user,
+            node.host,
+            command,
+            timeout=timeout,
+            shell=node.shell,
+        )
+    except Exception:
+        return "unknown"
+
+    output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    version = _extract_version_token(output)
+    if not version:
+        return "unknown"
+    return version
+
+
+def _gateway_olla_version_for_node(config: ClusterConfig, repo_root: Path, gateway_node: Node) -> str:
+    candidate = str((repo_root / config.services.olla_bin_dir / "olla").expanduser())
+    command = (
+        "set -u; "
+        f"CANDIDATE={shlex.quote(candidate)}; "
+        "LOCAL_CANDIDATE=\"$HOME/.local/bin/olla\"; "
+        "if [ -x \"$CANDIDATE\" ]; then \"$CANDIDATE\" --version; "
+        "elif [ -x \"$LOCAL_CANDIDATE\" ]; then \"$LOCAL_CANDIDATE\" --version; "
+        "elif command -v olla >/dev/null 2>&1; then \"$(command -v olla)\" --version; "
+        "else exit 127; fi"
+    )
+    return _probe_node_version(gateway_node, command)
+
+
+def _omlx_version_for_node(runtime_node: Node) -> str:
+    home_dir = runtime_node.home_dir or f"/Users/{runtime_node.user}"
+    candidate = f"{home_dir}/.local/bin/omlx" if home_dir else ""
+    if candidate:
+        command = (
+            "set -u; "
+            f"CANDIDATE={shlex.quote(candidate)}; "
+            "LOCAL_CANDIDATE=\"$HOME/.local/bin/omlx\"; "
+            "if [ -x \"$CANDIDATE\" ]; then \"$CANDIDATE\" --version; "
+            "elif [ -x \"$LOCAL_CANDIDATE\" ]; then \"$LOCAL_CANDIDATE\" --version; "
+            "elif command -v omlx >/dev/null 2>&1; then \"$(command -v omlx)\" --version; "
+            "else exit 127; fi"
+        )
+    else:
+        command = (
+            "set -u; "
+            "if command -v omlx >/dev/null 2>&1; then \"$(command -v omlx)\" --version; "
+            "else exit 127; fi"
+        )
+    return _probe_node_version(runtime_node, command)
+
+
+def _latest_olla_release_version(*, timeout: int = 5) -> str:
+    request = urllib.request.Request(LATEST_OLLA_RELEASE_API, headers={"User-Agent": "thunder-forge"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode())
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return ""
+    latest = str(payload.get("tag_name", "")).strip()
+    return latest
+
+
 def _resolved_olla_version_for_prepare(*, cli_version: str | None, services: ServiceConfig) -> str:
     if cli_version is not None and cli_version.strip():
         return cli_version.strip()
@@ -1558,6 +1653,16 @@ def _fail_on_setup_errors(errors: list[str]) -> None:
         typer.echo(f"Error: {error}", err=True)
     if errors:
         raise typer.Exit(1)
+
+
+def _olla_upgrade_note(status: str) -> str:
+    if status == "upgraded":
+        return "upgrade applied"
+    if status == "installed":
+        return "installed (fresh bootstrap)"
+    if status == "current":
+        return "already current"
+    return "checked and applied if newer"
 
 
 @cluster_app.command("prepare")
@@ -1640,6 +1745,8 @@ def cluster_prepare(
             progress=_progress,
         )
         binary_path = olla_result.binary_path
+        typer.echo(f"  latest_olla: {getattr(olla_result, 'version', resolved_olla_version)}")
+        typer.echo(f"  upgrade_note: {_olla_upgrade_note(getattr(olla_result, 'status', ''))}")
         config_path = write_generated_olla_config(config, repo_root=repo_root)
         typer.echo(f"  config: generated {config_path}")
 
@@ -1714,6 +1821,8 @@ def cluster_prepare(
         if not tooling_result.ok:
             typer.echo("Error: oMLX tooling setup did not verify cleanly", err=True)
             raise typer.Exit(1)
+        typer.echo(f"  latest_omlx: {tooling_result.resolved_omlx_version or 'unknown'}")
+        typer.echo("  upgrade_note: checked and applied if newer")
         result = run_omlx_daemon_setup(
             runtime_node,
             admin_user=resolved_admin_user or None,
@@ -1819,15 +1928,30 @@ def cluster_status(
     ),
 ) -> None:
     """Check direct oMLX health for selected inference nodes."""
-    config, _ = _load_config()
-    _gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
+    config, repo_root = _load_config()
+    gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {target or 'all'}")
+    latest_olla = _latest_olla_release_version() if gateway_names else ""
+    for gateway_name in gateway_names:
+        gateway_node = config.nodes[gateway_name]
+        olla_version = _gateway_olla_version_for_node(config, repo_root, gateway_node)
+        latest_label = latest_olla or "unknown"
+        if latest_olla and olla_version not in {"unknown", latest_olla}:
+            upgrade_label = "yes"
+        elif latest_olla:
+            upgrade_label = "no"
+        else:
+            upgrade_label = "unknown"
+        typer.echo(
+            f"{gateway_name}: olla_version={olla_version} latest={latest_label} upgrade={upgrade_label}"
+        )
     if not inference_names:
         typer.echo("status: no inference nodes selected")
         return
 
     failed = False
+    omlx_versions: list[str] = []
     for node_name in inference_names:
         runtime_node = _get_runtime_node(config, node_name)
         base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
@@ -1835,6 +1959,9 @@ def cluster_status(
         health_status = "ok" if result.health_ok else "fail"
         models_status = "ok" if result.models_ok else "fail"
         typer.echo(f"{node_name}: health={health_status} models={models_status}")
+        omlx_version = _omlx_version_for_node(runtime_node)
+        omlx_versions.append(omlx_version)
+        typer.echo(f"  omlx_version: {omlx_version}")
         if result.models:
             served_models = map_runtime_models_to_aliases(config, runtime_node, result.models)
             typer.echo(f"  served_models: {', '.join(served_models)}")
@@ -1845,6 +1972,15 @@ def cluster_status(
         for error in result.errors:
             typer.echo(f"Error: {node_name}: {error}", err=True)
         failed = failed or not (result.health_ok and result.models_ok)
+
+    known_versions = sorted({version for version in omlx_versions if version != "unknown"})
+    unknown_count = sum(1 for version in omlx_versions if version == "unknown")
+    if len(known_versions) > 1:
+        typer.echo(f"omlx_upgrade_hint: yes (version drift: {', '.join(known_versions)})")
+    elif unknown_count:
+        typer.echo("omlx_upgrade_hint: check (unknown versions present)")
+    else:
+        typer.echo("omlx_upgrade_hint: no (versions aligned)")
 
     if failed:
         raise typer.Exit(1)

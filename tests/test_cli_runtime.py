@@ -90,6 +90,7 @@ def test_runtime_start_apply_starts_remote_runtime(tmp_path: Path, monkeypatch) 
     from thunder_forge.cluster.omlx import OmlxStartResult
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_omlx_version_for_node", lambda runtime_node: "0.4.2.dev2")
     monkeypatch.setattr(
         cli_module,
         "check_omlx_health",
@@ -858,6 +859,8 @@ nodes:
 """
     )
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_omlx_version_for_node", lambda runtime_node: "0.4.2.dev2")
+    monkeypatch.setattr(cli_module, "_latest_olla_release_version", lambda timeout=5: "")
     monkeypatch.setattr(
         cli_module,
         "check_omlx_health",
@@ -875,8 +878,180 @@ nodes:
     assert result.exit_code == 0
     assert "Thunder Forge cluster status" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
+    assert "omlx_version: 0.4.2.dev2" in result.stdout
     assert "served_models: memory" in result.stdout
     assert "hot_loaded_models: memory" in result.stdout
+    assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
+
+
+def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        """models:
+  memory:
+    source:
+      repo: mlx-community/gpt-oss-20b-MXFP4-Q8
+    runtime_model_id: gpt-oss-20b-MXFP4-Q8
+nodes:
+  rock:
+    host: rock.lan
+    ram_gb: 32
+    roles: [gateway]
+    user: shag
+  infer-03:
+    host: infer-03.lan
+    ram_gb: 128
+    roles: [inference]
+    user: shag
+    models: [memory]
+    runtime:
+      type: omlx
+"""
+    )
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_latest_olla_release_version", lambda timeout=5: "v0.0.27")
+    monkeypatch.setattr(cli_module, "_gateway_olla_version_for_node", lambda *_args: "v0.0.27")
+    monkeypatch.setattr(cli_module, "_omlx_version_for_node", lambda runtime_node: "0.4.2.dev2")
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda base_url, **kwargs: OmlxHealthResult(
+            base_url=base_url,
+            health_ok=True,
+            models_ok=True,
+            models=["gpt-oss-20b-MXFP4-Q8"],
+            model_statuses={"gpt-oss-20b-MXFP4-Q8": {"id": "gpt-oss-20b-MXFP4-Q8", "loaded": True}},
+        ),
+    )
+
+    result = runner.invoke(app, ["cluster", "status"])
+
+    assert result.exit_code == 0
+    assert "rock: olla_version=v0.0.27 latest=v0.0.27 upgrade=no" in result.stdout
+    assert "infer-03: health=ok models=ok" in result.stdout
+    assert "omlx_version: 0.4.2.dev2" in result.stdout
+    assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
+
+
+def test_cluster_status_reports_upgrade_needed_when_olla_is_behind(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              rock:
+                host: rock.lan
+                ram_gb: 32
+                roles: [gateway]
+                user: shag
+              infer-03:
+                host: infer-03.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                runtime:
+                  type: omlx
+        """)
+    )
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_latest_olla_release_version", lambda timeout=5: "v0.0.28")
+    monkeypatch.setattr(cli_module, "_gateway_olla_version_for_node", lambda *_args: "v0.0.27")
+    monkeypatch.setattr(cli_module, "_omlx_version_for_node", lambda runtime_node: "0.4.2.dev2")
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda base_url, **kwargs: OmlxHealthResult(
+            base_url=base_url,
+            health_ok=True,
+            models_ok=True,
+            models=[],
+            model_statuses={},
+        ),
+    )
+
+    result = runner.invoke(app, ["cluster", "status"])
+
+    assert result.exit_code == 0
+    assert "rock: olla_version=v0.0.27 latest=v0.0.28 upgrade=yes" in result.stdout
+
+
+def test_probe_node_version_parses_stderr_output(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              infer-03:
+                host: infer-03.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                runtime:
+                  type: omlx
+        """)
+    )
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    def fake_ssh_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args="omlx --version", returncode=0, stdout="", stderr="omlx 0.4.2.dev2\n")
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+
+    config, _ = cli_module._load_config()
+    node = cli_module._get_runtime_node(config, "infer-03")
+    version = cli_module._omlx_version_for_node(node)
+
+    assert version == "0.4.2.dev2"
+
+
+def test_omlx_version_uses_default_user_home_when_unset(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              infer-03:
+                host: infer-03.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                runtime:
+                  type: omlx
+        """)
+    )
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    captured = {"cmd": ""}
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="omlx 0.4.2.dev2\n", stderr="")
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+
+    config, _ = cli_module._load_config()
+    node = cli_module._get_runtime_node(config, "infer-03")
+    node.home_dir = None
+    version = cli_module._omlx_version_for_node(node)
+
+    assert version == "0.4.2.dev2"
+    assert "/Users/shag/.local/bin/omlx" in captured["cmd"]
 
 
 def test_cluster_smoke_runs_runtime_olla_and_edge(tmp_path: Path, monkeypatch) -> None:

@@ -244,6 +244,8 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
                 stdout="/Users/shag/.local/bin/omlx\n",
                 stderr="",
             )
+        if cmd == "/Users/shag/.local/bin/omlx --version":
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="omlx 0.4.2.dev2\n", stderr="")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     import thunder_forge.cluster.omlx as omlx_module
@@ -256,9 +258,11 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
     assert calls == [
         ("shag", "infer-03.lan", result.command, True),
         ("shag", "infer-03.lan", "command -v omlx", False),
+        ("shag", "infer-03.lan", "/Users/shag/.local/bin/omlx --version", False),
     ]
     assert "NODE_HOME=/Users/shag" in result.command
     assert result.resolved_omlx_path == "/Users/shag/.local/bin/omlx"
+    assert result.resolved_omlx_version == "0.4.2.dev2"
 
 
 def test_ensure_omlx_tooling_apply_falls_back_to_direct_path_when_omlx_is_missing_from_login_path(
@@ -271,6 +275,8 @@ def test_ensure_omlx_tooling_apply_falls_back_to_direct_path_when_omlx_is_missin
         calls.append((user, ip, cmd, stream))
         if cmd == "command -v omlx":
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="not found")
+        if cmd == "/Users/shag/.local/bin/omlx --version":
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="omlx 0.4.2.dev2\n", stderr="")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     import thunder_forge.cluster.omlx as omlx_module
@@ -285,8 +291,10 @@ def test_ensure_omlx_tooling_apply_falls_back_to_direct_path_when_omlx_is_missin
     assert calls == [
         ("shag", "infer-03.lan", result.command, True),
         ("shag", "infer-03.lan", "command -v omlx", False),
+        ("shag", "infer-03.lan", "/Users/shag/.local/bin/omlx --version", False),
     ]
     assert result.resolved_omlx_path == "/Users/shag/.local/bin/omlx"
+    assert result.resolved_omlx_version == "0.4.2.dev2"
     assert result.errors == []
 
 
