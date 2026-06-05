@@ -351,6 +351,18 @@ def test_run_olla_service_restart_dry_run_describes_frontend_launch_agent(tmp_pa
     assert not result.applied
 
 
+def test_olla_service_restart_uses_requested_user_home(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cluster.olla as olla_module
+
+    monkeypatch.setattr(olla_module, "_service_home_for_user", lambda user: Path(f"/Users/{user}"))
+
+    result = run_olla_service_restart(repo_root=tmp_path, apply=False, user="shag")
+
+    assert "<key>HOME</key>" in result.plist_content
+    assert "<string>/Users/shag</string>" in result.plist_content
+    assert "/Users/shag/.local/bin" in result.plist_content
+
+
 def test_run_olla_service_restart_apply_writes_plist_then_starts(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cluster.olla as olla_module
 
@@ -438,6 +450,19 @@ def test_run_edge_service_restart_dry_run_describes_frontend_launch_daemon(tmp_p
     assert any(command.startswith("/usr/bin/sudo -n /usr/bin/install") for command in result.commands)
     assert any("launchctl bootstrap system" in command for command in result.commands)
     assert not result.applied
+
+
+def test_edge_service_restart_uses_requested_user_home(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cluster.edge as edge_module
+
+    monkeypatch.setattr(edge_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(edge_module, "_service_home_for_user", lambda user: Path(f"/Users/{user}"))
+
+    result = run_edge_service_restart(repo_root=tmp_path, manager="daemon", apply=False, user="shag")
+
+    assert "<key>HOME</key>" in result.plist_content
+    assert "<string>/Users/shag</string>" in result.plist_content
+    assert "/Users/shag/.local/bin" in result.plist_content
 
 
 def test_run_edge_service_restart_daemon_apply_reinstalls_every_time(tmp_path: Path, monkeypatch) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 import time
@@ -30,6 +31,10 @@ from thunder_forge.cluster.ssh import scp_content, ssh_run
 
 LAUNCHD_LABEL_PREFIX = "com.thunder-forge.omlx"
 DEFAULT_OMLX_TOOL_SPEC = "git+https://github.com/jundot/omlx.git"
+
+
+def _omlx_process_pattern(*, bind_host: str, port: int) -> str:
+    return f"^.*omlx serve --host {re.escape(bind_host)} --port {port}.*$"
 
 
 def launchd_label_for_node(node: Node) -> str:
@@ -579,15 +584,15 @@ def generate_launchd_plist(node: Node, *, system_daemon: bool = False) -> str:
     return generate_service_launchd_plist(spec, system_daemon=system_daemon)
 
 
-def _install_commands(label: str, plist_path: str, port: int) -> list[str]:
+def _install_commands(label: str, plist_path: str, port: int, bind_host: str) -> list[str]:
     """The ordered command sequence for a safe launchd install."""
-    process_pattern = f"^.*omlx serve --host 0\\.0\\.0\\.0 --port {port}.*$"
+    process_pattern = _omlx_process_pattern(bind_host=bind_host, port=port)
     return user_launchd_commands(label=label, plist_path=plist_path, process_pattern=process_pattern)
 
 
-def _daemon_commands(label: str, staging_plist_path: str, plist_path: str, port: int) -> list[str]:
+def _daemon_commands(label: str, staging_plist_path: str, plist_path: str, port: int, bind_host: str) -> list[str]:
     """The ordered command sequence for a sudo-backed system LaunchDaemon."""
-    process_pattern = f"^.*omlx serve --host 0\\.0\\.0\\.0 --port {port}.*$"
+    process_pattern = _omlx_process_pattern(bind_host=bind_host, port=port)
     return system_launchd_commands(
         label=label,
         staging_plist_path=staging_plist_path,
@@ -642,7 +647,7 @@ def _process_restart_commands(node: Node) -> tuple[OmlxProcessResult, int | None
     pid_path = f"{node.home_dir}/.omlx/run/omlx-{port}.pid"
     stdout_log = f"{node.home_dir}/Library/Logs/omlx-{port}.stdout.log"
     stderr_log = f"{node.home_dir}/Library/Logs/omlx-{port}.stderr.log"
-    process_pattern = f"^.*omlx serve --host 0\\.0\\.0\\.0 --port {port}.*$"
+    process_pattern = _omlx_process_pattern(bind_host=node.runtime.bind_host, port=port)
 
     stop_command = " ; ".join(
         [
@@ -723,7 +728,7 @@ def _build_omlx_launchd_result(node: Node) -> tuple[OmlxInstallResult, int | Non
         result.errors.append(str(exc))
         return result, None
 
-    result.commands = _install_commands(label, plist_path, runtime.port)
+    result.commands = _install_commands(label, plist_path, runtime.port, runtime.bind_host)
     return result, runtime.port
 
 
@@ -750,7 +755,7 @@ def _build_omlx_daemon_result(node: Node) -> tuple[OmlxInstallResult, int | None
         result.errors.append(str(exc))
         return result, None
 
-    result.commands = _daemon_commands(label, staging_plist_path, plist_path, runtime.port)
+    result.commands = _daemon_commands(label, staging_plist_path, plist_path, runtime.port, runtime.bind_host)
     return result, runtime.port
 
 
@@ -771,7 +776,7 @@ def generate_daemon_setup_script(node: Node, *, sudoers_path: str | None = None)
     label = daemon_result.label
     sudoers_content = generate_daemon_sudoers(node).rstrip()
     sudoers_path = sudoers_path or daemon_sudoers_path_for_node(node)
-    process_pattern = f"^.*omlx serve --host 0\\.0\\.0\\.0 --port {node.runtime.port}.*$"
+    process_pattern = _omlx_process_pattern(bind_host=node.runtime.bind_host, port=node.runtime.port)
 
     return f"""#!/bin/zsh
 set -euo pipefail

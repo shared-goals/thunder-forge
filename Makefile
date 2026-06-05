@@ -1,7 +1,8 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config usage-report usage-report-json usage-trim usage-duckdb opencode hermes
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config usage-report usage-report-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes
 ARG ?= $(word 2,$(MAKECMDGOALS))
+EDGE_CLIENTS ?=
 
 ifneq ($(ARG),)
 $(ARG):
@@ -26,6 +27,8 @@ help:
 	@printf "  %-24s %s\n" "usage-report-json [day]" "print usage summary as JSON"
 	@printf "  %-24s %s\n" "usage-trim [days]" "trim local TF logs (default 3 days)"
 	@printf "  %-24s %s\n" "usage-duckdb [day]" "run DuckDB daily usage SQL over JSONL logs"
+	@printf "  %-24s %s\n" "edge-keys [clients]" "create missing TF edge client keys"
+	@printf "  %-24s %s\n" "edge-usage" "summarize TF edge access logs"
 	@printf "  %-24s %s\n" "opencode [id]" "create client key and print/copy OpenCode config"
 	@printf "  %-24s %s\n" "hermes [id]" "create client key and print/copy Hermes config"
 	@echo ""
@@ -95,6 +98,16 @@ usage-duckdb:
 		exit 2; \
 	fi
 	duckdb -readonly -cmd ".mode table" -cmd ".headers on" -cmd ".param set period $(if $(strip $(ARG)),$(ARG),$(shell date -u +%F))" -f docs/operations/daily-usage-duckdb.sql
+
+edge-keys:
+	@clients="$(if $(strip $(EDGE_CLIENTS)),$(EDGE_CLIENTS),$(ARG))"; \
+	if [ -z "$$clients" ]; then echo 'usage: make edge-keys EDGE_CLIENTS="client-a client-b"'; exit 2; fi; \
+	args=""; \
+	for client in $$clients; do args="$$args --client $$client"; done; \
+	$(UV) thunder-forge edge keys $$args
+
+edge-usage:
+	$(UV) thunder-forge edge usage
 
 opencode:
 	@$(UV) thunder-forge edge client-config opencode --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key "$(ARG)")

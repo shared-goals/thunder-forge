@@ -46,6 +46,7 @@ OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
 EDGE_USER_PREFIX = "TF_USER_"
 EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
 EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
+EDGE_DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"
@@ -89,6 +90,7 @@ class EdgeProxyConfig:
     access_log_sink: Callable[[str], None] | None = None
     model_catalog: list[EdgeModelCatalogEntry] = field(default_factory=list)
     timeout: float = 60.0
+    max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,45 @@ def validate_edge_client_id(client_id: str) -> str:
     return normalized
 
 
+def _client_id_env_suffix(client_id: str) -> str:
+    normalized = validate_edge_client_id(client_id)
+    suffix: list[str] = []
+    lowered = normalized.lower()
+    for index, char in enumerate(normalized):
+        if char == "-":
+            suffix.append("_DASH_")
+        elif char == ".":
+            suffix.append("_DOT_")
+        elif char == "_":
+            if lowered[index:].startswith(("_dash_", "_dot_", "_underscore_")):
+                suffix.append("_UNDERSCORE_")
+            else:
+                suffix.append("_")
+        else:
+            suffix.append(char.upper())
+    return "".join(suffix)
+
+
+def _client_id_from_env_suffix(env_suffix: str) -> str:
+    decoded: list[str] = []
+    index = 0
+    lowered = env_suffix.lower()
+    while index < len(lowered):
+        if lowered.startswith("_dash_", index):
+            decoded.append("-")
+            index += len("_dash_")
+        elif lowered.startswith("_dot_", index):
+            decoded.append(".")
+            index += len("_dot_")
+        elif lowered.startswith("_underscore_", index):
+            decoded.append("_")
+            index += len("_underscore_")
+        else:
+            decoded.append(lowered[index])
+            index += 1
+    return "".join(decoded)
+
+
 def _quote_dotenv_value(value: str) -> str:
     return f"'{value}'"
 
@@ -276,7 +317,7 @@ def load_edge_user_keys_from_env(
         if key.startswith(prefix) and value.strip():
             suffix = key[len(prefix) :]
             if suffix:
-                client_id = suffix.lower()
+                client_id = _client_id_from_env_suffix(suffix)
                 try:
                     result[validate_edge_client_id(client_id)] = value.strip()
                 except ValueError:
@@ -292,13 +333,10 @@ def edge_api_key_from_env(
 ) -> tuple[str, str]:
     """Return (env_name, api_key) for one configured client id."""
     normalized = validate_edge_client_id(client_id)
-    # Build env var name: TF_USER_<SUFFIX> where suffix uppercases and replaces - and . with _
-    env_suffix = normalized.upper().replace("-", "_").replace(".", "_")
+    env_suffix = _client_id_env_suffix(normalized)
     env_name = f"{users_env}{env_suffix}"
-    # Effective id used as key in the users dict (lowercased suffix)
-    effective_id = env_suffix.lower()
     users = load_edge_user_keys_from_env(env=env, users_env=users_env)
-    return env_name, users.get(effective_id, "")
+    return env_name, users.get(normalized, "")
 
 
 def load_edge_clients_from_env(
@@ -374,7 +412,7 @@ def ensure_edge_api_keys(
         if not normalized or normalized in seen_clients:
             continue
         seen_clients.add(normalized)
-        env_suffix = normalized.upper().replace("-", "_").replace(".", "_")
+        env_suffix = _client_id_env_suffix(normalized)
         env_name = f"{users_env}{env_suffix}"
         existing = _get_env_value_from_lines(lines, env_name)
         if existing.strip():
@@ -637,20 +675,29 @@ def _edge_models_response(
         return None
 
     started = time.perf_counter()
+    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id="unauthenticated",
+            path=path,
+            model="",
+            status_code=auth.status_code,
+            started=started,
+        )
         return _json_response(401, {"error": "unauthorized"})
 
-    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
-    upstream = EdgeProxyUpstreamRequest(
-        olla_path="",
-        forwarded_headers={},
+    _record_edge_access_event(
+        config,
         request_id=request_id,
         client_id=auth.client_id,
+        path=path,
         model="",
+        status_code=200,
         started=started,
     )
-    _record_edge_access(config, upstream=upstream, path=path, status_code=200)
     return EdgeProxyResponse(
         status_code=200,
         headers={"Content-Type": "application/json"},
@@ -676,16 +723,47 @@ def _prepare_edge_upstream_request(
     config: EdgeProxyConfig,
 ) -> EdgeProxyUpstreamRequest | EdgeProxyResponse:
     started = time.perf_counter()
+    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    model = _extract_model(body)
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id="unauthenticated",
+            path=path,
+            model=model,
+            status_code=auth.status_code,
+            started=started,
+        )
         return _json_response(401, {"error": "unauthorized"})
 
     try:
         olla_path = rewrite_openai_path(path)
     except ValueError:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id=auth.client_id,
+            path=path,
+            model=model,
+            status_code=404,
+            started=started,
+        )
         return _json_response(404, {"error": "not_found"})
 
-    request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    if config.max_body_bytes > 0 and len(body) > config.max_body_bytes:
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id=auth.client_id,
+            path=path,
+            model=model,
+            status_code=413,
+            started=started,
+        )
+        return _json_response(413, {"error": "request_too_large"})
+
     session = ensure_olla_session_id(headers, request_id=request_id, client_id=auth.client_id)
     forwarded_headers = {
         "X-Olla-Session-ID": session.value,
@@ -700,9 +778,35 @@ def _prepare_edge_upstream_request(
         forwarded_headers=forwarded_headers,
         request_id=request_id,
         client_id=auth.client_id,
-        model=_extract_model(body),
+        model=model,
         started=started,
     )
+
+
+def _record_edge_access_event(
+    config: EdgeProxyConfig,
+    *,
+    request_id: str,
+    client_id: str,
+    path: str,
+    model: str,
+    status_code: int,
+    started: float,
+    olla_endpoint: str = "",
+) -> None:
+    if config.access_log_sink is None:
+        return
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    log_record = build_edge_access_log(
+        request_id=request_id,
+        client_id=client_id,
+        path=path,
+        model=model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        olla_endpoint=olla_endpoint,
+    )
+    config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
 
 def _record_edge_access(
@@ -713,19 +817,16 @@ def _record_edge_access(
     status_code: int,
     olla_endpoint: str = "",
 ) -> None:
-    if config.access_log_sink is None:
-        return
-    latency_ms = int((time.perf_counter() - upstream.started) * 1000)
-    log_record = build_edge_access_log(
+    _record_edge_access_event(
+        config,
         request_id=upstream.request_id,
         client_id=upstream.client_id,
         path=path,
         model=upstream.model,
         status_code=status_code,
-        latency_ms=latency_ms,
+        started=upstream.started,
         olla_endpoint=olla_endpoint,
     )
-    config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
 
 def proxy_edge_request(
@@ -762,6 +863,12 @@ def proxy_edge_request(
         try:
             response = client.request(method, upstream.olla_path, headers=upstream.forwarded_headers, content=body)
         except httpx.HTTPError as exc:
+            _record_edge_access(
+                config,
+                upstream=upstream,
+                path=path,
+                status_code=502,
+            )
             return _json_response(502, {"error": f"upstream_failed: {exc}"})
 
     _record_edge_access(
@@ -797,7 +904,33 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
             return
 
         def _handle_edge_request(self) -> None:
-            length = int(self.headers.get("Content-Length", "0") or "0")
+            headers = dict(self.headers.items())
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                self._send_edge_response(_json_response(400, {"error": "invalid_content_length"}))
+                return
+            if length < 0:
+                self._send_edge_response(_json_response(400, {"error": "invalid_content_length"}))
+                return
+            if config.max_body_bytes > 0 and length > config.max_body_bytes:
+                started = time.perf_counter()
+                request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+                auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
+                client_id = auth.client_id if auth.allowed else "unauthenticated"
+                status_code = 413 if auth.allowed else auth.status_code
+                _record_edge_access_event(
+                    config,
+                    request_id=request_id,
+                    client_id=client_id,
+                    path=self.path,
+                    model="",
+                    status_code=status_code,
+                    started=started,
+                )
+                error = "request_too_large" if auth.allowed else "unauthorized"
+                self._send_edge_response(_json_response(status_code, {"error": error}))
+                return
             body = self.rfile.read(length) if length else b""
             if _requests_streaming_response(self.command, body):
                 self._handle_streaming_edge_request(body)
@@ -805,7 +938,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
             result = proxy_edge_request(
                 method=self.command,
                 path=self.path,
-                headers=dict(self.headers.items()),
+                headers=headers,
                 body=body,
                 config=config,
             )
@@ -832,6 +965,21 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 self._send_edge_response(upstream)
                 return
 
+            logged = False
+
+            def record_stream(status_code: int, *, olla_endpoint: str = "") -> None:
+                nonlocal logged
+                if logged:
+                    return
+                _record_edge_access(
+                    config,
+                    upstream=upstream,
+                    path=self.path,
+                    status_code=status_code,
+                    olla_endpoint=olla_endpoint,
+                )
+                logged = True
+
             normalized_base_url = config.olla_base_url.rstrip("/")
             try:
                 with httpx.Client(base_url=normalized_base_url, timeout=config.timeout, trust_env=False) as client:
@@ -841,6 +989,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         headers=upstream.forwarded_headers,
                         content=body,
                     ) as response:
+                        olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
                         self.send_response(response.status_code)
                         response_headers = _proxy_response_headers(response.headers)
                         response_headers.setdefault("Content-Type", "text/event-stream")
@@ -850,6 +999,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                             self.end_headers()
                         except OSError as exc:
                             if self._is_client_disconnect(exc):
+                                record_stream(response.status_code, olla_endpoint=olla_endpoint)
                                 return
                             raise
                         for chunk in response.iter_bytes():
@@ -859,16 +1009,12 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                                     self.wfile.flush()
                                 except OSError as exc:
                                     if self._is_client_disconnect(exc):
+                                        record_stream(response.status_code, olla_endpoint=olla_endpoint)
                                         return
                                     raise
-                        _record_edge_access(
-                            config,
-                            upstream=upstream,
-                            path=self.path,
-                            status_code=response.status_code,
-                            olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
-                        )
+                        record_stream(response.status_code, olla_endpoint=olla_endpoint)
             except httpx.HTTPError as exc:
+                record_stream(502)
                 self._send_edge_response(_json_response(502, {"error": f"upstream_failed: {exc}"}))
 
         def _send_edge_response(self, result: EdgeProxyResponse) -> None:
@@ -893,6 +1039,15 @@ def _thunder_forge_command(repo_root: Path) -> list[str]:
     return [shutil.which("uv") or "/opt/homebrew/bin/uv", "run", "thunder-forge"]
 
 
+def _service_home_for_user(user: str) -> Path:
+    try:
+        import pwd
+
+        return Path(pwd.getpwnam(user).pw_dir)
+    except (ImportError, KeyError):
+        return Path.home()
+
+
 def _edge_service_spec(
     *,
     repo_root: Path,
@@ -904,6 +1059,7 @@ def _edge_service_spec(
     user: str,
 ) -> LaunchdServiceSpec:
     log_dir = repo_root / "logs"
+    user_home = _service_home_for_user(user)
     resolved_access_log_path = access_log_path.expanduser()
     if not resolved_access_log_path.is_absolute():
         resolved_access_log_path = repo_root / resolved_access_log_path
@@ -931,12 +1087,12 @@ def _edge_service_spec(
         stdout_log=str(log_dir / f"edge-{port}.stdout.log"),
         stderr_log=str(log_dir / f"edge-{port}.stderr.log"),
         environment={
-            "HOME": str(Path.home()),
+            "HOME": str(user_home),
             "USER": user,
             "PATH": ":".join(
                 [
                     f"{repo_root}/.venv/bin",
-                    f"{Path.home()}/.local/bin",
+                    f"{user_home}/.local/bin",
                     "/opt/homebrew/bin",
                     "/usr/local/bin",
                     "/usr/bin",

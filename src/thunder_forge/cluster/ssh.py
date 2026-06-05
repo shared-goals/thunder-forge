@@ -9,6 +9,10 @@ import shlex
 import socket
 import subprocess
 
+SSH_STRICT_HOST_KEY_CHECKING_ENV = "TF_SSH_STRICT_HOST_KEY_CHECKING"
+DEFAULT_SSH_STRICT_HOST_KEY_CHECKING = "yes"
+_ALLOWED_STRICT_HOST_KEY_VALUES = {"yes", "no", "ask", "accept-new"}
+
 
 def _login_shell() -> str:
     """Return the login shell for the local machine: zsh on macOS, bash on Linux."""
@@ -40,6 +44,11 @@ def _is_local(ip: str) -> bool:
         return False
 
 
+def _strict_host_key_checking() -> str:
+    value = os.environ.get(SSH_STRICT_HOST_KEY_CHECKING_ENV, DEFAULT_SSH_STRICT_HOST_KEY_CHECKING).strip()
+    return value if value in _ALLOWED_STRICT_HOST_KEY_VALUES else DEFAULT_SSH_STRICT_HOST_KEY_CHECKING
+
+
 def ssh_run(
     user: str,
     ip: str,
@@ -68,7 +77,7 @@ def ssh_run(
         "-o",
         "ConnectTimeout=10",
         "-o",
-        "StrictHostKeyChecking=no",
+        f"StrictHostKeyChecking={_strict_host_key_checking()}",
     ]
     if tty:
         ssh_cmd.append("-tt")
@@ -102,7 +111,7 @@ def scp_content(
     effective_shell = shell or _login_shell()
     if _is_local(ip):
         return subprocess.run(
-            [effective_shell, "-lc", f"cat > {remote_path}"],
+            [effective_shell, "-lc", f"cat > {shlex.quote(remote_path)}"],
             input=content,
             capture_output=True,
             text=True,
@@ -114,11 +123,11 @@ def scp_content(
         "-o",
         "ConnectTimeout=10",
         "-o",
-        "StrictHostKeyChecking=no",
+        f"StrictHostKeyChecking={_strict_host_key_checking()}",
         "-o",
         "BatchMode=yes",
         f"{user}@{ip}",
-        f"cat > {remote_path}",
+        f"cat > {shlex.quote(remote_path)}",
     ]
     return subprocess.run(
         ssh_cmd,

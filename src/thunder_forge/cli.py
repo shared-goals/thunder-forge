@@ -109,6 +109,25 @@ def _load_config() -> tuple[ClusterConfig, Path]:
     return _cfg.load_cluster_config(cluster_config_path), repo_root
 
 
+def _load_config_if_present() -> tuple[ClusterConfig, Path] | None:
+    """Load cluster config when it exists without making ad-hoc smoke checks require it."""
+    import thunder_forge.cluster.config as _cfg
+
+    repo_root = _cfg.find_repo_root()
+    cluster_config_path = _cfg.default_cluster_config_path(repo_root)
+    if not cluster_config_path.exists():
+        return None
+    return _cfg.load_cluster_config(cluster_config_path), repo_root
+
+
+def _resolve_olla_port_from_optional_config(port: int | None) -> int:
+    if port is not None:
+        return resolve_port(port, default=DEFAULT_OLLA_PORT)
+    loaded = _load_config_if_present()
+    default_port = loaded[0].services.olla_port if loaded is not None else DEFAULT_OLLA_PORT
+    return resolve_port(None, default=default_port)
+
+
 def _repo_root() -> Path:
     from thunder_forge.cluster.config import find_repo_root
 
@@ -604,6 +623,22 @@ def _remote_cache_sync_command(
         'echo "missing cache oMLX model dir: $SOURCE_PATH" >&2; '
         "exit 2; "
         "fi; "
+        'test -f "$SOURCE_PATH/config.json" || { '
+        'echo "incomplete cache oMLX model dir: missing config.json: $SOURCE_PATH" >&2; '
+        "exit 2; "
+        "}; "
+        'test -z "$(find "$SOURCE_PATH" -name \'*.incomplete\' -print -quit)" || { '
+        'echo "incomplete cache oMLX model dir: partial artifact present: $SOURCE_PATH" >&2; '
+        "exit 2; "
+        "}; "
+        'test ! -e "$SOURCE_PATH/.rsync-partial" || { '
+        'echo "incomplete cache oMLX model dir: rsync partial dir present: $SOURCE_PATH" >&2; '
+        "exit 2; "
+        "}; "
+        'test -n "$(find "$SOURCE_PATH" \\( -name \'*.safetensors\' -o -name \'*.bin\' \\) -type f -print -quit)" || { '
+        'echo "incomplete cache oMLX model dir: no weight files found: $SOURCE_PATH" >&2; '
+        "exit 2; "
+        "}; "
         f"{ssh_mkdir_cmd}; "
         f"{rsync_cmd}"
     )
@@ -1221,9 +1256,10 @@ def _assigned_repo_ids_for_node(config: ClusterConfig, node_name: str, runtime_n
 
 
 def _assigned_model_dirs_for_node(config: ClusterConfig, node_name: str, runtime_node: Node) -> set[str]:
+    repo_ids = _assigned_repo_ids_for_node(config, node_name, runtime_node)
     return {
         build_artifact_identity(repo_id).model_dir_name
-        for repo_id in _assigned_repo_ids_for_node(config, node_name, runtime_node)
+        for repo_id in repo_ids
     }
 
 
@@ -2524,8 +2560,7 @@ def olla_smoke(
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP timeout in seconds."),
 ) -> None:
     """Run a black-box smoke test against a running Olla router."""
-    config, _ = _load_config()
-    resolved_base_url = base_url or local_base_url(resolve_port(None, default=config.services.olla_port))
+    resolved_base_url = base_url or local_base_url(_resolve_olla_port_from_optional_config(None))
     result = smoke_olla_router(
         base_url=resolved_base_url,
         model=model,
@@ -2574,8 +2609,7 @@ def olla_dev_smoke(
     ),
 ) -> None:
     """Generate Olla config, spawn Olla, smoke, teardown. Single-command dev workflow."""
-    config, _ = _load_config()
-    resolved_port = resolve_port(port, default=config.services.olla_port)
+    resolved_port = _resolve_olla_port_from_optional_config(port)
     result = dev_smoke_olla(
         binary=binary,
         model=model,
@@ -2664,7 +2698,8 @@ def edge_serve(
     )
     if not clients_by_key:
         typer.echo(
-            f"Error: no edge API keys found. Run `make edge-keys EDGE_CLIENTS=...` or set {users_env}.",
+            "Error: no edge API keys found. Run "
+            f"`thunder-forge edge keys --client ...` or `make edge-keys EDGE_CLIENTS=...`, or set {users_env}.",
             err=True,
         )
         raise typer.Exit(1)

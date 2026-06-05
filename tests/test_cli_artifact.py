@@ -405,6 +405,10 @@ def test_artifact_sync_apply_runs_directly_on_remote_cache_host(tmp_path: Path, 
     assert "TF_CACHE_REMOTE_EXEC=1" not in calls[0][2]
     assert "mkdir -p" in calls[0][2]
     assert "missing cache oMLX model dir" in calls[0][2]
+    assert 'test -f "$SOURCE_PATH/config.json"' in calls[0][2]
+    assert "find \"$SOURCE_PATH\" -name '*.incomplete'" in calls[0][2]
+    assert 'test ! -e "$SOURCE_PATH/.rsync-partial"' in calls[0][2]
+    assert "find \"$SOURCE_PATH\" \\( -name '*.safetensors' -o -name '*.bin' \\)" in calls[0][2]
     assert '"$SOURCE_PATH"' in calls[0][2]
     assert "'$SOURCE_PATH'" not in calls[0][2]
     assert calls[0][3]["timeout"] == 123
