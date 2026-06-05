@@ -1372,26 +1372,40 @@ def smoke_edge_contract(
             result.errors.append(f"GET /v1/models failed: {exc}")
 
         started = time.perf_counter()
+        chat_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 16,
+            "temperature": 0,
+            "stream": False,
+        }
         try:
             response = client.post(
                 "/v1/chat/completions",
                 headers=auth_headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 16,
-                    "temperature": 0,
-                    "stream": False,
-                },
+                json=chat_payload,
             )
             result.latency_ms = int((time.perf_counter() - started) * 1000)
             result.chat_ok = response.is_success
-            result.session_ok = response.request.headers.get("X-Olla-Session-ID") == fixed_session_id
             result.olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
             if not result.chat_ok:
                 result.errors.append(f"POST /v1/chat/completions returned {response.status_code}: {response.text}")
-            if not result.session_ok:
-                result.errors.append("X-Olla-Session-ID was not preserved on chat request")
+            elif not result.olla_endpoint:
+                result.errors.append("chat response did not include X-Olla-Endpoint for session check")
+            else:
+                repeat = client.post(
+                    "/v1/chat/completions",
+                    headers=auth_headers,
+                    json=chat_payload,
+                )
+                repeat_endpoint = repeat.headers.get("X-Olla-Endpoint", "")
+                result.session_ok = repeat.is_success and repeat_endpoint == result.olla_endpoint
+                if not repeat.is_success:
+                    result.errors.append(
+                        f"repeat POST /v1/chat/completions returned {repeat.status_code}: {repeat.text}"
+                    )
+                elif repeat_endpoint != result.olla_endpoint:
+                    result.errors.append("same session routed to different endpoints")
         except httpx.HTTPError as exc:
             result.latency_ms = int((time.perf_counter() - started) * 1000)
             result.errors.append(f"POST /v1/chat/completions failed: {exc}")

@@ -865,16 +865,6 @@ def _prepare_cache_role_node(*, cache_name: str, cache_node: Node, timeout: int)
         raise typer.Exit(setup_result.returncode)
 
 
-def _run_preflight(config: object, *, target_node: str | None = None) -> None:
-    """Run pre-flight checks. Exit on failure."""
-    from thunder_forge.cluster.preflight import print_preflight_result, run_preflight
-
-    errors = run_preflight(config, target_node=target_node)
-    print_preflight_result(errors, config)
-    if errors:
-        raise typer.Exit(1)
-
-
 def _get_runtime_node(config: ClusterConfig, node: str) -> Node:
     """Return a configured oMLX runtime node or exit with a CLI error."""
     from thunder_forge.cluster.config import RuntimeType
@@ -2917,6 +2907,7 @@ def artifact_status(
     cache_target = _first_cache_node(config)
     presence = probe_artifact_presence(
         repo_id=model,
+        node_user=runtime_node.user,
         node_host=runtime_node.host,
         node_home_dir=node_home_dir,
         cache_omlx_models_dir=cache_omlx_models_dir,
@@ -3124,6 +3115,7 @@ def _run_artifact_sync_workflow(
         if remote_cache_target is None:
             presence = probe_artifact_presence(
                 repo_id=repo_id,
+                node_user=runtime_node.user,
                 node_host=runtime_node.host,
                 node_home_dir=node_home_dir,
                 cache_omlx_models_dir=cache_omlx_models_dir,

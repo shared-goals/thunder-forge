@@ -11,6 +11,7 @@ from thunder_forge.cluster.artifacts import (
     build_artifact_sync_plan,
     is_local_artifact_complete,
     omlx_model_dir_name,
+    probe_artifact_presence,
 )
 
 
@@ -232,6 +233,51 @@ def test_local_artifact_complete_rejects_rsync_partial_dir(tmp_path) -> None:
     (model_dir / ".rsync-partial").mkdir()
 
     assert is_local_artifact_complete(model_dir) is False
+
+
+def test_probe_artifact_presence_checks_node_as_configured_user(tmp_path, monkeypatch) -> None:
+    import subprocess
+
+    import thunder_forge.cluster.artifacts as artifacts_module
+
+    cache_root = tmp_path / "cache"
+    cache_model_dir = cache_root / "mlx-community" / "gpt-oss-20b-MXFP4-Q8"
+    cache_model_dir.mkdir(parents=True)
+    (cache_model_dir / "config.json").write_text("{}")
+    (cache_model_dir / "model.safetensors").write_text("weights")
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(artifacts_module, "ssh_run", fake_ssh_run)
+
+    presence = probe_artifact_presence(
+        repo_id="mlx-community/gpt-oss-20b-MXFP4-Q8",
+        node_user="operator",
+        node_host="infer-01.lan",
+        node_home_dir="/Users/operator",
+        cache_omlx_models_dir=str(cache_root),
+    )
+
+    assert presence.cache_omlx_model_dir is True
+    assert presence.node_omlx_model_dir is True
+    assert calls == [
+        (
+            "operator",
+            "infer-01.lan",
+            (
+                "test -d /Users/operator/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8 && "
+                "test -f /Users/operator/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8/config.json && "
+                "test -z \"$(find /Users/operator/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8 "
+                "-name '*.incomplete' -print -quit)\" && "
+                "test ! -e /Users/operator/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8/.rsync-partial && "
+                "test -n \"$(find /Users/operator/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8 "
+                "\\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""
+            ),
+        )
+    ]
 
 
 def test_artifact_sync_plan_can_use_fabric_host() -> None:

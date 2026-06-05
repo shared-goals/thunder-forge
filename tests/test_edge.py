@@ -19,6 +19,7 @@ from thunder_forge.cluster.edge import (
     load_edge_clients_from_env,
     proxy_edge_request,
     rewrite_openai_path,
+    smoke_edge_contract,
     summarize_edge_usage,
 )
 
@@ -476,6 +477,40 @@ def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
     assert logged["model"] == "memory"
     assert logged["status_code"] == 502
     assert "dev-secret" not in logs[0]
+
+
+def test_smoke_edge_contract_fails_when_same_session_routes_to_different_endpoints() -> None:
+    chat_endpoints = ["infer-01-omlx-live", "infer-02-omlx-live"]
+    chat_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal chat_count
+        if request.method == "GET" and request.url.path == "/v1/models":
+            if request.headers.get("Authorization") == "Bearer dev-secret":
+                return httpx.Response(200, json={"object": "list", "data": [{"id": "memory"}]})
+            return httpx.Response(401, json={"error": "unauthorized"})
+        if request.method == "POST" and request.url.path == "/v1/chat/completions":
+            assert request.headers.get("X-Olla-Session-ID") == "tf-smoke-session"
+            endpoint = chat_endpoints[min(chat_count, len(chat_endpoints) - 1)]
+            chat_count += 1
+            return httpx.Response(
+                200,
+                headers={"X-Olla-Endpoint": endpoint},
+                json={"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]},
+            )
+        return httpx.Response(500, text=f"unexpected path: {request.url.path}")
+
+    result = smoke_edge_contract(
+        base_url="http://edge.local:40116",
+        api_key="dev-secret",
+        model="memory",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.chat_ok is True
+    assert result.session_ok is False
+    assert chat_count == 2
+    assert "same session routed to different endpoints" in result.errors
 
 
 def test_summarize_edge_usage_groups_requests_by_client(tmp_path) -> None:

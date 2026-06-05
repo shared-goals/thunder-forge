@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import shlex
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -159,21 +158,7 @@ def run_omlx_runtime_start(node: Node, *, timeout: int = 30) -> OmlxStartResult:
     command = build_omlx_serve_command(node)
     log_path = f"/tmp/thunder-forge-omlx-{node.runtime.port}.log"
     remote_command = f"nohup {command} > {shlex.quote(log_path)} 2>&1 & echo $!"
-    completed = subprocess.run(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            f"{node.user}@{node.host}",
-            remote_command,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+    completed = ssh_run(node.user, node.host, remote_command, timeout=timeout, shell=node.shell)
     return OmlxStartResult(
         returncode=completed.returncode,
         pid=completed.stdout.strip(),
