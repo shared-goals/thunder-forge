@@ -81,18 +81,6 @@ def _as_non_negative_int(raw: object) -> int | None:
     return raw if raw >= 0 else None
 
 
-def _extract_total_tokens(payload: dict[str, object]) -> int | None:
-    total_tokens = _as_non_negative_int(payload.get("total_tokens"))
-    if total_tokens is not None:
-        return total_tokens
-
-    prompt_tokens = _as_non_negative_int(payload.get("prompt_tokens"))
-    completion_tokens = _as_non_negative_int(payload.get("completion_tokens"))
-    if prompt_tokens is None and completion_tokens is None:
-        return None
-    return (prompt_tokens or 0) + (completion_tokens or 0)
-
-
 def _ordered_list_map(values: dict[str, list[str]]) -> dict[str, list[str]]:
     return {key: values[key] for key in sorted(values)}
 
@@ -137,11 +125,6 @@ class DailyUsageSummary:
     consumed_ms_by_model: dict[str, int] = field(default_factory=dict)
     requests_by_hour: dict[str, int] = field(default_factory=dict)
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
-    tokens_present: bool = False
-    tokens_total: int = 0
-    tokens_by_user: dict[str, int] = field(default_factory=dict)
-    tokens_by_node: dict[str, int] = field(default_factory=dict)
-    tokens_by_model: dict[str, int] = field(default_factory=dict)
     node_metrics_present: bool = False
     node_hot_loaded_models: dict[str, list[str]] = field(default_factory=dict)
     node_hot_loaded_count: dict[str, int] = field(default_factory=dict)
@@ -170,13 +153,6 @@ class DailyUsageSummary:
             },
             "invalid_lines": self.invalid_lines,
         }
-        if self.tokens_present:
-            payload["tokens"] = {
-                "total": self.tokens_total,
-                "by_user": self.tokens_by_user,
-                "by_node": self.tokens_by_node,
-                "by_model": self.tokens_by_model,
-            }
         if self.node_metrics_present:
             payload["node_metrics"] = {
                 "hot_loaded_models": self.node_hot_loaded_models,
@@ -202,15 +178,9 @@ def summarize_daily_usage(
     requests_by_hour: Counter[str] = Counter()
     requests_by_node_model: dict[str, Counter[str]] = defaultdict(Counter)
     requests_by_node_hour: dict[str, Counter[str]] = defaultdict(Counter)
-    tokens_by_user: Counter[str] = Counter()
-    tokens_by_node: Counter[str] = Counter()
-    tokens_by_model: Counter[str] = Counter()
-
     requests_total = 0
     invalid_lines = 0
     consumed_ms_total = 0
-    tokens_total = 0
-    tokens_present = False
 
     records, invalid = _load_jsonl_lines(access_log_path)
     invalid_lines += invalid
@@ -260,16 +230,6 @@ def summarize_daily_usage(
 
         if timestamp is not None:
             requests_by_hour[hour_bucket] += 1
-
-        record_tokens = _extract_total_tokens(payload)
-        if record_tokens is not None:
-            tokens_present = True
-            tokens_total += record_tokens
-            tokens_by_user[client_id] += record_tokens
-            if node_name:
-                tokens_by_node[node_name] += record_tokens
-            if model_name:
-                tokens_by_model[model_name] += record_tokens
 
     node_metrics_path_str = ""
     node_metrics_present = False
@@ -329,11 +289,6 @@ def summarize_daily_usage(
         consumed_ms_by_model=_ordered_counter(consumed_ms_by_model),
         requests_by_hour=_ordered_counter(requests_by_hour),
         requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
-        tokens_present=tokens_present,
-        tokens_total=tokens_total,
-        tokens_by_user=_ordered_counter(tokens_by_user),
-        tokens_by_node=_ordered_counter(tokens_by_node),
-        tokens_by_model=_ordered_counter(tokens_by_model),
         node_metrics_present=node_metrics_present,
         node_hot_loaded_models=_ordered_list_map(node_hot_loaded_models),
         node_hot_loaded_count=dict(sorted(node_hot_loaded_count.items())),

@@ -469,46 +469,6 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     assert "dev-secret" not in logs[0]
 
 
-def test_proxy_edge_request_records_upstream_usage_tokens() -> None:
-    logs: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            headers={"X-Olla-Endpoint": "infer-03-omlx-live"},
-            json={
-                "id": "chatcmpl-1",
-                "choices": [{"message": {"content": "pong"}}],
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 8,
-                    "total_tokens": 20,
-                },
-            },
-        )
-
-    config = EdgeProxyConfig(
-        olla_base_url="http://olla.local:40115",
-        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
-        access_log_sink=logs.append,
-    )
-
-    result = proxy_edge_request(
-        method="POST",
-        path="/v1/chat/completions",
-        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
-        body=json.dumps({"model": "memory", "messages": []}).encode(),
-        config=config,
-        transport=httpx.MockTransport(handler),
-    )
-
-    assert result.status_code == 200
-    logged = json.loads(logs[0])
-    assert logged["prompt_tokens"] == 12
-    assert logged["completion_tokens"] == 8
-    assert logged["total_tokens"] == 20
-
-
 def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
     logs: list[str] = []
 

@@ -129,15 +129,6 @@ class EdgeProxyUpstreamRequest:
     started: float
 
 
-@dataclass(frozen=True)
-class EdgeUsageTokens:
-    """Token usage extracted from an upstream OpenAI-compatible JSON response."""
-
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    total_tokens: int | None = None
-
-
 @dataclass
 class EdgeSmokeResult:
     """Result of a black-box smoke test against a running TF edge."""
@@ -216,9 +207,6 @@ class EdgeAccessLog:
     latency_ms: int
     olla_endpoint: str = ""
     node_name: str = ""
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    total_tokens: int | None = None
 
     def to_json_dict(self) -> dict[str, str | int]:
         payload: dict[str, str | int] = {
@@ -234,12 +222,6 @@ class EdgeAccessLog:
             payload["olla_endpoint"] = self.olla_endpoint
         if self.node_name:
             payload["node_name"] = self.node_name
-        if self.prompt_tokens is not None:
-            payload["prompt_tokens"] = self.prompt_tokens
-        if self.completion_tokens is not None:
-            payload["completion_tokens"] = self.completion_tokens
-        if self.total_tokens is not None:
-            payload["total_tokens"] = self.total_tokens
         return payload
 
 
@@ -590,9 +572,6 @@ def build_edge_access_log(
     latency_ms: int,
     olla_endpoint: str = "",
     api_key: str = "",
-    prompt_tokens: int | None = None,
-    completion_tokens: int | None = None,
-    total_tokens: int | None = None,
 ) -> EdgeAccessLog:
     """Build a secret-free access/accounting log record."""
     _ = api_key  # Accepted only so callers cannot accidentally include it in the record.
@@ -606,9 +585,6 @@ def build_edge_access_log(
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
         node_name=derive_olla_node_name(olla_endpoint),
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
     )
 
 
@@ -651,26 +627,6 @@ def _as_non_negative_int(raw: object) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int):
         return None
     return raw if raw >= 0 else None
-
-
-def _extract_usage_tokens(body: bytes) -> EdgeUsageTokens:
-    payload = _decode_json_object(body)
-    if payload is None:
-        return EdgeUsageTokens()
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
-        return EdgeUsageTokens()
-
-    prompt_tokens = _as_non_negative_int(usage.get("prompt_tokens"))
-    completion_tokens = _as_non_negative_int(usage.get("completion_tokens"))
-    total_tokens = _as_non_negative_int(usage.get("total_tokens"))
-    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
-        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
-    return EdgeUsageTokens(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
-    )
 
 
 def _requests_streaming_response(method: str, body: bytes) -> bool:
@@ -843,9 +799,6 @@ def _record_edge_access_event(
     status_code: int,
     started: float,
     olla_endpoint: str = "",
-    prompt_tokens: int | None = None,
-    completion_tokens: int | None = None,
-    total_tokens: int | None = None,
 ) -> None:
     if config.access_log_sink is None:
         return
@@ -858,9 +811,6 @@ def _record_edge_access_event(
         status_code=status_code,
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
     )
     config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
@@ -872,9 +822,7 @@ def _record_edge_access(
     path: str,
     status_code: int,
     olla_endpoint: str = "",
-    usage_tokens: EdgeUsageTokens | None = None,
 ) -> None:
-    tokens = usage_tokens or EdgeUsageTokens()
     _record_edge_access_event(
         config,
         request_id=upstream.request_id,
@@ -884,9 +832,6 @@ def _record_edge_access(
         status_code=status_code,
         started=upstream.started,
         olla_endpoint=olla_endpoint,
-        prompt_tokens=tokens.prompt_tokens,
-        completion_tokens=tokens.completion_tokens,
-        total_tokens=tokens.total_tokens,
     )
 
 
@@ -938,7 +883,6 @@ def proxy_edge_request(
         path=path,
         status_code=response.status_code,
         olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
-        usage_tokens=_extract_usage_tokens(response.content),
     )
 
     return EdgeProxyResponse(
