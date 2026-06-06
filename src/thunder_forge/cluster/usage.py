@@ -168,6 +168,9 @@ def summarize_daily_usage(
     node_metrics_path: Path | None = None,
 ) -> DailyUsageSummary:
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
+    if period == "all":
+        period = None
+
     requests_by_user: Counter[str] = Counter()
     consumed_ms_by_user: Counter[str] = Counter()
     requests_by_user_model: dict[str, Counter[str]] = defaultdict(Counter)

@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config usage-report usage-report-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes
 ARG ?= $(word 2,$(MAKECMDGOALS))
 EDGE_CLIENTS ?=
 
@@ -23,8 +23,8 @@ help:
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
 	@printf "  %-24s %s\n" "prune [node]" "sync, prune unassigned node cache models, and restart runtime"
 	@printf "  %-24s %s\n" "config" "generate configs/olla-config.yaml"
-	@printf "  %-24s %s\n" "usage-report [day]" "print usage summary (day: YYYY-MM-DD)"
-	@printf "  %-24s %s\n" "usage-report-json [day]" "print usage summary as JSON"
+	@printf "  %-24s %s\n" "usage [day]" "print usage summary (day: YYYY-MM-DD)"
+	@printf "  %-24s %s\n" "usage-json [day]" "print usage summary as JSON"
 	@printf "  %-24s %s\n" "usage-trim [days]" "trim local TF logs (default 3 days)"
 	@printf "  %-24s %s\n" "usage-duckdb [day]" "run DuckDB daily usage SQL over JSONL logs"
 	@printf "  %-24s %s\n" "edge-keys [clients]" "create missing TF edge client keys"
@@ -83,10 +83,10 @@ prune:
 config:
 	$(UV) thunder-forge generate-olla-config
 
-usage-report:
+usage:
 	$(UV) thunder-forge usage report $(if $(strip $(ARG)),--period "$(ARG)")
 
-usage-report-json:
+usage-json:
 	$(UV) thunder-forge usage report --json $(if $(strip $(ARG)),--period "$(ARG)")
 
 usage-trim:

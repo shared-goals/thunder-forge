@@ -1,5 +1,17 @@
 # AGENTS.md
 
+## Pre-MVP Principles
+
+- Follow DRY, KISS, and YAGNI by default.
+- Prefer a single clear code path over layered fallback logic.
+- Do not add backward-compatibility shims unless explicitly requested.
+- If a path is broken, fix the primary path directly instead of adding alternate execution paths.
+
+## Status Endpoints
+
+- Keep `/health` and `/status` anonymously accessible during pre-MVP.
+- Treat CLI status as an HTTP consumer of edge status APIs, not a secondary status implementation.
+
 ## Commit Naming
 
 When creating commits in this repository, use this subject format:

@@ -5,6 +5,16 @@ import json
 import httpx
 import pytest
 
+from thunder_forge.cluster.config import (
+    ClusterConfig,
+    Model,
+    ModelSource,
+    Node,
+    NodeRole,
+    NodeRuntime,
+    RuntimeType,
+    ServiceConfig,
+)
 from thunder_forge.cluster.edge import (
     EdgeAccessLog,
     EdgeClient,
@@ -13,6 +23,7 @@ from thunder_forge.cluster.edge import (
     authenticate_edge_request,
     build_edge_access_log,
     build_edge_clients_from_env,
+    build_edge_status_payload,
     edge_api_key_from_env,
     edge_models_payload,
     ensure_edge_api_keys,
@@ -23,6 +34,7 @@ from thunder_forge.cluster.edge import (
     smoke_edge_contract,
     summarize_edge_usage,
 )
+from thunder_forge.cluster.omlx import OmlxHealthResult
 
 
 def test_edge_auth_rejects_missing_and_invalid_api_keys() -> None:
@@ -190,6 +202,61 @@ def test_edge_models_payload_uses_tf_aliases_with_base_id_descriptions() -> None
     assert "mlx-community/Qwen3.6-35B-A3B-mxfp8" in str(data[0]["description"])
     assert data[0]["tf_runtime_model_id"] == "Qwen3.6-35B-A3B-mxfp8"
     assert data[1]["context_length"] == 262144
+
+
+def test_build_edge_status_payload_reports_cluster_snapshot(monkeypatch, tmp_path) -> None:
+    import thunder_forge.cluster.edge as edge_module
+
+    cluster_config = ClusterConfig(
+        services=ServiceConfig(edge_port=40116, olla_port=40115),
+        models={
+            "memory": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-mxfp4-bf16"),
+                runtime_model_id="gpt-oss-20b-mxfp4-bf16",
+            )
+        },
+        nodes={
+            "rock": Node(host="rock.lan", ram_gb=32, roles=[NodeRole.GATEWAY], user="shag"),
+            "msm1": Node(
+                host="msm1.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["memory"],
+            ),
+        },
+    )
+    config = EdgeProxyConfig(
+        olla_base_url="http://rock.lan:40115",
+        clients_by_key={},
+        cluster_config=cluster_config,
+        repo_root=tmp_path,
+    )
+
+    monkeypatch.setattr(edge_module, "_latest_olla_release_version", lambda *, timeout=5.0: "v0.0.28")
+    monkeypatch.setattr(edge_module, "_gateway_olla_version", lambda _config: "v0.0.27")
+    monkeypatch.setattr(edge_module, "_omlx_version", lambda _node, *, timeout: "0.4.2.dev2")
+    monkeypatch.setattr(
+        edge_module,
+        "check_omlx_health",
+        lambda base_url, **kwargs: OmlxHealthResult(
+            base_url=base_url,
+            health_ok=True,
+            models_ok=True,
+            models=["gpt-oss-20b-mxfp4-bf16"],
+            model_statuses={"gpt-oss-20b-mxfp4-bf16": {"id": "gpt-oss-20b-mxfp4-bf16", "loaded": True}},
+        ),
+    )
+
+    payload = build_edge_status_payload(config=config)
+
+    assert payload["ok"] is True
+    assert payload["gateway"]["olla_version"] == "v0.0.27"
+    assert payload["gateway"]["latest_olla_version"] == "v0.0.28"
+    assert payload["inference"][0]["omlx_version"] == "0.4.2.dev2"
+    assert payload["inference"][0]["served_models"] == ["memory"]
+    assert payload["summary"]["omlx_upgrade_hint"] == "no (versions aligned)"
 
 
 def test_session_id_is_preserved_or_generated_without_using_api_key() -> None:

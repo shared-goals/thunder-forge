@@ -15,6 +15,7 @@ import platform
 import re
 import secrets
 import shutil
+import subprocess
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -22,10 +23,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import httpx
 
+from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole
+from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases
+from thunder_forge.cluster.omlx import check_omlx_health
 from thunder_forge.cluster.ports import DEFAULT_EDGE_PORT, DEFAULT_OLLA_PORT, local_base_url, resolve_port
 from thunder_forge.cluster.services import (
     LaunchdServiceResult,
@@ -42,6 +48,8 @@ from thunder_forge.cluster.services import (
     user_launchd_commands,
     write_local_file,
 )
+from thunder_forge.cluster.ssh import ssh_run
+from thunder_forge.cluster.usage import extract_hot_loaded_models
 
 OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
 EDGE_USER_PREFIX = "TF_USER_"
@@ -88,9 +96,12 @@ class EdgeProxyConfig:
 
     olla_base_url: str
     clients_by_key: dict[str, EdgeClient]
+    cluster_config: ClusterConfig | None = None
+    repo_root: Path | None = None
     access_log_sink: Callable[[str], None] | None = None
     model_catalog: list[EdgeModelCatalogEntry] = field(default_factory=list)
     timeout: float = 60.0
+    status_timeout: float = 8.0
     max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
 
 
@@ -636,12 +647,213 @@ def _requests_streaming_response(method: str, body: bytes) -> bool:
     return payload is not None and payload.get("stream") is True
 
 
-def _json_response(status_code: int, payload: dict[str, str]) -> EdgeProxyResponse:
+def _json_response(status_code: int, payload: dict[str, object]) -> EdgeProxyResponse:
     return EdgeProxyResponse(
         status_code=status_code,
         headers={"Content-Type": "application/json"},
         body=json.dumps(payload, separators=(",", ":")).encode(),
     )
+
+
+def _extract_version_token(raw_output: str) -> str:
+    semver_pattern = re.compile(r"^v?\d+(?:\.\d+)*(?:\.[A-Za-z0-9]+)*(?:[-+][A-Za-z0-9.-]+)?$")
+    for line in raw_output.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        normalized_line = (
+            stripped_line.replace("(", " ")
+            .replace(")", " ")
+            .replace(",", " ")
+            .replace(";", " ")
+            .replace(":", " ")
+            .replace("=", " ")
+        )
+        for token in normalized_line.split():
+            if token and semver_pattern.match(token):
+                return token
+    return ""
+
+
+def _latest_olla_release_version(*, timeout: float = 5.0) -> str:
+    request = Request(
+        "https://api.github.com/repos/thushan/olla/releases/latest",
+        headers={"User-Agent": "thunder-forge"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode())
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return ""
+    return str(payload.get("tag_name", "")).strip()
+
+
+def _gateway_olla_version(config: EdgeProxyConfig) -> str:
+    if config.repo_root is None or config.cluster_config is None:
+        return "unknown"
+    try:
+        config.cluster_config.gateway_name
+    except ValueError:
+        return "unknown"
+
+    binary_path = config.repo_root / config.cluster_config.services.olla_bin_dir / "olla"
+    commands = [
+        f"{binary_path} --version",
+        "command -v olla >/dev/null 2>&1 && olla --version",
+    ]
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            shell=True,
+            text=True,
+            capture_output=True,
+            timeout=max(config.status_timeout, 2.0),
+            check=False,
+        )
+        output = "\n".join(part for part in [completed.stdout, completed.stderr] if part)
+        version = _extract_version_token(output)
+        if completed.returncode == 0 and version:
+            return version
+
+    return config.cluster_config.services.olla_version or "unknown"
+
+
+def _omlx_version(node: Node, *, timeout: float) -> str:
+    home_dir = node.home_dir or f"/Users/{node.user}"
+    candidate = f"{home_dir}/.local/bin/omlx"
+    commands = [
+        f"{candidate} --version",
+        "command -v omlx >/dev/null 2>&1 && omlx --version",
+    ]
+    for command in commands:
+        run_result = ssh_run(node.user, node.host, command, timeout=int(max(timeout, 2.0)), shell=node.shell)
+        output = "\n".join(part for part in [run_result.stdout, run_result.stderr] if part)
+        version = _extract_version_token(output)
+        if run_result.returncode == 0 and version:
+            return version
+    return "unknown"
+
+
+def _resolve_status_targets(cluster_config: ClusterConfig, target: str | None) -> tuple[list[str], list[str]]:
+    if target:
+        if target not in cluster_config.nodes:
+            msg = f"node '{target}' not found"
+            raise ValueError(msg)
+        node = cluster_config.nodes[target]
+        gateway_names = [target] if node.has_role(NodeRole.GATEWAY) else []
+        inference_names = [target] if node.has_role(NodeRole.INFERENCE) else []
+        if not gateway_names and not inference_names:
+            msg = f"node '{target}' has no status role"
+            raise ValueError(msg)
+        return gateway_names, inference_names
+
+    gateway_names = []
+    try:
+        gateway_names = [cluster_config.gateway_name]
+    except ValueError:
+        gateway_names = []
+    inference_names = list(cluster_config.compute_nodes.keys())
+    return gateway_names, inference_names
+
+
+def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = None) -> dict[str, object]:
+    if config.cluster_config is None:
+        raise ValueError("edge status requires cluster_config")
+
+    cluster_config = config.cluster_config
+    gateway_names, inference_names = _resolve_status_targets(cluster_config, target)
+    latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
+
+    gateway_payload: dict[str, object] | None = None
+    if gateway_names:
+        gateway_name = gateway_names[0]
+        gateway_node = cluster_config.nodes[gateway_name]
+        olla_version = _gateway_olla_version(config)
+        latest_label = latest_olla or "unknown"
+        if latest_olla and olla_version not in {"unknown", latest_olla}:
+            upgrade_label = "yes"
+        elif latest_olla:
+            upgrade_label = "no"
+        else:
+            upgrade_label = "unknown"
+        gateway_payload = {
+            "name": gateway_name,
+            "host": gateway_node.host,
+            "olla_version": olla_version,
+            "latest_olla_version": latest_label,
+            "upgrade": upgrade_label,
+        }
+
+    inference_payloads: list[dict[str, object]] = []
+    failed = False
+    omlx_versions: list[str] = []
+    for node_name in inference_names:
+        runtime_node = cluster_config.nodes[node_name]
+        runtime = runtime_node.runtime
+        if runtime is None:
+            inference_payloads.append(
+                {
+                    "name": node_name,
+                    "host": runtime_node.host,
+                    "health": "fail",
+                    "models": "fail",
+                    "omlx_version": "unknown",
+                    "served_models": [],
+                    "hot_loaded_models": [],
+                    "errors": ["node has no runtime configured"],
+                }
+            )
+            failed = True
+            continue
+
+        base_url = f"http://{runtime_node.host}:{runtime.port}"
+        result = check_omlx_health(base_url, include_models=True, timeout=config.status_timeout)
+        omlx_version = _omlx_version(runtime_node, timeout=config.status_timeout)
+        omlx_versions.append(omlx_version)
+        served_models = map_runtime_models_to_aliases(cluster_config, runtime_node, result.models)
+        hot_loaded_models = map_runtime_models_to_aliases(
+            cluster_config,
+            runtime_node,
+            extract_hot_loaded_models(result.model_statuses),
+        )
+        inference_payloads.append(
+            {
+                "name": node_name,
+                "host": runtime_node.host,
+                "health": "ok" if result.health_ok else "fail",
+                "models": "ok" if result.models_ok else "fail",
+                "omlx_version": omlx_version,
+                "served_models": served_models,
+                "hot_loaded_models": hot_loaded_models,
+                "errors": result.errors,
+            }
+        )
+        failed = failed or not (result.health_ok and result.models_ok)
+
+    known_versions = sorted({version for version in omlx_versions if version != "unknown"})
+    unknown_count = sum(1 for version in omlx_versions if version == "unknown")
+    if len(known_versions) > 1:
+        omlx_upgrade_hint = f"yes (version drift: {', '.join(known_versions)})"
+    elif unknown_count:
+        omlx_upgrade_hint = "check (unknown versions present)"
+    else:
+        omlx_upgrade_hint = "no (versions aligned)"
+
+    ok = not failed
+    return {
+        "ok": ok,
+        "target": target or "all",
+        "health": {"ok": ok},
+        "gateway": gateway_payload,
+        "inference": inference_payloads,
+        "summary": {
+            "inference_total": len(inference_payloads),
+            "inference_healthy": sum(
+                1 for item in inference_payloads if item["health"] == "ok" and item["models"] == "ok"
+            ),
+            "omlx_upgrade_hint": omlx_upgrade_hint,
+        },
+    }
 
 
 def edge_models_payload(model_catalog: list[EdgeModelCatalogEntry]) -> dict[str, object]:
@@ -910,6 +1122,23 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
             return
 
         def _handle_edge_request(self) -> None:
+            normalized_path = urlsplit(self.path).path
+            if self.command == "GET" and normalized_path == "/health":
+                self._send_edge_response(_json_response(200, {"status": "ok"}))
+                return
+            if normalized_path == "/status":
+                if self.command != "GET":
+                    self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
+                    return
+                try:
+                    target = parse_qs(urlsplit(self.path).query).get("target", [""])[0].strip() or None
+                    payload = build_edge_status_payload(config=config, target=target)
+                except (ValueError, RuntimeError, httpx.HTTPError, OSError) as exc:
+                    self._send_edge_response(_json_response(503, {"error": f"status_unavailable: {exc}"}))
+                    return
+                status_code = 200 if payload.get("ok") else 503
+                self._send_edge_response(_json_response(status_code, payload))
+                return
             headers = dict(self.headers.items())
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")

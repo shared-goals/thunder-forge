@@ -1,5 +1,6 @@
 """CLI tests for node-level runtime commands."""
 
+import json
 import platform
 from pathlib import Path
 from textwrap import dedent
@@ -838,40 +839,26 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
 
 def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
-    import thunder_forge.cluster.config as config_module
 
-    repo = tmp_path
-    (repo / "tfconfig.yaml").write_text(
-        """models:
-  memory:
-    source:
-      repo: mlx-community/gpt-oss-20b-MXFP4-Q8
-    runtime_model_id: gpt-oss-20b-MXFP4-Q8
-nodes:
-  infer-03:
-    host: infer-03.lan
-    ram_gb: 128
-    roles: [inference]
-    user: shag
-    models: [memory]
-    runtime:
-      type: omlx
-"""
-    )
-    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setattr(cli_module, "_omlx_version_for_node", lambda runtime_node: "0.4.2.dev2")
-    monkeypatch.setattr(cli_module, "_latest_olla_release_version", lambda timeout=5: "")
-    monkeypatch.setattr(
-        cli_module,
-        "check_omlx_health",
-        lambda base_url, **kwargs: OmlxHealthResult(
-            base_url=base_url,
-            health_ok=True,
-            models_ok=True,
-            models=["gpt-oss-20b-MXFP4-Q8"],
-            model_statuses={"gpt-oss-20b-MXFP4-Q8": {"id": "gpt-oss-20b-MXFP4-Q8", "loaded": True}},
-        ),
-    )
+    payload = {
+        "ok": True,
+        "target": "all",
+        "gateway": None,
+        "inference": [
+            {
+                "name": "infer-03",
+                "host": "infer-03.lan",
+                "health": "ok",
+                "models": "ok",
+                "omlx_version": "0.4.2.dev2",
+                "served_models": ["memory"],
+                "hot_loaded_models": ["memory"],
+                "errors": [],
+            }
+        ],
+        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+    }
+    monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
     result = runner.invoke(app, ["cluster", "status"])
 
@@ -886,46 +873,32 @@ nodes:
 
 def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
-    import thunder_forge.cluster.config as config_module
 
-    repo = tmp_path
-    (repo / "tfconfig.yaml").write_text(
-        """models:
-  memory:
-    source:
-      repo: mlx-community/gpt-oss-20b-MXFP4-Q8
-    runtime_model_id: gpt-oss-20b-MXFP4-Q8
-nodes:
-  rock:
-    host: rock.lan
-    ram_gb: 32
-    roles: [gateway]
-    user: shag
-  infer-03:
-    host: infer-03.lan
-    ram_gb: 128
-    roles: [inference]
-    user: shag
-    models: [memory]
-    runtime:
-      type: omlx
-"""
-    )
-    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setattr(cli_module, "_latest_olla_release_version", lambda timeout=5: "v0.0.27")
-    monkeypatch.setattr(cli_module, "_gateway_olla_version_for_node", lambda *_args: "v0.0.27")
-    monkeypatch.setattr(cli_module, "_omlx_version_for_node", lambda runtime_node: "0.4.2.dev2")
-    monkeypatch.setattr(
-        cli_module,
-        "check_omlx_health",
-        lambda base_url, **kwargs: OmlxHealthResult(
-            base_url=base_url,
-            health_ok=True,
-            models_ok=True,
-            models=["gpt-oss-20b-MXFP4-Q8"],
-            model_statuses={"gpt-oss-20b-MXFP4-Q8": {"id": "gpt-oss-20b-MXFP4-Q8", "loaded": True}},
-        ),
-    )
+    payload = {
+        "ok": True,
+        "target": "all",
+        "gateway": {
+            "name": "rock",
+            "host": "rock.lan",
+            "olla_version": "v0.0.27",
+            "latest_olla_version": "v0.0.27",
+            "upgrade": "no",
+        },
+        "inference": [
+            {
+                "name": "infer-03",
+                "host": "infer-03.lan",
+                "health": "ok",
+                "models": "ok",
+                "omlx_version": "0.4.2.dev2",
+                "served_models": ["memory"],
+                "hot_loaded_models": ["memory"],
+                "errors": [],
+            }
+        ],
+        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+    }
+    monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
     result = runner.invoke(app, ["cluster", "status"])
 
@@ -936,49 +909,40 @@ nodes:
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
 
 
-def test_cluster_status_reports_upgrade_needed_when_olla_is_behind(tmp_path: Path, monkeypatch) -> None:
+def test_cluster_status_json_output_emits_payload(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
-    import thunder_forge.cluster.config as config_module
 
-    repo = tmp_path
-    (repo / "tfconfig.yaml").write_text(
-        dedent("""\
-            models: {}
-            nodes:
-              rock:
-                host: rock.lan
-                ram_gb: 32
-                roles: [gateway]
-                user: shag
-              infer-03:
-                host: infer-03.lan
-                ram_gb: 128
-                roles: [inference]
-                user: shag
-                runtime:
-                  type: omlx
-        """)
-    )
-    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setattr(cli_module, "_latest_olla_release_version", lambda timeout=5: "v0.0.28")
-    monkeypatch.setattr(cli_module, "_gateway_olla_version_for_node", lambda *_args: "v0.0.27")
-    monkeypatch.setattr(cli_module, "_omlx_version_for_node", lambda runtime_node: "0.4.2.dev2")
-    monkeypatch.setattr(
-        cli_module,
-        "check_omlx_health",
-        lambda base_url, **kwargs: OmlxHealthResult(
-            base_url=base_url,
-            health_ok=True,
-            models_ok=True,
-            models=[],
-            model_statuses={},
-        ),
-    )
+    payload = {
+        "ok": True,
+        "target": "msm1",
+        "gateway": None,
+        "inference": [],
+        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+    }
+    monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
+
+    result = runner.invoke(app, ["cluster", "status", "msm1", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+
+
+def test_cluster_status_returns_success_for_unhealthy_payload(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    payload = {
+        "ok": False,
+        "target": "all",
+        "gateway": None,
+        "inference": [],
+        "summary": {},
+    }
+    monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
     result = runner.invoke(app, ["cluster", "status"])
 
     assert result.exit_code == 0
-    assert "rock: olla_version=v0.0.27 latest=v0.0.28 upgrade=yes" in result.stdout
+    assert "Thunder Forge cluster status" in result.stdout
 
 
 def test_probe_node_version_parses_stderr_output(tmp_path: Path, monkeypatch) -> None:

@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import httpx
 import typer
 
 from thunder_forge.cluster.artifacts import (
@@ -1125,6 +1126,78 @@ def _print_prepare_plan(
         typer.echo("  inference: skipped")
 
 
+def _edge_status_base_url(config: ClusterConfig) -> str:
+    try:
+        gateway_host = config.gateway.host
+    except ValueError:
+        gateway_host = "127.0.0.1"
+    return f"http://{gateway_host}:{config.services.edge_port}"
+
+
+def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) -> dict[str, object]:
+    base_url = _edge_status_base_url(config)
+    params = {"target": target} if target else None
+    with httpx.Client(base_url=base_url, timeout=30.0, trust_env=False) as client:
+        try:
+            response = client.get("/status", params=params)
+        except httpx.HTTPError as exc:
+            typer.echo(f"Error: failed to fetch cluster status from {base_url}: {exc}", err=True)
+            raise typer.Exit(1)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        typer.echo(f"Error: edge status endpoint returned invalid JSON: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not isinstance(payload, dict):
+        typer.echo("Error: edge status endpoint returned an invalid payload", err=True)
+        raise typer.Exit(1)
+    if payload.get("error"):
+        typer.echo(f"Error: edge status endpoint error: {payload['error']}", err=True)
+        raise typer.Exit(1)
+    return payload
+
+
+def _print_cluster_status_payload(payload: dict[str, object]) -> None:
+    typer.echo("Thunder Forge cluster status")
+    typer.echo(f"target: {payload.get('target', 'all')}")
+
+    gateway = payload.get("gateway")
+    if isinstance(gateway, dict):
+        typer.echo(
+            f"{gateway.get('name', 'gateway')}: olla_version={gateway.get('olla_version', 'unknown')} "
+            f"latest={gateway.get('latest_olla_version', 'unknown')} upgrade={gateway.get('upgrade', 'unknown')}"
+        )
+
+    inference = payload.get("inference")
+    if isinstance(inference, list):
+        for node in inference:
+            if not isinstance(node, dict):
+                continue
+            typer.echo(
+                f"{node.get('name', 'node')}: health={node.get('health', 'fail')} "
+                f"models={node.get('models', 'fail')}"
+            )
+            typer.echo(f"  omlx_version: {node.get('omlx_version', 'unknown')}")
+            served_models = node.get("served_models")
+            if isinstance(served_models, list) and served_models:
+                typer.echo(f"  served_models: {', '.join(str(item) for item in served_models)}")
+            hot_loaded_models = node.get("hot_loaded_models")
+            if isinstance(hot_loaded_models, list) and hot_loaded_models:
+                typer.echo(f"  hot_loaded_models: {', '.join(str(item) for item in hot_loaded_models)}")
+            errors = node.get("errors")
+            if isinstance(errors, list):
+                for error in errors:
+                    typer.echo(f"Error: {node.get('name', 'node')}: {error}", err=True)
+
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary.get("omlx_upgrade_hint"):
+        typer.echo(f"omlx_upgrade_hint: {summary['omlx_upgrade_hint']}")
+
+
+def _usage_report_default_period() -> str:
+    return datetime.now().date().isoformat()
+
+
 def _extract_version_token(raw_output: str) -> str:
     semver_pattern = re.compile(r"^v?\d+(?:\.\d+)*(?:\.[A-Za-z0-9]+)*(?:[-+][A-Za-z0-9.-]+)?$")
     fallback = ""
@@ -1507,64 +1580,15 @@ def cluster_status(
         None,
         help="Optional inference node name. Omit for all inference nodes.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON output."),
 ) -> None:
-    """Check direct oMLX health for selected inference nodes."""
-    config, repo_root = _load_config()
-    gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
-    typer.echo("Thunder Forge cluster status")
-    typer.echo(f"target: {target or 'all'}")
-    latest_olla = _latest_olla_release_version() if gateway_names else ""
-    for gateway_name in gateway_names:
-        gateway_node = config.nodes[gateway_name]
-        olla_version = _gateway_olla_version_for_node(config, repo_root, gateway_node)
-        latest_label = latest_olla or "unknown"
-        if latest_olla and olla_version not in {"unknown", latest_olla}:
-            upgrade_label = "yes"
-        elif latest_olla:
-            upgrade_label = "no"
-        else:
-            upgrade_label = "unknown"
-        typer.echo(
-            f"{gateway_name}: olla_version={olla_version} latest={latest_label} upgrade={upgrade_label}"
-        )
-    if not inference_names:
-        typer.echo("status: no inference nodes selected")
-        return
-
-    failed = False
-    omlx_versions: list[str] = []
-    for node_name in inference_names:
-        runtime_node = _get_runtime_node(config, node_name)
-        base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
-        result = check_omlx_health(base_url, include_models=True)
-        health_status = "ok" if result.health_ok else "fail"
-        models_status = "ok" if result.models_ok else "fail"
-        typer.echo(f"{node_name}: health={health_status} models={models_status}")
-        omlx_version = _omlx_version_for_node(runtime_node)
-        omlx_versions.append(omlx_version)
-        typer.echo(f"  omlx_version: {omlx_version}")
-        if result.models:
-            served_models = map_runtime_models_to_aliases(config, runtime_node, result.models)
-            typer.echo(f"  served_models: {', '.join(served_models)}")
-        hot_loaded_runtime_ids = extract_hot_loaded_models(result.model_statuses)
-        hot_loaded_models = map_runtime_models_to_aliases(config, runtime_node, hot_loaded_runtime_ids)
-        if hot_loaded_models:
-            typer.echo(f"  hot_loaded_models: {', '.join(hot_loaded_models)}")
-        for error in result.errors:
-            typer.echo(f"Error: {node_name}: {error}", err=True)
-        failed = failed or not (result.health_ok and result.models_ok)
-
-    known_versions = sorted({version for version in omlx_versions if version != "unknown"})
-    unknown_count = sum(1 for version in omlx_versions if version == "unknown")
-    if len(known_versions) > 1:
-        typer.echo(f"omlx_upgrade_hint: yes (version drift: {', '.join(known_versions)})")
-    elif unknown_count:
-        typer.echo("omlx_upgrade_hint: check (unknown versions present)")
+    """Check cluster status through the edge /status JSON endpoint."""
+    config, _ = _load_config()
+    payload = _fetch_cluster_status_payload(config, target=target)
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        typer.echo("omlx_upgrade_hint: no (versions aligned)")
-
-    if failed:
-        raise typer.Exit(1)
+        _print_cluster_status_payload(payload)
 
 
 @cluster_app.command("sync")
@@ -2096,7 +2120,7 @@ def usage_report(
     period: str | None = typer.Option(
         None,
         "--period",
-        help="Optional YYYY-MM-DD day to summarize. Defaults to all records in the file.",
+        help="Optional YYYY-MM-DD day to summarize. Use 'all' to summarize all records.",
     ),
     access_log: Path | None = typer.Option(
         None,
@@ -2118,6 +2142,8 @@ def usage_report(
     config, repo_root = _load_config()
     access_log_path = _edge_access_log_path(repo_root, config, access_log)
     node_metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
+    if period is None:
+        period = _usage_report_default_period()
     summary = summarize_daily_usage(access_log_path, period=period, node_metrics_path=node_metrics_path)
 
     if json_output:
@@ -2430,6 +2456,8 @@ def edge_serve(
     edge_proxy_config = EdgeProxyConfig(
         olla_base_url=resolved_olla_base_url,
         clients_by_key=clients_by_key,
+        cluster_config=cluster_config,
+        repo_root=repo_root,
         access_log_sink=log_sink,
         model_catalog=_edge_model_catalog_from_config(cluster_config),
     )

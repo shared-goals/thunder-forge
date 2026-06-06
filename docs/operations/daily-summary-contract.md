@@ -28,8 +28,8 @@ uv run thunder-forge usage report --period 2026-06-02 --json
 uv run thunder-forge usage trim-logs
 
 # Make wrappers
-make usage-report 2026-06-02
-make usage-report-json 2026-06-02
+make usage 2026-06-02
+make usage-json 2026-06-02
 ```
 
 ## Data Model
