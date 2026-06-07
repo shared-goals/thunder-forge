@@ -398,6 +398,7 @@ def build_gateway_daemon_setup_result(
     olla_base_url: str | None,
     users_env: str,
     access_log_path: Path,
+    olla_working_directory: Path | None = None,
     user: str,
     admin_user: str,
     interactive_sudo: bool,
@@ -431,6 +432,7 @@ def build_gateway_daemon_setup_result(
             config_path=config_path,
             port=resolved_olla_port,
             user=user,
+            working_directory=olla_working_directory,
         )
         edge_result, edge_health_url = _build_edge_systemd_result(
             repo_root=repo_root,
@@ -449,6 +451,7 @@ def build_gateway_daemon_setup_result(
             port=resolved_olla_port,
             user=user,
             manager="daemon",
+            working_directory=olla_working_directory,
         )
         edge_result, edge_health_url = _build_edge_launchd_result(
             repo_root=repo_root,
@@ -517,6 +520,7 @@ def run_gateway_daemon_setup(
     olla_base_url: str | None = None,
     users_env: str,
     access_log_path: Path,
+    olla_working_directory: Path | None = None,
     user: str,
     admin_user: str = "",
     interactive_sudo: bool = False,
@@ -535,6 +539,7 @@ def run_gateway_daemon_setup(
         olla_base_url=olla_base_url,
         users_env=users_env,
         access_log_path=access_log_path,
+        olla_working_directory=olla_working_directory,
         user=user,
         admin_user=admin_user,
         interactive_sudo=interactive_sudo,

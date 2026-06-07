@@ -160,8 +160,8 @@ def test_ensure_edge_api_keys_creates_missing_keys_without_overwriting_existing(
 
 
 def test_rewrite_openai_path_maps_root_v1_to_olla_provider_path() -> None:
-    assert rewrite_openai_path("/v1/models") == "/olla/openai-compatible/v1/models"
-    assert rewrite_openai_path("/v1/chat/completions") == "/olla/openai-compatible/v1/chat/completions"
+    assert rewrite_openai_path("/v1/models") == "/olla/omlx/v1/models"
+    assert rewrite_openai_path("/v1/chat/completions") == "/olla/omlx/v1/chat/completions"
 
 
 def test_rewrite_openai_path_rejects_non_openai_paths() -> None:
@@ -480,7 +480,7 @@ def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() ->
     assert result.headers["X-Olla-Endpoint"] == "infer-03-omlx-live"
     assert b"data:" in result.body
     assert len(forwarded) == 1
-    assert forwarded[0].url == "http://olla.local:40115/olla/openai-compatible/v1/chat/completions"
+    assert forwarded[0].url == "http://olla.local:40115/olla/omlx/v1/chat/completions"
     assert json.loads(forwarded[0].content)["stream"] is True
     assert all("dev-secret" not in entry for entry in logs)
     assert all("do not log me" not in entry for entry in logs)
@@ -523,7 +523,7 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     assert result.headers["X-Olla-Endpoint"] == "infer-03-omlx-live"
     assert len(forwarded) == 1
     assert forwarded[0].method == "POST"
-    assert forwarded[0].url == "http://olla.local:40115/olla/openai-compatible/v1/chat/completions"
+    assert forwarded[0].url == "http://olla.local:40115/olla/omlx/v1/chat/completions"
     assert forwarded[0].headers["X-Olla-Session-ID"] == "session-123"
     assert "authorization" not in forwarded[0].headers
     assert len(logs) == 1

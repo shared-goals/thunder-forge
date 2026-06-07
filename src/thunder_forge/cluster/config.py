@@ -156,6 +156,7 @@ class ServiceConfig:
     olla_os: str = DEFAULT_OLLA_OS
     olla_arch: str = DEFAULT_OLLA_ARCH
     olla_bin_dir: str = DEFAULT_OLLA_BIN_DIR
+    olla_local_binary: str = ""
     omlx_port: int = DEFAULT_OMLX_PORT
     edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
@@ -427,6 +428,12 @@ def _parse_services(raw: object) -> ServiceConfig:
         olla_os=str(olla_raw.get("os", DEFAULT_OLLA_OS)).strip() or DEFAULT_OLLA_OS,
         olla_arch=str(olla_raw.get("arch", DEFAULT_OLLA_ARCH)).strip() or DEFAULT_OLLA_ARCH,
         olla_bin_dir=str(olla_raw.get("bin_dir", DEFAULT_OLLA_BIN_DIR)).strip() or DEFAULT_OLLA_BIN_DIR,
+        olla_local_binary=_parse_optional_non_empty_string(
+            olla_raw.get("local_binary"),
+            name="services.olla.local_binary",
+            default="",
+        )
+        or "",
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
         edge_access_log=edge_access_log,
         log_retention_days=log_retention_days,
@@ -681,7 +688,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
                 {
                     "url": f"http://{node.host}:{runtime.port}",
                     "name": f"{node_name}-omlx-live",
-                    "type": "openai-compatible",
+                    "type": "omlx",
                     "priority": 100,
                     "model_url": "/v1/models",
                     "health_check_url": "/health",

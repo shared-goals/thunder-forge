@@ -1354,6 +1354,16 @@ def cluster_prepare(
     resolved_olla_os = olla_os or config.services.olla_os
     resolved_olla_arch = olla_arch or config.services.olla_arch
     resolved_olla_bin_dir = olla_bin_dir or Path(config.services.olla_bin_dir)
+    configured_local_olla_binary = (
+        _repo_relative_path(repo_root, Path(config.services.olla_local_binary))
+        if config.services.olla_local_binary
+        else None
+    )
+    configured_local_olla_working_directory = None
+    if configured_local_olla_binary is not None:
+        candidate_working_directory = configured_local_olla_binary.parent.parent
+        if (candidate_working_directory / "config" / "profiles").is_dir():
+            configured_local_olla_working_directory = candidate_working_directory
     gateway_names, cache_names, inference_names = _resolve_prepare_targets(config, target)
     _print_prepare_plan(
         target=target,
@@ -1366,8 +1376,13 @@ def cluster_prepare(
 
     if dry_run:
         if gateway_names:
-            preview_olla_path = resolved_olla_bin_dir / "olla"
-            typer.echo(f"would: ensure Olla {resolved_olla_version} at {preview_olla_path}")
+            if configured_local_olla_binary is not None:
+                typer.echo(f"would: use local Olla binary {configured_local_olla_binary}")
+                if configured_local_olla_working_directory is not None:
+                    typer.echo(f"would: use local Olla working directory {configured_local_olla_working_directory}")
+            else:
+                preview_olla_path = resolved_olla_bin_dir / "olla"
+                typer.echo(f"would: ensure Olla {resolved_olla_version} at {preview_olla_path}")
             typer.echo("would: generate configs/olla-config.yaml")
         if cache_names:
             for name in cache_names:
@@ -1391,16 +1406,28 @@ def cluster_prepare(
     if gateway_names:
         typer.echo("")
         typer.echo("== Gateway Tooling ==")
-        olla_result = ensure_olla_binary(
-            version=resolved_olla_version,
-            os_name=resolved_olla_os,
-            arch=resolved_olla_arch,
-            bin_dir=_repo_relative_path(repo_root, resolved_olla_bin_dir),
-            progress=_progress,
-        )
-        binary_path = olla_result.binary_path
-        typer.echo(f"  latest_olla: {getattr(olla_result, 'version', resolved_olla_version)}")
-        typer.echo(f"  upgrade_note: {_olla_upgrade_note(getattr(olla_result, 'status', ''))}")
+        if configured_local_olla_binary is not None:
+            if not configured_local_olla_binary.exists():
+                typer.echo(
+                    f"Error: configured local Olla binary not found: {configured_local_olla_binary}",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            binary_path = configured_local_olla_binary
+            typer.echo(f"  local_olla_binary: {binary_path}")
+            if configured_local_olla_working_directory is not None:
+                typer.echo(f"  local_olla_workdir: {configured_local_olla_working_directory}")
+        else:
+            olla_result = ensure_olla_binary(
+                version=resolved_olla_version,
+                os_name=resolved_olla_os,
+                arch=resolved_olla_arch,
+                bin_dir=_repo_relative_path(repo_root, resolved_olla_bin_dir),
+                progress=_progress,
+            )
+            binary_path = olla_result.binary_path
+            typer.echo(f"  latest_olla: {getattr(olla_result, 'version', resolved_olla_version)}")
+            typer.echo(f"  upgrade_note: {_olla_upgrade_note(getattr(olla_result, 'status', ''))}")
         config_path = write_generated_olla_config(config, repo_root=repo_root)
         typer.echo(f"  config: generated {config_path}")
 
@@ -1424,6 +1451,7 @@ def cluster_prepare(
             olla_base_url=local_base_url(config.services.olla_port),
             users_env=EDGE_USER_PREFIX,
             access_log_path=_edge_access_log_path(repo_root, config, None),
+            olla_working_directory=configured_local_olla_working_directory,
             user=_gateway_operator_user(config, ""),
             admin_user=config.services.frontend_admin_user or gateway_node.admin_user,
             interactive_sudo=True,

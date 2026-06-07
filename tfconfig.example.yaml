@@ -10,6 +10,8 @@ services:
   olla:
     port: 40115
     version: v0.0.27
+    # Optional: use an already-compiled local Olla binary and skip release download in `cluster prepare`.
+    # local_binary: /absolute/path/to/olla
     os: macos
     arch: arm64
     bin_dir: .tmp/olla-bin

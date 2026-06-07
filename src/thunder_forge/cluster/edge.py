@@ -51,7 +51,7 @@ from thunder_forge.cluster.services import (
 from thunder_forge.cluster.ssh import ssh_run
 from thunder_forge.cluster.usage import extract_hot_loaded_models
 
-OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
+OLLA_OMLX_PREFIX = "/olla/omlx/v1"
 EDGE_USER_PREFIX = "TF_USER_"
 EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
 EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
@@ -560,7 +560,7 @@ def rewrite_openai_path(path: str) -> str:
         msg = "TF edge only /v1/* paths can be proxied to Olla"
         raise ValueError(msg)
     suffix = path.removeprefix("/v1")
-    return f"{OLLA_OPENAI_PREFIX}{suffix}"
+    return f"{OLLA_OMLX_PREFIX}{suffix}"
 
 
 def ensure_olla_session_id(headers: dict[str, str], *, request_id: str, client_id: str) -> EdgeSessionID:

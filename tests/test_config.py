@@ -68,7 +68,11 @@ def test_parse_config_admin_users() -> None:
             "services": {
                 "log_retention_days": 5,
                 "frontend": {"admin_user": "serpo"},
-                "olla": {"version": "v9.9.9", "bin_dir": ".tmp/custom-olla"},
+                "olla": {
+                    "version": "v9.9.9",
+                    "bin_dir": ".tmp/custom-olla",
+                    "local_binary": "olla/bin/olla",
+                },
             },
             "operations": {
                 "smoke": {"alias": "memory", "client_id": "admin", "timeout": 12},
@@ -99,6 +103,7 @@ def test_parse_config_admin_users() -> None:
     assert config.services.olla_version == "v9.9.9"
     assert config.services.olla_version_pinned is True
     assert config.services.olla_bin_dir == ".tmp/custom-olla"
+    assert config.services.olla_local_binary == "olla/bin/olla"
     assert config.operations.smoke.alias == "memory"
     assert config.operations.smoke.client_id == "admin"
     assert config.operations.smoke.timeout == 12
@@ -139,6 +144,21 @@ def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing(
 
     assert config.services.olla_version == "v0.0.27"
     assert config.services.olla_version_pinned is True
+
+
+def test_parse_config_rejects_empty_olla_local_binary() -> None:
+    with pytest.raises(ValueError, match="services.olla.local_binary"):
+        parse_cluster_config(
+            {
+                "services": {
+                    "olla": {
+                        "local_binary": "   ",
+                    }
+                },
+                "models": {},
+                "nodes": {},
+            }
+        )
 
 
 def test_parse_config_log_retention_days_default() -> None:
@@ -474,7 +494,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
         {
             "url": "http://infer-03.lan:8018",
             "name": "infer-03-omlx-live",
-            "type": "openai-compatible",
+            "type": "omlx",
             "priority": 100,
             "model_url": "/v1/models",
             "health_check_url": "/health",

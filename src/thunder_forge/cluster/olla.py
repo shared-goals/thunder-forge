@@ -31,7 +31,7 @@ from thunder_forge.cluster.services import (
     write_local_file,
 )
 
-OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
+OLLA_OMLX_PREFIX = "/olla/omlx/v1"
 OLLA_DEFAULT_PORT = DEFAULT_OLLA_PORT
 OLLA_HEALTH_RETRIES = 30
 OLLA_HEALTH_RETRY_INTERVAL = 1.0
@@ -223,12 +223,12 @@ def smoke_olla_router(
             result.errors.append(f"GET /internal/status/endpoints failed: {exc}")
 
         try:
-            response = client.get(f"{OLLA_OPENAI_PREFIX}/models")
+            response = client.get(f"{OLLA_OMLX_PREFIX}/models")
             result.models_ok = response.is_success and model in response.text
             if not result.models_ok:
-                result.errors.append(f"GET {OLLA_OPENAI_PREFIX}/models missing model '{model}'")
+                result.errors.append(f"GET {OLLA_OMLX_PREFIX}/models missing model '{model}'")
         except httpx.HTTPError as exc:
-            result.errors.append(f"GET {OLLA_OPENAI_PREFIX}/models failed: {exc}")
+            result.errors.append(f"GET {OLLA_OMLX_PREFIX}/models failed: {exc}")
 
         auth_headers = {"X-Olla-Session-ID": fixed_session_id}
         started = time.perf_counter()
@@ -241,7 +241,7 @@ def smoke_olla_router(
         }
         try:
             response = client.post(
-                f"{OLLA_OPENAI_PREFIX}/chat/completions",
+                f"{OLLA_OMLX_PREFIX}/chat/completions",
                 headers=auth_headers,
                 json=backend_chat_payload,
             )
@@ -249,12 +249,12 @@ def smoke_olla_router(
             result.chat_ok = response.is_success
             result.olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
             if not result.chat_ok:
-                result.errors.append(f"POST {OLLA_OPENAI_PREFIX}/chat/completions returned {response.status_code}")
+                result.errors.append(f"POST {OLLA_OMLX_PREFIX}/chat/completions returned {response.status_code}")
             elif not result.olla_endpoint:
                 result.errors.append("backend-model response did not include X-Olla-Endpoint for session check")
             else:
                 repeat = client.post(
-                    f"{OLLA_OPENAI_PREFIX}/chat/completions",
+                    f"{OLLA_OMLX_PREFIX}/chat/completions",
                     headers=auth_headers,
                     json=backend_chat_payload,
                 )
@@ -262,17 +262,17 @@ def smoke_olla_router(
                 result.session_ok = repeat.is_success and repeat_endpoint == result.olla_endpoint
                 if not repeat.is_success:
                     result.errors.append(
-                        f"repeat POST {OLLA_OPENAI_PREFIX}/chat/completions returned {repeat.status_code}"
+                        f"repeat POST {OLLA_OMLX_PREFIX}/chat/completions returned {repeat.status_code}"
                     )
                 elif repeat_endpoint != result.olla_endpoint:
                     result.errors.append("same session routed to different endpoints")
         except httpx.HTTPError as exc:
             result.latency_ms = int((time.perf_counter() - started) * 1000)
-            result.errors.append(f"POST {OLLA_OPENAI_PREFIX}/chat/completions failed: {exc}")
+            result.errors.append(f"POST {OLLA_OMLX_PREFIX}/chat/completions failed: {exc}")
 
         try:
             response = client.post(
-                f"{OLLA_OPENAI_PREFIX}/chat/completions",
+                f"{OLLA_OMLX_PREFIX}/chat/completions",
                 headers=auth_headers,
                 json={
                     "model": alias,
@@ -379,6 +379,7 @@ def _olla_service_spec(
     config_path: Path,
     port: int,
     user: str,
+    working_directory: Path | None = None,
 ) -> LaunchdServiceSpec:
     log_dir = repo_root / "logs"
     user_home = _service_home_for_user(user)
@@ -393,7 +394,7 @@ def _olla_service_spec(
         name="olla",
         label=olla_launchd_label(port=port),
         program_arguments=[str(binary_path), "-config", str(config_file)],
-        working_directory=str(repo_root),
+        working_directory=str(working_directory or repo_root),
         stdout_log=str(log_dir / f"olla-{port}.stdout.log"),
         stderr_log=str(log_dir / f"olla-{port}.stderr.log"),
         environment={
@@ -424,8 +425,16 @@ def _build_olla_launchd_result(
     manager: str,
     interactive_sudo: bool = False,
     admin_user: str = "",
+    working_directory: Path | None = None,
 ) -> tuple[LaunchdServiceResult, str]:
-    spec = _olla_service_spec(repo_root=repo_root, binary=binary, config_path=config_path, port=port, user=user)
+    spec = _olla_service_spec(
+        repo_root=repo_root,
+        binary=binary,
+        config_path=config_path,
+        port=port,
+        user=user,
+        working_directory=working_directory,
+    )
     system_daemon = manager == "daemon"
     plist_path = launch_daemon_path(spec.label) if system_daemon else launch_agent_path(spec.label)
     staging_plist_path = str(repo_root / ".tmp" / "run" / f"{spec.label}.plist") if system_daemon else ""
@@ -469,8 +478,16 @@ def _build_olla_systemd_result(
     user: str,
     interactive_sudo: bool = False,
     admin_user: str = "",
+    working_directory: Path | None = None,
 ) -> tuple[LaunchdServiceResult, str]:
-    spec = _olla_service_spec(repo_root=repo_root, binary=binary, config_path=config_path, port=port, user=user)
+    spec = _olla_service_spec(
+        repo_root=repo_root,
+        binary=binary,
+        config_path=config_path,
+        port=port,
+        user=user,
+        working_directory=working_directory,
+    )
     service_name = systemd_service_name(spec.label)
     unit_path = systemd_unit_path(service_name)
     staging_unit_path = str(repo_root / ".tmp" / "run" / service_name)

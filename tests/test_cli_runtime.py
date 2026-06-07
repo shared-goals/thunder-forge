@@ -674,6 +674,72 @@ def test_cluster_prepare_apply_uses_latest_olla_when_config_is_unpinned(tmp_path
         assert "status: cluster prepare complete" in result.stdout
 
 
+def test_cluster_prepare_apply_uses_configured_local_olla_binary(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    local_binary = repo / "olla" / "bin" / "olla"
+    local_binary.parent.mkdir(parents=True, exist_ok=True)
+    local_binary.write_text("#!/bin/sh\necho local\n")
+    local_binary.chmod(0o755)
+    (repo / "olla" / "config" / "profiles").mkdir(parents=True, exist_ok=True)
+
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            services:
+              frontend:
+                admin_user: serpo
+              olla:
+                local_binary: olla/bin/olla
+            models: {}
+            nodes:
+              rock:
+                host: rock.lan
+                ram_gb: 32
+                roles: [gateway]
+                user: shag
+                admin_user: serpo
+        """)
+    )
+
+    def fail_ensure_olla_binary(**kwargs):
+        raise AssertionError("release downloader should not run when services.olla.local_binary is set")
+
+    def fake_write_generated_olla_config(config, *, repo_root, port=None):
+        return repo_root / "configs/olla-config.yaml"
+
+    gateway_calls: list[dict] = []
+
+    def fake_run_gateway_daemon_setup(**kwargs):
+        gateway_calls.append(kwargs)
+        kwargs["progress"]("health: gateway ok")
+        return GatewayDaemonSetupResult(
+            user=kwargs["user"],
+            admin_user=kwargs["admin_user"],
+            sudoers_path="/etc/sudoers.d/thunder-forge",
+            script_path=str(repo / ".tmp/run/thunder-forge-gateway-daemon-setup.sh"),
+            applied=True,
+            sudoers_verified=True,
+            service_labels_verified=True,
+            health_ok=True,
+        )
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "ensure_olla_binary", fail_ensure_olla_binary)
+    monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+    monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
+
+    result = runner.invoke(app, ["cluster", "prepare", "--apply"])
+
+    assert result.exit_code == 0
+    assert f"local_olla_binary: {local_binary}" in result.stdout
+    assert f"local_olla_workdir: {repo / 'olla'}" in result.stdout
+    assert gateway_calls[0]["binary"] == local_binary
+    assert gateway_calls[0]["olla_working_directory"] == repo / "olla"
+    assert "status: cluster prepare complete" in result.stdout
+
+
 def test_cluster_prepare_apply_prepares_remote_cache_hub(tmp_path: Path, monkeypatch) -> None:
     import subprocess
 
