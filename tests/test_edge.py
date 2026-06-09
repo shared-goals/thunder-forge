@@ -259,6 +259,61 @@ def test_build_edge_status_payload_reports_cluster_snapshot(monkeypatch, tmp_pat
     assert payload["summary"]["omlx_upgrade_hint"] == "no (versions aligned)"
 
 
+def test_build_edge_status_payload_hides_unmanaged_runtime_ids(monkeypatch, tmp_path) -> None:
+    import thunder_forge.cluster.edge as edge_module
+
+    cluster_config = ClusterConfig(
+        services=ServiceConfig(edge_port=40116, olla_port=40115),
+        models={
+            "memory": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-mxfp4-bf16"),
+                runtime_model_id="gpt-oss-20b-mxfp4-bf16",
+            )
+        },
+        nodes={
+            "rock": Node(host="rock.lan", ram_gb=32, roles=[NodeRole.GATEWAY], user="shag"),
+            "msm1": Node(
+                host="msm1.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["memory"],
+            ),
+        },
+    )
+    config = EdgeProxyConfig(
+        olla_base_url="http://rock.lan:40115",
+        clients_by_key={},
+        cluster_config=cluster_config,
+        repo_root=tmp_path,
+    )
+
+    monkeypatch.setattr(edge_module, "_latest_olla_release_version", lambda *, timeout=5.0: "v0.0.28")
+    monkeypatch.setattr(edge_module, "_gateway_olla_version", lambda _config: "v0.0.27")
+    monkeypatch.setattr(edge_module, "_omlx_version", lambda _node, *, timeout: "0.4.2.dev2")
+    monkeypatch.setattr(
+        edge_module,
+        "check_omlx_health",
+        lambda base_url, **kwargs: OmlxHealthResult(
+            base_url=base_url,
+            health_ok=True,
+            models_ok=True,
+            models=["gpt-oss-20b-mxfp4-bf16", "MarkItDown"],
+            model_statuses={
+                "gpt-oss-20b-mxfp4-bf16": {"id": "gpt-oss-20b-mxfp4-bf16", "loaded": True},
+                "MarkItDown": {"id": "MarkItDown", "loaded": True},
+            },
+        ),
+    )
+
+    payload = build_edge_status_payload(config=config)
+
+    assert payload["ok"] is True
+    assert payload["inference"][0]["served_models"] == ["memory"]
+    assert payload["inference"][0]["hot_loaded_models"] == ["memory"]
+
+
 def test_session_id_is_preserved_or_generated_without_using_api_key() -> None:
     provided = ensure_olla_session_id({"X-Olla-Session-ID": "session-123"}, request_id="req-1", client_id="client-a")
     generated = ensure_olla_session_id({}, request_id="req-2", client_id="client-a")
@@ -441,6 +496,48 @@ def test_proxy_edge_request_serves_tf_alias_model_catalog_without_calling_olla()
     assert logged["path"] == "/v1/models"
     assert logged["model"] == ""
     assert logged["status_code"] == 200
+
+
+def test_proxy_edge_request_rejects_runtime_id_when_catalog_uses_aliases() -> None:
+    requests: list[httpx.Request] = []
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, json={"unexpected": True})
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+        model_catalog=[
+            EdgeModelCatalogEntry(
+                id="memory",
+                name="memory",
+                description="mlx-community/gpt-oss-20b-mxfp4-bf16",
+                runtime_model_id="gpt-oss-20b-mxfp4-bf16",
+                source_repo="mlx-community/gpt-oss-20b-mxfp4-bf16",
+            )
+        ],
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps({"model": "gpt-oss-20b-mxfp4-bf16", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 400
+    assert requests == []
+    assert result.body == b'{"error":"invalid_model","message":"model must be a configured alias"}'
+    assert len(logs) == 1
+    logged = json.loads(logs[0])
+    assert logged["client_id"] == "client-a"
+    assert logged["model"] == "gpt-oss-20b-mxfp4-bf16"
+    assert logged["status_code"] == 400
 
 
 def test_proxy_edge_request_forwards_streaming_chat_without_logging_secrets() -> None:

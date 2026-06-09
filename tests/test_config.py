@@ -481,14 +481,15 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
     path.write_text(content)
     config = load_cluster_config(path)
 
-    result = generate_olla_config(config)
+    result = generate_olla_config(config, repo_root=tmp_path)
     parsed = yaml_lib.safe_load(result)
 
     assert result.startswith("# AUTO-GENERATED")
     assert parsed["server"]["host"] == "127.0.0.1"
     assert parsed["server"]["port"] == 40115
-    assert parsed["logging"]["output"] == "logs/olla.log"
+    assert parsed["logging"]["output"] == str((tmp_path / "logs" / "olla.log").resolve())
     assert parsed["proxy"]["engine"] == "olla"
+    assert parsed["proxy"]["connection_timeout"] == "5s"
     assert parsed["proxy"]["sticky_sessions"]["enabled"] is True
     endpoints = parsed["discovery"]["static"]["endpoints"]
     assert endpoints == [
@@ -501,6 +502,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
             "health_check_url": "/health",
             "check_interval": "3s",
             "check_timeout": "2s",
+            "model_filter": {"include": ["Qwen3-1.7B-4bit"]},
         }
     ]
     assert parsed["model_aliases"] == {

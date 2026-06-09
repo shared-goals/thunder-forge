@@ -342,7 +342,7 @@ def _generate_olla_config_to_file(*, port: int | None = None) -> tuple[Path, Clu
     if not cluster_config_path.exists():
         return None
     config = load_cluster_config(cluster_config_path)
-    content = generate_olla_config(config, port=port)
+    content = generate_olla_config(config, port=port, repo_root=repo_root)
     config_path = generated_olla_config_path(repo_root)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(content)

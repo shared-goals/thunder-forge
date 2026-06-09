@@ -23,6 +23,8 @@ def map_runtime_models_to_aliases(
     config: ClusterConfig,
     node: Node,
     runtime_model_ids: list[str],
+    *,
+    include_unmanaged: bool = True,
 ) -> list[str]:
     """Map runtime model ids to configured aliases while preserving order and uniqueness."""
     runtime_to_aliases = runtime_model_aliases(config, node)
@@ -37,7 +39,7 @@ def map_runtime_models_to_aliases(
                     aliases.append(alias)
                     seen.add(alias)
             continue
-        if model_id not in seen:
+        if include_unmanaged and model_id not in seen:
             aliases.append(model_id)
             seen.add(model_id)
     return aliases

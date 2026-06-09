@@ -2,6 +2,7 @@
 
 import json
 import platform
+import threading
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -902,6 +903,84 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
     assert "Thunder Forge cluster restart" in result.stdout
     assert "status: cluster restart complete" in result.stdout
 
+
+def test_cluster_restart_apply_restarts_inference_nodes_in_parallel(tmp_path: Path, monkeypatch) -> None:
+        import thunder_forge.cli as cli_module
+        import thunder_forge.cluster.config as config_module
+
+        repo = tmp_path
+        (repo / "tfconfig.yaml").write_text(
+                dedent("""\
+                        services:
+                            olla:
+                                port: 45115
+                            edge:
+                                host: 0.0.0.0
+                                port: 45116
+                        models: {}
+                        nodes:
+                            gateway-cache-01:
+                                host: gateway-cache-01.lan
+                                ram_gb: 128
+                                roles: [gateway, cache]
+                                user: shag
+                            infer-03:
+                                host: infer-03.lan
+                                ram_gb: 128
+                                roles: [inference]
+                                user: shag
+                                runtime:
+                                    type: omlx
+                            infer-04:
+                                host: infer-04.lan
+                                ram_gb: 128
+                                roles: [inference]
+                                user: shag
+                                runtime:
+                                    type: omlx
+                """)
+        )
+
+        started = threading.Barrier(2, timeout=2)
+        calls: list[str] = []
+
+        def fake_write_generated_olla_config(config, *, repo_root, port=None):
+                calls.append("config")
+                return repo_root / "configs/olla-config.yaml"
+
+        def fake_service(**kwargs):
+                calls.append(kwargs.get("service", "service"))
+                return LaunchdServiceResult(
+                        service=kwargs.get("service", "service"),
+                        label=f"com.thunder-forge.{kwargs.get('service', 'service')}",
+                        plist_path="/Library/LaunchDaemons/com.thunder-forge.test.plist",
+                        applied=True,
+                        service_label_verified=True,
+                        health_ok=True,
+                )
+
+        def fake_omlx_restart(runtime_node, *, apply, timeout):
+                calls.append(runtime_node.host)
+                started.wait()
+                return fake_service(service="omlx")
+
+        monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+        monkeypatch.setattr(cli_module, "run_olla_service_restart", lambda **kwargs: fake_service(service="olla", **kwargs))
+        monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
+        monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_omlx_restart)
+
+        result = runner.invoke(app, ["cluster", "restart", "--apply"])
+
+        assert result.exit_code == 0
+        assert calls[0] == "config"
+        assert calls[1] == "olla"
+        assert calls[2] == "edge"
+        assert {call for call in calls[3:] if call.endswith(".lan")} == {"infer-03.lan", "infer-04.lan"}
+        assert "== Inference: infer-03" in result.stdout
+        assert "== Inference: infer-04" in result.stdout
+        assert "status: cluster restart complete" in result.stdout
+
 def test_cluster_restart_apply_uses_configured_local_olla_binary(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
     import thunder_forge.cluster.config as config_module
@@ -986,8 +1065,8 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     assert "Thunder Forge cluster status" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
-    assert "served_models: memory" in result.stdout
-    assert "hot_loaded_models: memory" in result.stdout
+    assert "served_models (13G): memory" in result.stdout
+    assert "hot_loaded_models (13G): memory" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
 
 
@@ -1811,6 +1890,7 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
     assert output_path.exists()
     parsed = yaml_lib.safe_load(output_path.read_text())
     assert parsed["server"]["port"] == 40115
+    assert parsed["logging"]["output"] == str((repo / "logs" / "olla.log").resolve())
     assert parsed["model_aliases"] == {"qwen3-1.7b-omlx-infer-03-test": ["Qwen3-1.7B-4bit"]}
     assert f"generated: {output_path}" in result.stdout
 

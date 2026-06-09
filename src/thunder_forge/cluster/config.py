@@ -665,8 +665,9 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     return config
 
 
-def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> str:
+def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo_root: Path | None = None) -> str:
     olla_port = resolve_port(port, default=config.services.olla_port)
+    log_output_path = str((repo_root / "logs" / "olla.log").resolve()) if repo_root else "../logs/olla.log"
     endpoints: list[dict[str, str | int]] = []
     aliases: dict[str, list[str]] = {}
     seen_nodes: set[str] = set()
@@ -683,6 +684,14 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
             raise ValueError(msg)
         if runtime.type != RuntimeType.OMLX:
             continue
+        endpoint_runtime_ids: list[str] = []
+        for model_id in node.models:
+            if model_id not in config.models:
+                msg = f"Node '{node_name}' references unknown model '{model_id}'"
+                raise ValueError(msg)
+            runtime_model_id = config.models[model_id].runtime_model_id
+            if runtime_model_id not in endpoint_runtime_ids:
+                endpoint_runtime_ids.append(runtime_model_id)
         if node_name not in seen_nodes:
             endpoints.append(
                 {
@@ -694,6 +703,9 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
                     "health_check_url": "/health",
                     "check_interval": "3s",
                     "check_timeout": "2s",
+                    # Restrict model discovery to assigned runtime ids for this endpoint.
+                    # This prevents stale/local oMLX models from becoming routable.
+                    "model_filter": {"include": endpoint_runtime_ids},
                 }
             )
             seen_nodes.add(node_name)
@@ -768,7 +780,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
         "logging": {
             "level": "info",
             "format": "json",
-            "output": "logs/olla.log",
+            "output": log_output_path,
         },
         "model_aliases": aliases,
     }

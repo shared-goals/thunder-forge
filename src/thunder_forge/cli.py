@@ -14,6 +14,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import cast
 
@@ -75,6 +76,7 @@ from thunder_forge.cluster.ports import (
     local_base_url,
     resolve_port,
 )
+
 from thunder_forge.cluster.remote_cache import (
     cache_hub_setup_command as _cache_hub_setup_command,
 )
@@ -526,6 +528,7 @@ def _edge_model_catalog_from_config(config: ClusterConfig) -> list[EdgeModelCata
                 source_repo=model.source.repo,
                 base_model=base_model,
                 context_length=model.max_context,
+                disk_gb=model.disk_gb,
                 benchmark_only=model.benchmark_only,
             )
         )
@@ -547,6 +550,7 @@ def _opencode_config_from_catalog(
     provider_name: str,
     base_url: str,
     api_key: str,
+    session_id: str | None = None,
     model: str | None = None,
     small_model: str | None = None,
 ) -> dict[str, object]:
@@ -563,6 +567,9 @@ def _opencode_config_from_catalog(
         },
         "models": models,
     }
+    if session_id:
+        for model_id, entry in provider["models"].items():
+            entry["headers"] = {"X-Olla-Session-ID": f"{model_id}-{session_id}"}
 
     payload: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
@@ -575,8 +582,74 @@ def _opencode_config_from_catalog(
     return payload
 
 
-def _model_comment(entry: EdgeModelCatalogEntry) -> str:
-    return entry.base_model or entry.source_repo or entry.runtime_model_id
+def _opencode_model_comment(entry: EdgeModelCatalogEntry) -> str:
+    if entry.source_repo:
+        base = entry.source_repo
+    elif entry.runtime_model_id:
+        base = entry.runtime_model_id
+    else:
+        description = entry.description.strip()
+        if not description:
+            base = entry.id
+        else:
+            base = description.split(";", 1)[0].strip()
+
+    return f"{base}; disk_gb: {entry.disk_gb:.1f}"
+
+
+def _format_disk_gb(total_disk_gb: float) -> str:
+    rounded = round(total_disk_gb)
+    if abs(total_disk_gb - rounded) < 1e-9:
+        return f"{int(rounded)}G"
+    return f"{total_disk_gb:.1f}G"
+
+
+def _sum_aliases_disk_gb(config: ClusterConfig, aliases: list[str]) -> float:
+    total = 0.0
+    for alias in aliases:
+        model = config.models.get(alias)
+        if model is None:
+            continue
+        total += model.disk_gb
+    return total
+
+
+def _render_opencode_config(
+    *,
+    payload: dict[str, object],
+    model_catalog: list[EdgeModelCatalogEntry],
+    api_key_env_name: str,
+) -> str:
+    rendered = json.dumps(payload, indent=2, ensure_ascii=False)
+
+    model_comments = {entry.id: _opencode_model_comment(entry) for entry in model_catalog}
+    lines = rendered.splitlines()
+    output_lines: list[str] = []
+    in_models = False
+    models_indent = 0
+
+    for line in lines:
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+
+        if stripped == '"models": {':
+            in_models = True
+            models_indent = indent
+        elif in_models and indent <= models_indent and stripped == "}":
+            in_models = False
+
+        if stripped.startswith('"apiKey":'):
+            output_lines.append(f"{' ' * indent}// {api_key_env_name}: check .env")
+
+        if in_models and indent == models_indent + 2 and stripped.startswith('"') and stripped.endswith('": {'):
+            model_alias = stripped[1:].split('"', 1)[0]
+            comment = model_comments.get(model_alias)
+            if comment:
+                output_lines.append(f"{' ' * indent}// {comment}")
+
+        output_lines.append(line)
+
+    return "\n".join(output_lines) + "\n"
 
 
 def _context_length(entry: EdgeModelCatalogEntry) -> int | None:
@@ -619,64 +692,6 @@ def _yaml_scalar(value: str) -> str:
     if value and all(char.isalnum() or char in "._/:+-" for char in value):
         return value
     return json.dumps(value, ensure_ascii=False)
-
-
-def _opencode_config_jsonc_from_catalog(
-    *,
-    model_catalog: list[EdgeModelCatalogEntry],
-    provider_id: str,
-    provider_name: str,
-    base_url: str,
-    api_key: str,
-    api_key_comment: str = "",
-    model: str | None = None,
-    small_model: str | None = None,
-) -> str:
-    model_blocks: list[str] = []
-    for entry in sorted(model_catalog, key=lambda item: item.id):
-        model_config = _opencode_model_config(entry)
-        model_config_text = json.dumps(model_config, indent=2, ensure_ascii=False).replace("\n", "\n        ")
-        comment = _model_comment(entry)
-        comment_line = f"        // {comment}\n" if comment else ""
-        model_blocks.append(f"{comment_line}        {json.dumps(entry.id)}: {model_config_text}")
-
-    properties = [f'  "$schema": {json.dumps("https://opencode.ai/config.json")}']
-    if model:
-        properties.append(f'  "model": {json.dumps(f"{provider_id}/{model}")}')
-    if small_model:
-        properties.append(f'  "small_model": {json.dumps(f"{provider_id}/{small_model}")}')
-    api_key_lines = [
-        f'        "baseURL": {json.dumps(base_url)},',
-    ]
-    if api_key_comment:
-        api_key_lines.append(f"        // {api_key_comment}")
-    api_key_lines.append(f'        "apiKey": {json.dumps(api_key)}')
-    properties.append(
-        "\n".join(
-            [
-                '  "provider": {',
-                f"    {json.dumps(provider_id)}: {{",
-                '      "npm": "@ai-sdk/openai-compatible",',
-                f'      "name": {json.dumps(provider_name)},',
-                '      "options": {',
-                "\n".join(api_key_lines),
-                "      },",
-                '      "models": {',
-                ",\n".join(model_blocks),
-                "      }",
-                "    }",
-                "  }",
-            ]
-        )
-    )
-    return "{\n" + ",\n".join(properties) + "\n}\n"
-
-
-def _opencode_api_key_comment(*, client_id: str | None, api_key_env: str | None) -> str:
-    resolved_env = api_key_env or DEFAULT_OPENCODE_API_KEY_ENV
-    if client_id:
-        resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
-    return f"{resolved_env}: check .env"
 
 
 def _edge_api_key_env_name(
@@ -1200,7 +1215,7 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
     return payload
 
 
-def _print_cluster_status_payload(payload: dict[str, object]) -> None:
+def _print_cluster_status_payload(payload: dict[str, object], *, config: ClusterConfig) -> None:
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {payload.get('target', 'all')}")
 
@@ -1223,10 +1238,14 @@ def _print_cluster_status_payload(payload: dict[str, object]) -> None:
             typer.echo(f"  omlx_version: {node.get('omlx_version', 'unknown')}")
             served_models = node.get("served_models")
             if isinstance(served_models, list) and served_models:
-                typer.echo(f"  served_models: {', '.join(str(item) for item in served_models)}")
+                served_aliases = [str(item) for item in served_models]
+                served_disk = _format_disk_gb(_sum_aliases_disk_gb(config, served_aliases))
+                typer.echo(f"  served_models ({served_disk}): {', '.join(served_aliases)}")
             hot_loaded_models = node.get("hot_loaded_models")
             if isinstance(hot_loaded_models, list) and hot_loaded_models:
-                typer.echo(f"  hot_loaded_models: {', '.join(str(item) for item in hot_loaded_models)}")
+                hot_loaded_aliases = [str(item) for item in hot_loaded_models]
+                hot_loaded_disk = _format_disk_gb(_sum_aliases_disk_gb(config, hot_loaded_aliases))
+                typer.echo(f"  hot_loaded_models ({hot_loaded_disk}): {', '.join(hot_loaded_aliases)}")
             errors = node.get("errors")
             if isinstance(errors, list):
                 for error in errors:
@@ -1629,16 +1648,29 @@ def cluster_restart(
         if not dry_run and _service_result_failed(edge_result):
             _fail_on_setup_errors(edge_result.errors or ["TF edge restart did not verify cleanly"])
 
-    for node_name in inference_names:
-        runtime_node = _get_runtime_node(config, node_name)
-        if runtime_node.home_dir is None:
-            runtime_node.home_dir = f"/Users/{runtime_node.user}"
-        typer.echo("")
-        typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
-        result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
-        typer.echo(f"  omlx: {result.label}")
-        if not dry_run and _service_result_failed(result):
-            _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
+    if inference_names:
+        inference_jobs: list[tuple[str, object]] = []
+
+        def restart_inference(node_name: str):
+            runtime_node = _get_runtime_node(config, node_name)
+            if runtime_node.home_dir is None:
+                runtime_node.home_dir = f"/Users/{runtime_node.user}"
+            return node_name, runtime_node, run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+
+        max_workers = min(len(inference_names), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(restart_inference, node_name) for node_name in inference_names]
+            for future in as_completed(futures):
+                inference_jobs.append(future.result())
+
+        jobs_by_name = {node_name: (runtime_node, result) for node_name, runtime_node, result in inference_jobs}
+        for node_name in inference_names:
+            runtime_node, result = jobs_by_name[node_name]
+            typer.echo("")
+            typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
+            typer.echo(f"  omlx: {result.label}")
+            if not dry_run and _service_result_failed(result):
+                _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
 
     if not gateway_names and not inference_names:
         typer.echo("status: nothing to restart")
@@ -1661,7 +1693,7 @@ def cluster_status(
     if json_output:
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        _print_cluster_status_payload(payload)
+        _print_cluster_status_payload(payload, config=config)
 
 
 @cluster_app.command("sync")
@@ -2620,7 +2652,7 @@ def edge_client_config(
         "--small-model",
         help="Optional default TF alias for OpenCode small_model.",
     ),
-    output_format: str = typer.Option("auto", "--format", help="Output format: auto, jsonc, json, or yaml."),
+    output_format: str = typer.Option("auto", "--format", help="Output format: auto, jsonc, or yaml."),
     copy: bool = typer.Option(False, "--copy", help="Copy the generated config to the terminal clipboard via OSC52."),
     output: Path | None = typer.Option(None, "--output", help="Optional file path to write the generated config."),
     inject_api_key: bool = typer.Option(
@@ -2650,6 +2682,11 @@ def edge_client_config(
 
     if normalized_target == "opencode":
         _validate_client_config_model_aliases(model_catalog, model=model, small_model=small_model)
+        resolved_api_key_env_name = _edge_api_key_env_name(
+            client_id=client_id,
+            api_key_env=api_key_env,
+            default_api_key_env=DEFAULT_OPENCODE_API_KEY_ENV,
+        )
         resolved_api_key = _resolve_opencode_api_key(
             client_id=client_id,
             api_key_env=api_key_env,
@@ -2658,29 +2695,23 @@ def edge_client_config(
             yes=yes,
         )
         if normalized_format == "jsonc":
-            output_text = _opencode_config_jsonc_from_catalog(
-                model_catalog=model_catalog,
-                provider_id=provider_id,
-                provider_name=provider_name,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_key_comment=_opencode_api_key_comment(client_id=client_id, api_key_env=api_key_env),
-                model=model,
-                small_model=small_model,
-            )
-        elif normalized_format == "json":
             payload = _opencode_config_from_catalog(
                 model_catalog=model_catalog,
                 provider_id=provider_id,
                 provider_name=provider_name,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
+                session_id=client_id,
                 model=model,
                 small_model=small_model,
             )
-            output_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            output_text = _render_opencode_config(
+                payload=payload,
+                model_catalog=model_catalog,
+                api_key_env_name=resolved_api_key_env_name,
+            )
         else:
-            typer.echo("Error: --format must be auto, jsonc, or json for opencode", err=True)
+            typer.echo("Error: --format must be auto or jsonc for opencode", err=True)
             raise typer.Exit(1)
         label = "OpenCode"
     elif normalized_target == "hermes":

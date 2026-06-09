@@ -116,6 +116,7 @@ class EdgeModelCatalogEntry:
     source_repo: str = ""
     base_model: str = ""
     context_length: int = 0
+    disk_gb: float = 0.0
     benchmark_only: bool = False
 
 
@@ -653,6 +654,10 @@ def _extract_model(body: bytes) -> str:
     return model if isinstance(model, str) else ""
 
 
+def _catalog_alias_ids(model_catalog: list[EdgeModelCatalogEntry]) -> set[str]:
+    return {entry.id for entry in model_catalog}
+
+
 def _as_non_negative_int(raw: object) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int):
         return None
@@ -829,11 +834,17 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         result = check_omlx_health(base_url, include_models=True, timeout=config.status_timeout)
         omlx_version = _omlx_version(runtime_node, timeout=config.status_timeout)
         omlx_versions.append(omlx_version)
-        served_models = map_runtime_models_to_aliases(cluster_config, runtime_node, result.models)
+        served_models = map_runtime_models_to_aliases(
+            cluster_config,
+            runtime_node,
+            result.models,
+            include_unmanaged=False,
+        )
         hot_loaded_models = map_runtime_models_to_aliases(
             cluster_config,
             runtime_node,
             extract_hot_loaded_models(result.model_statuses),
+            include_unmanaged=False,
         )
         inference_payloads.append(
             {
@@ -995,6 +1006,21 @@ def _prepare_edge_upstream_request(
             started=started,
         )
         return _json_response(404, {"error": "not_found"})
+
+    if model and config.model_catalog:
+        allowed_aliases = _catalog_alias_ids(config.model_catalog)
+        if model not in allowed_aliases:
+            _record_edge_access_event(
+                config,
+                request_id=request_id,
+                client_id=auth.client_id,
+                client_ip=resolved_client_ip,
+                path=path,
+                model=model,
+                status_code=400,
+                started=started,
+            )
+            return _json_response(400, {"error": "invalid_model", "message": "model must be a configured alias"})
 
     if config.max_body_bytes > 0 and len(body) > config.max_body_bytes:
         _record_edge_access_event(
