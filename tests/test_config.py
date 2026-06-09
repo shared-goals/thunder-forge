@@ -487,6 +487,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
     assert result.startswith("# AUTO-GENERATED")
     assert parsed["server"]["host"] == "127.0.0.1"
     assert parsed["server"]["port"] == 40115
+    assert parsed["logging"]["output"] == "logs/olla.log"
     assert parsed["proxy"]["engine"] == "olla"
     assert parsed["proxy"]["sticky_sessions"]["enabled"] is True
     endpoints = parsed["discovery"]["static"]["endpoints"]

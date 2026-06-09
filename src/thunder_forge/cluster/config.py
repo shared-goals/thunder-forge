@@ -768,7 +768,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
         "logging": {
             "level": "info",
             "format": "json",
-            "output": "stdout",
+            "output": "logs/olla.log",
         },
         "model_aliases": aliases,
     }

@@ -568,6 +568,7 @@ def run_olla_service_restart(
     timeout: int = 60,
     interactive_sudo: bool = False,
     admin_user: str = "",
+    working_directory: Path | None = None,
 ) -> LaunchdServiceResult:
     """Install/update and restart Olla as a frontend service."""
     normalized_manager = manager.lower()
@@ -589,6 +590,7 @@ def run_olla_service_restart(
             user=user or "shag",
             interactive_sudo=interactive_sudo,
             admin_user=admin_user,
+            working_directory=working_directory,
         )
     else:
         result, base_url = _build_olla_launchd_result(
@@ -600,6 +602,7 @@ def run_olla_service_restart(
             manager=effective_manager,
             interactive_sudo=interactive_sudo,
             admin_user=admin_user,
+            working_directory=working_directory,
         )
     if not apply:
         return result

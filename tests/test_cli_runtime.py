@@ -902,6 +902,60 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
     assert "Thunder Forge cluster restart" in result.stdout
     assert "status: cluster restart complete" in result.stdout
 
+def test_cluster_restart_apply_uses_configured_local_olla_binary(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    local_binary = repo / "olla" / "bin" / "olla"
+    local_binary.parent.mkdir(parents=True, exist_ok=True)
+    local_binary.write_text("#!/bin/sh\necho local\n")
+    local_binary.chmod(0o755)
+    (repo / "tfconfig.yaml").write_text(
+        dedent(
+            """\
+            services:
+              olla:
+                local_binary: olla/bin/olla
+            models: {}
+            nodes:
+              rock:
+                host: rock.lan
+                ram_gb: 64
+                roles: [gateway]
+                user: shag
+            """
+        )
+    )
+
+    restart_calls: list[dict] = []
+
+    def fake_service(**kwargs):
+        return LaunchdServiceResult(
+            service=kwargs.get("service", "service"),
+            label=f"com.thunder-forge.{kwargs.get('service', 'service')}",
+            plist_path="/Library/LaunchDaemons/com.thunder-forge.test.plist",
+            applied=True,
+            service_label_verified=True,
+            health_ok=True,
+        )
+
+    def fake_run_olla_service_restart(**kwargs):
+        restart_calls.append(kwargs)
+        return fake_service(service="olla", **kwargs)
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "write_generated_olla_config", lambda config, *, repo_root, port=None: repo_root / "configs/olla-config.yaml")
+    monkeypatch.setattr(cli_module, "run_olla_service_restart", fake_run_olla_service_restart)
+    monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
+    monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", lambda *args, **kwargs: fake_service(service="omlx", **kwargs))
+
+    result = runner.invoke(app, ["cluster", "restart", "--apply"])
+
+    assert result.exit_code == 0
+    assert restart_calls
+    assert restart_calls[0]["binary"] == local_binary
+
 
 def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module

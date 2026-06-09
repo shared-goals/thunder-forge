@@ -181,6 +181,26 @@ def _repo_relative_path(repo_root: Path, path: Path) -> Path:
     return expanded if expanded.is_absolute() else repo_root / expanded
 
 
+def _resolve_olla_binary_and_workdir(
+    *,
+    repo_root: Path,
+    config: ClusterConfig,
+    binary_override: Path | None = None,
+) -> tuple[Path, Path | None]:
+    if binary_override is not None:
+        resolved_binary = _repo_relative_path(repo_root, binary_override)
+    elif config.services.olla_local_binary:
+        resolved_binary = _repo_relative_path(repo_root, Path(config.services.olla_local_binary))
+    else:
+        resolved_binary = _repo_relative_path(repo_root, Path(config.services.olla_bin_dir) / "olla")
+
+    working_directory = None
+    candidate_working_directory = resolved_binary.parent.parent
+    if (candidate_working_directory / "config" / "profiles").is_dir():
+        working_directory = candidate_working_directory
+    return resolved_binary, working_directory
+
+
 def _edge_access_log_path(repo_root: Path, config: ClusterConfig, access_log: Path | None) -> Path:
     configured = str(access_log) if access_log is not None else config.services.edge_access_log
     return _repo_relative_path(repo_root, Path(configured))
@@ -1355,15 +1375,12 @@ def cluster_prepare(
     resolved_olla_arch = olla_arch or config.services.olla_arch
     resolved_olla_bin_dir = olla_bin_dir or Path(config.services.olla_bin_dir)
     configured_local_olla_binary = (
-        _repo_relative_path(repo_root, Path(config.services.olla_local_binary))
-        if config.services.olla_local_binary
-        else None
+        _repo_relative_path(repo_root, Path(config.services.olla_local_binary)) if config.services.olla_local_binary else None
     )
-    configured_local_olla_working_directory = None
-    if configured_local_olla_binary is not None:
-        candidate_working_directory = configured_local_olla_binary.parent.parent
-        if (candidate_working_directory / "config" / "profiles").is_dir():
-            configured_local_olla_working_directory = candidate_working_directory
+    _resolved_binary, configured_local_olla_working_directory = _resolve_olla_binary_and_workdir(
+        repo_root=repo_root,
+        config=config,
+    )
     gateway_names, cache_names, inference_names = _resolve_prepare_targets(config, target)
     _print_prepare_plan(
         target=target,
@@ -1539,7 +1556,11 @@ def cluster_restart(
 ) -> None:
     """Restart gateway and inference daemons through the configured managers."""
     config, repo_root = _load_config()
-    resolved_binary = binary or Path(config.services.olla_bin_dir) / "olla"
+    resolved_binary, configured_local_olla_working_directory = _resolve_olla_binary_and_workdir(
+        repo_root=repo_root,
+        config=config,
+        binary_override=binary,
+    )
     gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
     typer.echo("Thunder Forge cluster restart")
     typer.echo(f"target: {target or 'all'}")
@@ -1564,6 +1585,7 @@ def cluster_restart(
             apply=not dry_run,
             timeout=timeout,
             user=_gateway_operator_user(config, ""),
+            working_directory=configured_local_olla_working_directory,
         )
         typer.echo(f"  olla: {olla_result.label}")
         if not dry_run and _service_result_failed(olla_result):
@@ -1897,7 +1919,7 @@ def service_restart(
         help="Print plist and commands without executing by default.",
     ),
     timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds for service commands."),
-    binary: Path = typer.Option(Path(".tmp/olla-bin/olla"), "--binary", help="Olla binary path."),
+    binary: Path | None = typer.Option(None, "--binary", help="Olla binary path."),
     config_path: Path = typer.Option(Path("configs/olla-config.yaml"), "--config", help="Olla config path."),
     port: int | None = typer.Option(
         None,
@@ -1937,9 +1959,14 @@ def service_restart(
     if normalized_service == "olla":
         config, repo_root = _load_config()
         resolved_port = resolve_port(port, default=config.services.olla_port)
+        resolved_binary, resolved_working_directory = _resolve_olla_binary_and_workdir(
+            repo_root=repo_root,
+            config=config,
+            binary_override=binary,
+        )
         result = run_olla_service_restart(
             repo_root=repo_root,
-            binary=binary,
+            binary=resolved_binary,
             config_path=config_path,
             port=resolved_port,
             manager=normalized_manager,
@@ -1947,6 +1974,7 @@ def service_restart(
             timeout=timeout,
             interactive_sudo=allow_sudo_prompt,
             admin_user=config.services.frontend_admin_user if allow_sudo_prompt else "",
+            working_directory=resolved_working_directory,
         )
         _print_launchd_service_result(result, manager=normalized_manager, dry_run=dry_run)
         if _service_result_failed(result):

@@ -288,6 +288,7 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     assert isinstance(payload["timestamp"], str)
     assert payload["request_id"] == "req-1"
     assert payload["client_id"] == "client-a"
+    assert payload["client_ip"] == ""
     assert payload["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert payload["status_code"] == 200
     assert payload["latency_ms"] == 42
@@ -516,6 +517,7 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
         body=json.dumps({"model": "qwen3-1.7b-omlx-infer-03-test", "messages": []}).encode(),
         config=config,
         transport=httpx.MockTransport(handler),
+        client_ip="198.51.100.20",
     )
 
     assert result.status_code == 200
@@ -529,11 +531,43 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     assert len(logs) == 1
     logged = json.loads(logs[0])
     assert logged["client_id"] == "client-a"
+    assert logged["client_ip"] == "198.51.100.20"
     assert logged["path"] == "/v1/chat/completions"
     assert logged["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert logged["status_code"] == 200
     assert logged["olla_endpoint"] == "infer-03-omlx-live"
     assert "dev-secret" not in logs[0]
+
+
+def test_proxy_edge_request_logs_forwarded_client_ip() -> None:
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]})
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer dev-secret",
+            "X-Forwarded-For": "203.0.113.10, 10.0.0.5",
+            "Content-Type": "application/json",
+        },
+        body=json.dumps({"model": "memory", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+        client_ip="198.51.100.20",
+    )
+
+    assert result.status_code == 200
+    logged = json.loads(logs[0])
+    assert logged["client_ip"] == "203.0.113.10"
 
 
 def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:

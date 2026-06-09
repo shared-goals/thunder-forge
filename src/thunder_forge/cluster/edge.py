@@ -136,6 +136,7 @@ class EdgeProxyUpstreamRequest:
     forwarded_headers: dict[str, str]
     request_id: str
     client_id: str
+    client_ip: str
     model: str
     started: float
 
@@ -216,6 +217,7 @@ class EdgeAccessLog:
     model: str
     status_code: int
     latency_ms: int
+    client_ip: str = ""
     olla_endpoint: str = ""
     node_name: str = ""
 
@@ -224,6 +226,7 @@ class EdgeAccessLog:
             "timestamp": self.timestamp,
             "request_id": self.request_id,
             "client_id": self.client_id,
+            "client_ip": self.client_ip,
             "path": self.path,
             "model": self.model,
             "status_code": self.status_code,
@@ -581,6 +584,7 @@ def build_edge_access_log(
     model: str,
     status_code: int,
     latency_ms: int,
+    client_ip: str = "",
     olla_endpoint: str = "",
     api_key: str = "",
 ) -> EdgeAccessLog:
@@ -590,6 +594,7 @@ def build_edge_access_log(
         timestamp=datetime.now().astimezone().isoformat(),
         request_id=request_id,
         client_id=client_id,
+        client_ip=client_ip,
         path=path,
         model=model,
         status_code=status_code,
@@ -614,6 +619,20 @@ def _header_value(headers: dict[str, str], name: str) -> str | None:
         if header_name.lower() == name.lower():
             return value
     return None
+
+
+def _extract_client_ip(headers: dict[str, str], *, peer_ip: str = "") -> str:
+    forwarded_for = _header_value(headers, "X-Forwarded-For")
+    if forwarded_for:
+        first = forwarded_for.split(",", 1)[0].strip()
+        if first:
+            return first
+    real_ip = _header_value(headers, "X-Real-IP")
+    if real_ip:
+        stripped = real_ip.strip()
+        if stripped:
+            return stripped
+    return peer_ip.strip()
 
 
 def _decode_json_object(body: bytes) -> dict[str, object] | None:
@@ -887,6 +906,7 @@ def _edge_models_response(
     path: str,
     headers: dict[str, str],
     config: EdgeProxyConfig,
+    client_ip: str = "",
 ) -> EdgeProxyResponse | None:
     normalized_path = path.partition("?")[0]
     if method.upper() != "GET" or normalized_path != "/v1/models" or not config.model_catalog:
@@ -900,6 +920,7 @@ def _edge_models_response(
             config,
             request_id=request_id,
             client_id="unauthenticated",
+            client_ip=_extract_client_ip(headers, peer_ip=client_ip),
             path=path,
             model="",
             status_code=auth.status_code,
@@ -911,6 +932,7 @@ def _edge_models_response(
         config,
         request_id=request_id,
         client_id=auth.client_id,
+        client_ip=_extract_client_ip(headers, peer_ip=client_ip),
         path=path,
         model="",
         status_code=200,
@@ -939,16 +961,19 @@ def _prepare_edge_upstream_request(
     headers: dict[str, str],
     body: bytes,
     config: EdgeProxyConfig,
+    client_ip: str = "",
 ) -> EdgeProxyUpstreamRequest | EdgeProxyResponse:
     started = time.perf_counter()
     request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
     model = _extract_model(body)
+    resolved_client_ip = _extract_client_ip(headers, peer_ip=client_ip)
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
         _record_edge_access_event(
             config,
             request_id=request_id,
             client_id="unauthenticated",
+            client_ip=resolved_client_ip,
             path=path,
             model=model,
             status_code=auth.status_code,
@@ -963,6 +988,7 @@ def _prepare_edge_upstream_request(
             config,
             request_id=request_id,
             client_id=auth.client_id,
+            client_ip=resolved_client_ip,
             path=path,
             model=model,
             status_code=404,
@@ -975,6 +1001,7 @@ def _prepare_edge_upstream_request(
             config,
             request_id=request_id,
             client_id=auth.client_id,
+            client_ip=resolved_client_ip,
             path=path,
             model=model,
             status_code=413,
@@ -996,6 +1023,7 @@ def _prepare_edge_upstream_request(
         forwarded_headers=forwarded_headers,
         request_id=request_id,
         client_id=auth.client_id,
+        client_ip=resolved_client_ip,
         model=model,
         started=started,
     )
@@ -1006,6 +1034,7 @@ def _record_edge_access_event(
     *,
     request_id: str,
     client_id: str,
+    client_ip: str,
     path: str,
     model: str,
     status_code: int,
@@ -1018,6 +1047,7 @@ def _record_edge_access_event(
     log_record = build_edge_access_log(
         request_id=request_id,
         client_id=client_id,
+        client_ip=client_ip,
         path=path,
         model=model,
         status_code=status_code,
@@ -1039,6 +1069,7 @@ def _record_edge_access(
         config,
         request_id=upstream.request_id,
         client_id=upstream.client_id,
+        client_ip=upstream.client_ip,
         path=path,
         model=upstream.model,
         status_code=status_code,
@@ -1055,9 +1086,10 @@ def proxy_edge_request(
     body: bytes,
     config: EdgeProxyConfig,
     transport: httpx.BaseTransport | None = None,
+    client_ip: str = "",
 ) -> EdgeProxyResponse:
     """Authenticate, rewrite, and proxy a single buffered edge request."""
-    edge_models = _edge_models_response(method=method, path=path, headers=headers, config=config)
+    edge_models = _edge_models_response(method=method, path=path, headers=headers, config=config, client_ip=client_ip)
     if edge_models is not None:
         return edge_models
 
@@ -1067,6 +1099,7 @@ def proxy_edge_request(
         headers=headers,
         body=body,
         config=config,
+        client_ip=client_ip,
     )
     if isinstance(upstream, EdgeProxyResponse):
         return upstream
@@ -1153,11 +1186,13 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
                 auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
                 client_id = auth.client_id if auth.allowed else "unauthenticated"
+                client_ip = _extract_client_ip(headers, peer_ip=self.client_address[0] if self.client_address else "")
                 status_code = 413 if auth.allowed else auth.status_code
                 _record_edge_access_event(
                     config,
                     request_id=request_id,
                     client_id=client_id,
+                    client_ip=client_ip,
                     path=self.path,
                     model="",
                     status_code=status_code,
@@ -1176,6 +1211,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 headers=headers,
                 body=body,
                 config=config,
+                client_ip=self.client_address[0] if self.client_address else "",
             )
             self.send_response(result.status_code)
             for name, value in result.headers.items():
@@ -1195,6 +1231,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 headers=dict(self.headers.items()),
                 body=body,
                 config=config,
+                client_ip=self.client_address[0] if self.client_address else "",
             )
             if isinstance(upstream, EdgeProxyResponse):
                 self._send_edge_response(upstream)
@@ -1459,8 +1496,8 @@ def _wait_edge_healthy(
     for attempt in range(1, retries + 1):
         try:
             with httpx.Client(base_url=base_url, timeout=timeout, trust_env=False) as client:
-                response = client.get("/v1/models")
-                if response.status_code == 401:
+                response = client.get("/health")
+                if response.is_success:
                     return True
         except httpx.HTTPError:
             pass
