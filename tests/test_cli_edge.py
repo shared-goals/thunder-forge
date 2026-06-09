@@ -363,8 +363,10 @@ def test_edge_client_config_opencode_prints_assigned_aliases(monkeypatch) -> Non
     assert provider["options"]["apiKey"] == "{env:TF_USER_OPENCODE}"
     assert sorted(provider["models"]) == ["memory", "memory-bf16"]
     assert provider["models"]["memory"]["name"] == "memory"
+    assert provider["models"]["memory"]["limit"]["context"] == 131072
     assert provider["models"]["memory-bf16"]["name"] == "memory-bf16"
     assert provider["models"]["memory-bf16"]["status"] == "beta"
+    assert provider["models"]["memory-bf16"]["limit"]["context"] == 131072
 
 
 def test_edge_client_config_opencode_client_uses_env_placeholder(monkeypatch) -> None:
@@ -628,10 +630,12 @@ def test_edge_client_config_hermes_prints_yaml_with_key_env(monkeypatch) -> None
                     "memory": Model(
                         source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
                         runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                        max_context=131072,
                     ),
                     "memory-bf16": Model(
                         source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-mxfp4-bf16"),
                         runtime_model_id="gpt-oss-20b-mxfp4-bf16",
+                        max_context=131072,
                         benchmark_only=True,
                     ),
                 },
@@ -663,7 +667,8 @@ def test_edge_client_config_hermes_prints_yaml_with_key_env(monkeypatch) -> None
     assert provider["key_env"] == "TF_USER_SHAG"
     assert provider["api_mode"] == "chat_completions"
     assert sorted(provider["models"]) == ["memory", "memory-bf16"]
-    assert "# mlx-community/gpt-oss-20b-mxfp4-bf16; benchmark-only" in result.stdout
+    assert provider["models"]["memory"]["context_length"] == 131072
+    assert provider["models"]["memory-bf16"]["context_length"] == 131072
 
 
 def test_edge_client_config_hermes_creates_missing_key_without_printing_secret(monkeypatch, tmp_path) -> None:

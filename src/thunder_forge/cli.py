@@ -552,12 +552,7 @@ def _opencode_config_from_catalog(
 ) -> dict[str, object]:
     models: dict[str, dict[str, object]] = {}
     for entry in sorted(model_catalog, key=lambda item: item.id):
-        model_config: dict[str, object] = {
-            "name": entry.name,
-        }
-        if entry.benchmark_only:
-            model_config["status"] = "beta"
-        models[entry.id] = model_config
+        models[entry.id] = _opencode_model_config(entry)
 
     provider: dict[str, object] = {
         "npm": "@ai-sdk/openai-compatible",
@@ -584,6 +579,42 @@ def _model_comment(entry: EdgeModelCatalogEntry) -> str:
     return entry.base_model or entry.source_repo or entry.runtime_model_id
 
 
+def _context_length(entry: EdgeModelCatalogEntry) -> int | None:
+    if entry.context_length > 0:
+        return entry.context_length
+    return None
+
+
+def _opencode_model_config(entry: EdgeModelCatalogEntry) -> dict[str, object]:
+    model_config: dict[str, object] = {
+        "name": entry.name,
+    }
+    if entry.benchmark_only:
+        model_config["status"] = "beta"
+
+    context_length = _context_length(entry)
+    if context_length is not None:
+        # OpenCode model limits require context+output; output defaults to a safe cap.
+        model_config["limit"] = {"context": context_length, "output": min(8192, context_length)}
+    return model_config
+
+
+def _hermes_model_config(entry: EdgeModelCatalogEntry) -> dict[str, object]:
+    context_length = _context_length(entry)
+    if context_length is not None:
+        return {"context_length": context_length}
+    return {}
+
+
+def _yaml_inline_model_mapping(model_config: dict[str, object]) -> str:
+    if not model_config:
+        return "{}"
+    context_length = model_config.get("context_length")
+    if isinstance(context_length, int) and context_length > 0:
+        return f"{{context_length: {context_length}}}"
+    return "{}"
+
+
 def _yaml_scalar(value: str) -> str:
     if value and all(char.isalnum() or char in "._/:+-" for char in value):
         return value
@@ -603,9 +634,7 @@ def _opencode_config_jsonc_from_catalog(
 ) -> str:
     model_blocks: list[str] = []
     for entry in sorted(model_catalog, key=lambda item: item.id):
-        model_config: dict[str, object] = {"name": entry.name}
-        if entry.benchmark_only:
-            model_config["status"] = "beta"
+        model_config = _opencode_model_config(entry)
         model_config_text = json.dumps(model_config, indent=2, ensure_ascii=False).replace("\n", "\n        ")
         comment = _model_comment(entry)
         comment_line = f"        // {comment}\n" if comment else ""
@@ -704,14 +733,8 @@ def _hermes_config_yaml_from_catalog(
         "    models:",
     ]
     for entry in sorted(model_catalog, key=lambda item: item.id):
-        comment_parts = [
-            part
-            for part in (_model_comment(entry), "benchmark-only" if entry.benchmark_only else "")
-            if part
-        ]
-        if comment_parts:
-            lines.append(f"      # {'; '.join(comment_parts)}")
-        lines.append(f"      {entry.id}: {{}}")
+        model_config = _hermes_model_config(entry)
+        lines.append(f"      {entry.id}: {_yaml_inline_model_mapping(model_config)}")
     return "\n".join(lines) + "\n"
 
 
