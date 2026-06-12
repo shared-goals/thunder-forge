@@ -79,6 +79,7 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
     assert payload["requests"]["by_user"] == {"alice": 1}
     assert payload["requests"]["by_user_model"] == {"alice": {"coder": 1}}
     assert payload["requests"]["by_node"] == {"msm1": 1}
+    assert payload["requests"]["by_node_user"] == {"msm1": {"alice": 1}}
     assert payload["requests"]["by_node_hour"] == {"msm1": {"08": 1}}
     assert payload["requests"]["by_model"] == {"coder": 1}
     assert payload["requests"]["by_hour"] == {"08": 1}
@@ -124,6 +125,65 @@ def test_usage_report_cli_accepts_all_period(tmp_path: Path, monkeypatch) -> Non
     payload = json.loads(result.stdout)
     assert payload["period"] == "all"
     assert payload["requests"]["total"] == 1
+
+
+def test_usage_report_cli_text_formats_numbers_and_omits_consumed_breakdowns(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent(
+            """\
+            services:
+              edge:
+                access_log: logs/tf-edge-access.jsonl
+            models: {}
+            nodes: {}
+        """
+        )
+    )
+    (repo / "logs").mkdir()
+    (repo / "logs" / "tf-edge-access.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-02T08:15:00+00:00",
+                        "client_id": "alice",
+                        "model": "coder",
+                        "latency_ms": 1234,
+                        "node_name": "msm1",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-02T08:20:00+00:00",
+                        "client_id": "alice",
+                        "model": "coder",
+                        "latency_ms": 2000,
+                        "node_name": "msm1",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_usage_report_default_period", lambda: "2026-06-02")
+
+    result = runner.invoke(app, ["usage", "report"])
+
+    assert result.exit_code == 0
+    assert "requests_total: 2" in result.stdout
+    assert "consumed_ms_total: 3,234" in result.stdout
+    assert "requests_by_node_user:" in result.stdout
+    assert "  - msm1:" in result.stdout
+    assert "      alice: 2" in result.stdout
+    assert "consumed_ms_by_node:" not in result.stdout
+    assert "consumed_ms_by_model:" not in result.stdout
 
 
 def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkeypatch) -> None:

@@ -668,7 +668,7 @@ def _opencode_model_config(entry: EdgeModelCatalogEntry) -> dict[str, object]:
     context_length = _context_length(entry)
     if context_length is not None:
         # OpenCode model limits require context+output; output defaults to a safe cap.
-        model_config["limit"] = {"context": context_length, "output": min(8192, context_length)}
+        model_config["limit"] = {"context": context_length, "output": min(32768, context_length)}
     return model_config
 
 
@@ -749,7 +749,13 @@ def _hermes_config_yaml_from_catalog(
     ]
     for entry in sorted(model_catalog, key=lambda item: item.id):
         model_config = _hermes_model_config(entry)
-        lines.append(f"      {entry.id}: {_yaml_inline_model_mapping(model_config)}")
+        if model_config:
+            lines.append(f"      {entry.id}:")
+            context_length = model_config.get("context_length")
+            if isinstance(context_length, int) and context_length > 0:
+                lines.append(f"        context_length: {context_length}")
+        else:
+            lines.append(f"      {entry.id}: {{}}")
     return "\n".join(lines) + "\n"
 
 
@@ -2265,17 +2271,20 @@ def usage_report(
     typer.echo(f"access_log: {summary.access_log_path}")
     if summary.node_metrics_path:
         typer.echo(f"node_metrics_log: {summary.node_metrics_path}")
-    typer.echo(f"requests_total: {summary.requests_total}")
-    typer.echo(f"consumed_ms_total: {summary.consumed_ms_total}")
-    typer.echo(f"invalid_lines: {summary.invalid_lines}")
+    def _fmt_number(value: int) -> str:
+        return f"{value:,}"
 
-    def _print_mapping(title: str, mapping: dict[str, object]) -> None:
+    typer.echo(f"requests_total: {_fmt_number(summary.requests_total)}")
+    typer.echo(f"consumed_ms_total: {_fmt_number(summary.consumed_ms_total)}")
+    typer.echo(f"invalid_lines: {_fmt_number(summary.invalid_lines)}")
+
+    def _print_mapping(title: str, mapping: dict[str, int]) -> None:
         typer.echo(f"{title}:")
         if not mapping:
             typer.echo("  []")
             return
         for key, value in mapping.items():
-            typer.echo(f"  - {key}: {value}")
+            typer.echo(f"  - {key}: {_fmt_number(value)}")
 
     _print_mapping("requests_by_user", summary.requests_by_user)
     _print_mapping("consumed_ms_by_user", summary.consumed_ms_by_user)
@@ -2284,18 +2293,22 @@ def usage_report(
         for client_id, models in summary.requests_by_user_model.items():
             typer.echo(f"  - {client_id}:")
             for model, count in models.items():
-                typer.echo(f"      {model}: {count}")
+                typer.echo(f"      {model}: {_fmt_number(count)}")
     _print_mapping("requests_by_node", summary.requests_by_node)
-    _print_mapping("consumed_ms_by_node", summary.consumed_ms_by_node)
+    if summary.requests_by_node_user:
+        typer.echo("requests_by_node_user:")
+        for node_name, users in summary.requests_by_node_user.items():
+            typer.echo(f"  - {node_name}:")
+            for user, count in users.items():
+                typer.echo(f"      {user}: {_fmt_number(count)}")
     _print_mapping("requests_by_model", summary.requests_by_model)
-    _print_mapping("consumed_ms_by_model", summary.consumed_ms_by_model)
     _print_mapping("requests_by_hour", summary.requests_by_hour)
     if summary.requests_by_node_model:
         typer.echo("requests_by_node_model:")
         for node_name, models in summary.requests_by_node_model.items():
             typer.echo(f"  - {node_name}:")
             for model, count in models.items():
-                typer.echo(f"      {model}: {count}")
+                typer.echo(f"      {model}: {_fmt_number(count)}")
 @usage_app.command("collect-node-metrics")
 def usage_collect_node_metrics(
     output: Path | None = typer.Option(
