@@ -491,7 +491,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
     assert parsed["proxy"]["engine"] == "olla"
     assert parsed["proxy"]["connection_timeout"] == "5s"
     assert parsed["proxy"]["sticky_sessions"]["enabled"] is True
-    assert parsed["proxy"]["sticky_sessions"]["key_sources"] == ["session_header", "auth_header"]
+    assert parsed["proxy"]["sticky_sessions"]["key_sources"] == ["session_header", "auth_header", "prefix_hash"]
     endpoints = parsed["discovery"]["static"]["endpoints"]
     assert endpoints == [
         {

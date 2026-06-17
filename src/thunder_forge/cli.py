@@ -96,6 +96,8 @@ app = typer.Typer(
     help="CLI for managing a local MLX inference cluster.",
     no_args_is_help=True,
 )
+
+LATEST_OMLX_RELEASE_API = "https://api.github.com/repos/jundot/omlx/releases/latest"
 runtime_app = typer.Typer(help="Manage node-level runtimes such as oMLX.", no_args_is_help=True)
 artifact_app = typer.Typer(help="Inspect model artifact readiness for oMLX nodes.", no_args_is_help=True)
 edge_app = typer.Typer(help="Smoke-test and operate the minimal TF edge.", no_args_is_help=True)
@@ -1217,7 +1219,72 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
     if payload.get("error"):
         typer.echo(f"Error: edge status endpoint error: {payload['error']}", err=True)
         raise typer.Exit(1)
+    _enrich_cluster_status_payload_with_omlx_version(payload)
     return payload
+
+
+def _normalize_version_token(value: str) -> str:
+    return value.strip().lower().removeprefix("v")
+
+
+def _latest_omlx_release_version(*, timeout: int = 5) -> str:
+    request = urllib.request.Request(LATEST_OMLX_RELEASE_API, headers={"User-Agent": "thunder-forge"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode())
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return ""
+    latest = str(payload.get("tag_name", "")).strip()
+    return latest
+
+
+def _enrich_cluster_status_payload_with_omlx_version(payload: dict[str, object]) -> None:
+    summary_raw = payload.get("summary")
+    if isinstance(summary_raw, dict):
+        summary = summary_raw
+    else:
+        summary = {}
+        payload["summary"] = summary
+
+    if summary.get("latest_omlx_version"):
+        return
+
+    inference_raw = payload.get("inference")
+    inference_nodes = inference_raw if isinstance(inference_raw, list) else []
+    omlx_versions: list[str] = []
+    for node in inference_nodes:
+        if not isinstance(node, dict):
+            continue
+        version = str(node.get("omlx_version", "")).strip()
+        if version and version != "unknown":
+            omlx_versions.append(version)
+
+    known_versions = sorted(set(omlx_versions))
+    unknown_count = 0
+    if isinstance(inference_raw, list):
+        unknown_count = sum(
+            1
+            for node in inference_raw
+            if isinstance(node, dict) and str(node.get("omlx_version", "")).strip() in {"", "unknown"}
+        )
+
+    latest_omlx = _latest_omlx_release_version(timeout=5)
+    summary["latest_omlx_version"] = latest_omlx or "unknown"
+
+    normalized_latest_omlx = _normalize_version_token(latest_omlx)
+    normalized_known_versions = sorted({_normalize_version_token(version) for version in known_versions})
+    if len(known_versions) > 1:
+        summary["omlx_upgrade_hint"] = f"yes (version drift: {', '.join(known_versions)})"
+    elif (
+        normalized_latest_omlx
+        and normalized_known_versions
+        and normalized_known_versions[0] != normalized_latest_omlx
+    ):
+        summary["omlx_upgrade_hint"] = f"yes (latest={latest_omlx}, installed={known_versions[0]})"
+    elif unknown_count:
+        summary["omlx_upgrade_hint"] = "check (unknown versions present)"
+    else:
+        summary["omlx_upgrade_hint"] = "no (versions aligned)"
 
 
 def _print_cluster_status_payload(payload: dict[str, object], *, config: ClusterConfig) -> None:
@@ -1257,8 +1324,11 @@ def _print_cluster_status_payload(payload: dict[str, object], *, config: Cluster
                     typer.echo(f"Error: {node.get('name', 'node')}: {error}", err=True)
 
     summary = payload.get("summary")
-    if isinstance(summary, dict) and summary.get("omlx_upgrade_hint"):
-        typer.echo(f"omlx_upgrade_hint: {summary['omlx_upgrade_hint']}")
+    if isinstance(summary, dict):
+        if summary.get("latest_omlx_version"):
+            typer.echo(f"latest_omlx_version: {summary['latest_omlx_version']}")
+        if summary.get("omlx_upgrade_hint"):
+            typer.echo(f"omlx_upgrade_hint: {summary['omlx_upgrade_hint']}")
 
 
 def _usage_report_default_period() -> str:

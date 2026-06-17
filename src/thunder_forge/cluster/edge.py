@@ -712,6 +712,23 @@ def _latest_olla_release_version(*, timeout: float = 5.0) -> str:
     return str(payload.get("tag_name", "")).strip()
 
 
+def _latest_omlx_release_version(*, timeout: float = 5.0) -> str:
+    request = Request(
+        "https://api.github.com/repos/jundot/omlx/releases/latest",
+        headers={"User-Agent": "thunder-forge"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode())
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return ""
+    return str(payload.get("tag_name", "")).strip()
+
+
+def _normalize_version_token(value: str) -> str:
+    return value.strip().lower().removeprefix("v")
+
+
 def _gateway_olla_version(config: EdgeProxyConfig) -> str:
     if config.repo_root is None or config.cluster_config is None:
         return "unknown"
@@ -787,6 +804,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
     cluster_config = config.cluster_config
     gateway_names, inference_names = _resolve_status_targets(cluster_config, target)
     latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
+    latest_omlx = _latest_omlx_release_version(timeout=min(config.status_timeout, 5.0))
 
     gateway_payload: dict[str, object] | None = None
     if gateway_names:
@@ -862,8 +880,18 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
 
     known_versions = sorted({version for version in omlx_versions if version != "unknown"})
     unknown_count = sum(1 for version in omlx_versions if version == "unknown")
+    normalized_latest_omlx = _normalize_version_token(latest_omlx)
+    normalized_known_versions = sorted({_normalize_version_token(version) for version in known_versions})
     if len(known_versions) > 1:
         omlx_upgrade_hint = f"yes (version drift: {', '.join(known_versions)})"
+    elif (
+        normalized_latest_omlx
+        and normalized_known_versions
+        and normalized_known_versions[0] != normalized_latest_omlx
+    ):
+        omlx_upgrade_hint = (
+            f"yes (latest={latest_omlx}, installed={known_versions[0]})"
+        )
     elif unknown_count:
         omlx_upgrade_hint = "check (unknown versions present)"
     else:
@@ -881,6 +909,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
             "inference_healthy": sum(
                 1 for item in inference_payloads if item["health"] == "ok" and item["models"] == "ok"
             ),
+            "latest_omlx_version": latest_omlx or "unknown",
             "omlx_upgrade_hint": omlx_upgrade_hint,
         },
     }

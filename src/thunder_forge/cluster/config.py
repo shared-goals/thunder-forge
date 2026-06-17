@@ -738,7 +738,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
                 "enabled": True,
                 "idle_ttl_seconds": 600,
                 "max_sessions": 10000,
-                "key_sources": ["session_header", "auth_header"],
+                "key_sources": ["session_header", "auth_header", "prefix_hash"],
                 "prefix_hash_bytes": 512,
             },
             "retry": {

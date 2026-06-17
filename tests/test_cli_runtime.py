@@ -1071,7 +1071,10 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
                 "errors": [],
             }
         ],
-        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+        "summary": {
+            "latest_omlx_version": "v0.4.2",
+            "omlx_upgrade_hint": "no (versions aligned)",
+        },
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -1083,6 +1086,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     assert "omlx_version: 0.4.2.dev2" in result.stdout
     assert "served_models (13G): memory" in result.stdout
     assert "hot_loaded_models (13G): memory" in result.stdout
+    assert "latest_omlx_version: v0.4.2" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
 
 
@@ -1111,7 +1115,10 @@ def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, mon
                 "errors": [],
             }
         ],
-        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+        "summary": {
+            "latest_omlx_version": "v0.4.2",
+            "omlx_upgrade_hint": "no (versions aligned)",
+        },
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -1121,6 +1128,7 @@ def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, mon
     assert "rock: olla_version=v0.0.27 latest=v0.0.27 upgrade=no" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
+    assert "latest_omlx_version: v0.4.2" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
 
 
@@ -1132,7 +1140,10 @@ def test_cluster_status_json_output_emits_payload(monkeypatch) -> None:
         "target": "msm1",
         "gateway": None,
         "inference": [],
-        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+        "summary": {
+            "latest_omlx_version": "v0.4.2",
+            "omlx_upgrade_hint": "no (versions aligned)",
+        },
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
