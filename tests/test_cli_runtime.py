@@ -2,6 +2,7 @@
 
 import json
 import platform
+import threading
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -674,6 +675,72 @@ def test_cluster_prepare_apply_uses_latest_olla_when_config_is_unpinned(tmp_path
         assert "status: cluster prepare complete" in result.stdout
 
 
+def test_cluster_prepare_apply_uses_configured_local_olla_binary(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    local_binary = repo / "olla" / "bin" / "olla"
+    local_binary.parent.mkdir(parents=True, exist_ok=True)
+    local_binary.write_text("#!/bin/sh\necho local\n")
+    local_binary.chmod(0o755)
+    (repo / "olla" / "config" / "profiles").mkdir(parents=True, exist_ok=True)
+
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            services:
+              frontend:
+                admin_user: serpo
+              olla:
+                local_binary: olla/bin/olla
+            models: {}
+            nodes:
+              rock:
+                host: rock.lan
+                ram_gb: 32
+                roles: [gateway]
+                user: shag
+                admin_user: serpo
+        """)
+    )
+
+    def fail_ensure_olla_binary(**kwargs):
+        raise AssertionError("release downloader should not run when services.olla.local_binary is set")
+
+    def fake_write_generated_olla_config(config, *, repo_root, port=None):
+        return repo_root / "configs/olla-config.yaml"
+
+    gateway_calls: list[dict] = []
+
+    def fake_run_gateway_daemon_setup(**kwargs):
+        gateway_calls.append(kwargs)
+        kwargs["progress"]("health: gateway ok")
+        return GatewayDaemonSetupResult(
+            user=kwargs["user"],
+            admin_user=kwargs["admin_user"],
+            sudoers_path="/etc/sudoers.d/thunder-forge",
+            script_path=str(repo / ".tmp/run/thunder-forge-gateway-daemon-setup.sh"),
+            applied=True,
+            sudoers_verified=True,
+            service_labels_verified=True,
+            health_ok=True,
+        )
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "ensure_olla_binary", fail_ensure_olla_binary)
+    monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+    monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
+
+    result = runner.invoke(app, ["cluster", "prepare", "--apply"])
+
+    assert result.exit_code == 0
+    assert f"local_olla_binary: {local_binary}" in result.stdout
+    assert f"local_olla_workdir: {repo / 'olla'}" in result.stdout
+    assert gateway_calls[0]["binary"] == local_binary
+    assert gateway_calls[0]["olla_working_directory"] == repo / "olla"
+    assert "status: cluster prepare complete" in result.stdout
+
+
 def test_cluster_prepare_apply_prepares_remote_cache_hub(tmp_path: Path, monkeypatch) -> None:
     import subprocess
 
@@ -837,6 +904,154 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
     assert "status: cluster restart complete" in result.stdout
 
 
+def test_cluster_restart_apply_restarts_inference_nodes_in_parallel(tmp_path: Path, monkeypatch) -> None:
+        import thunder_forge.cli as cli_module
+        import thunder_forge.cluster.config as config_module
+
+        repo = tmp_path
+        (repo / "tfconfig.yaml").write_text(
+                dedent("""\
+                        services:
+                            olla:
+                                port: 45115
+                            edge:
+                                host: 0.0.0.0
+                                port: 45116
+                        models: {}
+                        nodes:
+                            gateway-cache-01:
+                                host: gateway-cache-01.lan
+                                ram_gb: 128
+                                roles: [gateway, cache]
+                                user: shag
+                            infer-03:
+                                host: infer-03.lan
+                                ram_gb: 128
+                                roles: [inference]
+                                user: shag
+                                runtime:
+                                    type: omlx
+                            infer-04:
+                                host: infer-04.lan
+                                ram_gb: 128
+                                roles: [inference]
+                                user: shag
+                                runtime:
+                                    type: omlx
+                """)
+        )
+
+        started = threading.Barrier(2, timeout=2)
+        calls: list[str] = []
+
+        def fake_write_generated_olla_config(config, *, repo_root, port=None):
+                calls.append("config")
+                return repo_root / "configs/olla-config.yaml"
+
+        def fake_service(**kwargs):
+                calls.append(kwargs.get("service", "service"))
+                return LaunchdServiceResult(
+                        service=kwargs.get("service", "service"),
+                        label=f"com.thunder-forge.{kwargs.get('service', 'service')}",
+                        plist_path="/Library/LaunchDaemons/com.thunder-forge.test.plist",
+                        applied=True,
+                        service_label_verified=True,
+                        health_ok=True,
+                )
+
+        def fake_omlx_restart(runtime_node, *, apply, timeout):
+                calls.append(runtime_node.host)
+                started.wait()
+                return fake_service(service="omlx")
+
+        monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
+        monkeypatch.setattr(
+            cli_module,
+            "run_olla_service_restart",
+            lambda **kwargs: fake_service(service="olla", **kwargs),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "run_edge_service_restart",
+            lambda **kwargs: fake_service(service="edge", **kwargs),
+        )
+        monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_omlx_restart)
+
+        result = runner.invoke(app, ["cluster", "restart", "--apply"])
+
+        assert result.exit_code == 0
+        assert calls[0] == "config"
+        assert calls[1] == "olla"
+        assert calls[2] == "edge"
+        assert {call for call in calls[3:] if call.endswith(".lan")} == {"infer-03.lan", "infer-04.lan"}
+        assert "== Inference: infer-03" in result.stdout
+        assert "== Inference: infer-04" in result.stdout
+        assert "status: cluster restart complete" in result.stdout
+
+def test_cluster_restart_apply_uses_configured_local_olla_binary(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    local_binary = repo / "olla" / "bin" / "olla"
+    local_binary.parent.mkdir(parents=True, exist_ok=True)
+    local_binary.write_text("#!/bin/sh\necho local\n")
+    local_binary.chmod(0o755)
+    (repo / "tfconfig.yaml").write_text(
+        dedent(
+            """\
+            services:
+              olla:
+                local_binary: olla/bin/olla
+            models: {}
+            nodes:
+              rock:
+                host: rock.lan
+                ram_gb: 64
+                roles: [gateway]
+                user: shag
+            """
+        )
+    )
+
+    restart_calls: list[dict] = []
+
+    def fake_service(**kwargs):
+        return LaunchdServiceResult(
+            service=kwargs.get("service", "service"),
+            label=f"com.thunder-forge.{kwargs.get('service', 'service')}",
+            plist_path="/Library/LaunchDaemons/com.thunder-forge.test.plist",
+            applied=True,
+            service_label_verified=True,
+            health_ok=True,
+        )
+
+    def fake_run_olla_service_restart(**kwargs):
+        restart_calls.append(kwargs)
+        return fake_service(service="olla", **kwargs)
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(
+        cli_module,
+        "write_generated_olla_config",
+        lambda config, *, repo_root, port=None: repo_root / "configs/olla-config.yaml",
+    )
+    monkeypatch.setattr(cli_module, "run_olla_service_restart", fake_run_olla_service_restart)
+    monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
+    monkeypatch.setattr(
+        cli_module,
+        "run_omlx_daemon_restart",
+        lambda *args, **kwargs: fake_service(service="omlx", **kwargs),
+    )
+
+    result = runner.invoke(app, ["cluster", "restart", "--apply"])
+
+    assert result.exit_code == 0
+    assert restart_calls
+    assert restart_calls[0]["binary"] == local_binary
+
+
 def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
@@ -856,7 +1071,10 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
                 "errors": [],
             }
         ],
-        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+        "summary": {
+            "latest_omlx_version": "v0.4.2",
+            "omlx_upgrade_hint": "no (versions aligned)",
+        },
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -866,8 +1084,9 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     assert "Thunder Forge cluster status" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
-    assert "served_models: memory" in result.stdout
-    assert "hot_loaded_models: memory" in result.stdout
+    assert "served_models (13G): memory" in result.stdout
+    assert "hot_loaded_models (13G): memory" in result.stdout
+    assert "latest_omlx_version: v0.4.2" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
 
 
@@ -896,7 +1115,10 @@ def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, mon
                 "errors": [],
             }
         ],
-        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+        "summary": {
+            "latest_omlx_version": "v0.4.2",
+            "omlx_upgrade_hint": "no (versions aligned)",
+        },
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -906,6 +1128,7 @@ def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, mon
     assert "rock: olla_version=v0.0.27 latest=v0.0.27 upgrade=no" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
+    assert "latest_omlx_version: v0.4.2" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
 
 
@@ -917,7 +1140,10 @@ def test_cluster_status_json_output_emits_payload(monkeypatch) -> None:
         "target": "msm1",
         "gateway": None,
         "inference": [],
-        "summary": {"omlx_upgrade_hint": "no (versions aligned)"},
+        "summary": {
+            "latest_omlx_version": "v0.4.2",
+            "omlx_upgrade_hint": "no (versions aligned)",
+        },
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -1691,6 +1917,7 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
     assert output_path.exists()
     parsed = yaml_lib.safe_load(output_path.read_text())
     assert parsed["server"]["port"] == 40115
+    assert parsed["logging"]["output"] == str((repo / "logs" / "olla.log").resolve())
     assert parsed["model_aliases"] == {"qwen3-1.7b-omlx-infer-03-test": ["Qwen3-1.7B-4bit"]}
     assert f"generated: {output_path}" in result.stdout
 

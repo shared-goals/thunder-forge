@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -95,6 +96,8 @@ app = typer.Typer(
     help="CLI for managing a local MLX inference cluster.",
     no_args_is_help=True,
 )
+
+LATEST_OMLX_RELEASE_API = "https://api.github.com/repos/jundot/omlx/releases/latest"
 runtime_app = typer.Typer(help="Manage node-level runtimes such as oMLX.", no_args_is_help=True)
 artifact_app = typer.Typer(help="Inspect model artifact readiness for oMLX nodes.", no_args_is_help=True)
 edge_app = typer.Typer(help="Smoke-test and operate the minimal TF edge.", no_args_is_help=True)
@@ -179,6 +182,26 @@ def _load_repo_dotenv() -> tuple[Path, Path]:
 def _repo_relative_path(repo_root: Path, path: Path) -> Path:
     expanded = path.expanduser()
     return expanded if expanded.is_absolute() else repo_root / expanded
+
+
+def _resolve_olla_binary_and_workdir(
+    *,
+    repo_root: Path,
+    config: ClusterConfig,
+    binary_override: Path | None = None,
+) -> tuple[Path, Path | None]:
+    if binary_override is not None:
+        resolved_binary = _repo_relative_path(repo_root, binary_override)
+    elif config.services.olla_local_binary:
+        resolved_binary = _repo_relative_path(repo_root, Path(config.services.olla_local_binary))
+    else:
+        resolved_binary = _repo_relative_path(repo_root, Path(config.services.olla_bin_dir) / "olla")
+
+    working_directory = None
+    candidate_working_directory = resolved_binary.parent.parent
+    if (candidate_working_directory / "config" / "profiles").is_dir():
+        working_directory = candidate_working_directory
+    return resolved_binary, working_directory
 
 
 def _edge_access_log_path(repo_root: Path, config: ClusterConfig, access_log: Path | None) -> Path:
@@ -506,6 +529,7 @@ def _edge_model_catalog_from_config(config: ClusterConfig) -> list[EdgeModelCata
                 source_repo=model.source.repo,
                 base_model=base_model,
                 context_length=model.max_context,
+                disk_gb=model.disk_gb,
                 benchmark_only=model.benchmark_only,
             )
         )
@@ -527,17 +551,13 @@ def _opencode_config_from_catalog(
     provider_name: str,
     base_url: str,
     api_key: str,
+    session_id: str | None = None,
     model: str | None = None,
     small_model: str | None = None,
 ) -> dict[str, object]:
     models: dict[str, dict[str, object]] = {}
     for entry in sorted(model_catalog, key=lambda item: item.id):
-        model_config: dict[str, object] = {
-            "name": entry.name,
-        }
-        if entry.benchmark_only:
-            model_config["status"] = "beta"
-        models[entry.id] = model_config
+        models[entry.id] = _opencode_model_config(entry)
 
     provider: dict[str, object] = {
         "npm": "@ai-sdk/openai-compatible",
@@ -548,6 +568,9 @@ def _opencode_config_from_catalog(
         },
         "models": models,
     }
+    if session_id:
+        for model_id, entry in provider["models"].items():
+            entry["headers"] = {"X-Olla-Session-ID": f"{model_id}-{session_id}"}
 
     payload: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
@@ -560,74 +583,116 @@ def _opencode_config_from_catalog(
     return payload
 
 
-def _model_comment(entry: EdgeModelCatalogEntry) -> str:
-    return entry.base_model or entry.source_repo or entry.runtime_model_id
+def _opencode_model_comment(entry: EdgeModelCatalogEntry) -> str:
+    if entry.source_repo:
+        base = entry.source_repo
+    elif entry.runtime_model_id:
+        base = entry.runtime_model_id
+    else:
+        description = entry.description.strip()
+        if not description:
+            base = entry.id
+        else:
+            base = description.split(";", 1)[0].strip()
+
+    return f"{base}; disk_gb: {entry.disk_gb:.1f}"
+
+
+def _format_disk_gb(total_disk_gb: float) -> str:
+    rounded = round(total_disk_gb)
+    if abs(total_disk_gb - rounded) < 1e-9:
+        return f"{int(rounded)}G"
+    return f"{total_disk_gb:.1f}G"
+
+
+def _sum_aliases_disk_gb(config: ClusterConfig, aliases: list[str]) -> float:
+    total = 0.0
+    for alias in aliases:
+        model = config.models.get(alias)
+        if model is None:
+            continue
+        total += model.disk_gb
+    return total
+
+
+def _render_opencode_config(
+    *,
+    payload: dict[str, object],
+    model_catalog: list[EdgeModelCatalogEntry],
+    api_key_env_name: str,
+) -> str:
+    rendered = json.dumps(payload, indent=2, ensure_ascii=False)
+
+    model_comments = {entry.id: _opencode_model_comment(entry) for entry in model_catalog}
+    lines = rendered.splitlines()
+    output_lines: list[str] = []
+    in_models = False
+    models_indent = 0
+
+    for line in lines:
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+
+        if stripped == '"models": {':
+            in_models = True
+            models_indent = indent
+        elif in_models and indent <= models_indent and stripped == "}":
+            in_models = False
+
+        if stripped.startswith('"apiKey":'):
+            output_lines.append(f"{' ' * indent}// {api_key_env_name}: check .env")
+
+        if in_models and indent == models_indent + 2 and stripped.startswith('"') and stripped.endswith('": {'):
+            model_alias = stripped[1:].split('"', 1)[0]
+            comment = model_comments.get(model_alias)
+            if comment:
+                output_lines.append(f"{' ' * indent}// {comment}")
+
+        output_lines.append(line)
+
+    return "\n".join(output_lines) + "\n"
+
+
+def _context_length(entry: EdgeModelCatalogEntry) -> int | None:
+    if entry.context_length > 0:
+        return entry.context_length
+    return None
+
+
+def _opencode_model_config(entry: EdgeModelCatalogEntry) -> dict[str, object]:
+    model_config: dict[str, object] = {
+        "name": entry.name,
+    }
+    if entry.benchmark_only:
+        model_config["status"] = "beta"
+
+    context_length = _context_length(entry)
+    if context_length is not None:
+        # OpenCode model limits require context+output; output defaults to a safe cap.
+        model_config["limit"] = {"context": context_length, "output": min(32768, context_length)}
+    return model_config
+
+
+def _hermes_model_config(entry: EdgeModelCatalogEntry) -> dict[str, object]:
+    context_length = _context_length(entry)
+    if context_length is not None:
+        return {"context_length": context_length}
+    return {}
+
+
+def _yaml_inline_model_mapping(model_config: dict[str, object]) -> str:
+    if not model_config:
+        return "{}"
+    context_length = model_config.get("context_length")
+    if isinstance(context_length, int) and context_length > 0:
+        return f"{{context_length: {context_length}}}"
+    return "{}"
 
 
 def _yaml_scalar(value: str) -> str:
     if value and all(char.isalnum() or char in "._/:+-" for char in value):
         return value
     return json.dumps(value, ensure_ascii=False)
-
-
-def _opencode_config_jsonc_from_catalog(
-    *,
-    model_catalog: list[EdgeModelCatalogEntry],
-    provider_id: str,
-    provider_name: str,
-    base_url: str,
-    api_key: str,
-    api_key_comment: str = "",
-    model: str | None = None,
-    small_model: str | None = None,
-) -> str:
-    model_blocks: list[str] = []
-    for entry in sorted(model_catalog, key=lambda item: item.id):
-        model_config: dict[str, object] = {"name": entry.name}
-        if entry.benchmark_only:
-            model_config["status"] = "beta"
-        model_config_text = json.dumps(model_config, indent=2, ensure_ascii=False).replace("\n", "\n        ")
-        comment = _model_comment(entry)
-        comment_line = f"        // {comment}\n" if comment else ""
-        model_blocks.append(f"{comment_line}        {json.dumps(entry.id)}: {model_config_text}")
-
-    properties = [f'  "$schema": {json.dumps("https://opencode.ai/config.json")}']
-    if model:
-        properties.append(f'  "model": {json.dumps(f"{provider_id}/{model}")}')
-    if small_model:
-        properties.append(f'  "small_model": {json.dumps(f"{provider_id}/{small_model}")}')
-    api_key_lines = [
-        f'        "baseURL": {json.dumps(base_url)},',
-    ]
-    if api_key_comment:
-        api_key_lines.append(f"        // {api_key_comment}")
-    api_key_lines.append(f'        "apiKey": {json.dumps(api_key)}')
-    properties.append(
-        "\n".join(
-            [
-                '  "provider": {',
-                f"    {json.dumps(provider_id)}: {{",
-                '      "npm": "@ai-sdk/openai-compatible",',
-                f'      "name": {json.dumps(provider_name)},',
-                '      "options": {',
-                "\n".join(api_key_lines),
-                "      },",
-                '      "models": {',
-                ",\n".join(model_blocks),
-                "      }",
-                "    }",
-                "  }",
-            ]
-        )
-    )
-    return "{\n" + ",\n".join(properties) + "\n}\n"
-
-
-def _opencode_api_key_comment(*, client_id: str | None, api_key_env: str | None) -> str:
-    resolved_env = api_key_env or DEFAULT_OPENCODE_API_KEY_ENV
-    if client_id:
-        resolved_env, _ = edge_api_key_from_env(env={}, client_id=client_id, users_env=EDGE_USER_PREFIX)
-    return f"{resolved_env}: check .env"
 
 
 def _edge_api_key_env_name(
@@ -684,14 +749,14 @@ def _hermes_config_yaml_from_catalog(
         "    models:",
     ]
     for entry in sorted(model_catalog, key=lambda item: item.id):
-        comment_parts = [
-            part
-            for part in (_model_comment(entry), "benchmark-only" if entry.benchmark_only else "")
-            if part
-        ]
-        if comment_parts:
-            lines.append(f"      # {'; '.join(comment_parts)}")
-        lines.append(f"      {entry.id}: {{}}")
+        model_config = _hermes_model_config(entry)
+        if model_config:
+            lines.append(f"      {entry.id}:")
+            context_length = model_config.get("context_length")
+            if isinstance(context_length, int) and context_length > 0:
+                lines.append(f"        context_length: {context_length}")
+        else:
+            lines.append(f"      {entry.id}: {{}}")
     return "\n".join(lines) + "\n"
 
 
@@ -1154,10 +1219,75 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
     if payload.get("error"):
         typer.echo(f"Error: edge status endpoint error: {payload['error']}", err=True)
         raise typer.Exit(1)
+    _enrich_cluster_status_payload_with_omlx_version(payload)
     return payload
 
 
-def _print_cluster_status_payload(payload: dict[str, object]) -> None:
+def _normalize_version_token(value: str) -> str:
+    return value.strip().lower().removeprefix("v")
+
+
+def _latest_omlx_release_version(*, timeout: int = 5) -> str:
+    request = urllib.request.Request(LATEST_OMLX_RELEASE_API, headers={"User-Agent": "thunder-forge"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode())
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return ""
+    latest = str(payload.get("tag_name", "")).strip()
+    return latest
+
+
+def _enrich_cluster_status_payload_with_omlx_version(payload: dict[str, object]) -> None:
+    summary_raw = payload.get("summary")
+    if isinstance(summary_raw, dict):
+        summary = summary_raw
+    else:
+        summary = {}
+        payload["summary"] = summary
+
+    if summary.get("latest_omlx_version"):
+        return
+
+    inference_raw = payload.get("inference")
+    inference_nodes = inference_raw if isinstance(inference_raw, list) else []
+    omlx_versions: list[str] = []
+    for node in inference_nodes:
+        if not isinstance(node, dict):
+            continue
+        version = str(node.get("omlx_version", "")).strip()
+        if version and version != "unknown":
+            omlx_versions.append(version)
+
+    known_versions = sorted(set(omlx_versions))
+    unknown_count = 0
+    if isinstance(inference_raw, list):
+        unknown_count = sum(
+            1
+            for node in inference_raw
+            if isinstance(node, dict) and str(node.get("omlx_version", "")).strip() in {"", "unknown"}
+        )
+
+    latest_omlx = _latest_omlx_release_version(timeout=5)
+    summary["latest_omlx_version"] = latest_omlx or "unknown"
+
+    normalized_latest_omlx = _normalize_version_token(latest_omlx)
+    normalized_known_versions = sorted({_normalize_version_token(version) for version in known_versions})
+    if len(known_versions) > 1:
+        summary["omlx_upgrade_hint"] = f"yes (version drift: {', '.join(known_versions)})"
+    elif (
+        normalized_latest_omlx
+        and normalized_known_versions
+        and normalized_known_versions[0] != normalized_latest_omlx
+    ):
+        summary["omlx_upgrade_hint"] = f"yes (latest={latest_omlx}, installed={known_versions[0]})"
+    elif unknown_count:
+        summary["omlx_upgrade_hint"] = "check (unknown versions present)"
+    else:
+        summary["omlx_upgrade_hint"] = "no (versions aligned)"
+
+
+def _print_cluster_status_payload(payload: dict[str, object], *, config: ClusterConfig) -> None:
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {payload.get('target', 'all')}")
 
@@ -1180,18 +1310,25 @@ def _print_cluster_status_payload(payload: dict[str, object]) -> None:
             typer.echo(f"  omlx_version: {node.get('omlx_version', 'unknown')}")
             served_models = node.get("served_models")
             if isinstance(served_models, list) and served_models:
-                typer.echo(f"  served_models: {', '.join(str(item) for item in served_models)}")
+                served_aliases = [str(item) for item in served_models]
+                served_disk = _format_disk_gb(_sum_aliases_disk_gb(config, served_aliases))
+                typer.echo(f"  served_models ({served_disk}): {', '.join(served_aliases)}")
             hot_loaded_models = node.get("hot_loaded_models")
             if isinstance(hot_loaded_models, list) and hot_loaded_models:
-                typer.echo(f"  hot_loaded_models: {', '.join(str(item) for item in hot_loaded_models)}")
+                hot_loaded_aliases = [str(item) for item in hot_loaded_models]
+                hot_loaded_disk = _format_disk_gb(_sum_aliases_disk_gb(config, hot_loaded_aliases))
+                typer.echo(f"  hot_loaded_models ({hot_loaded_disk}): {', '.join(hot_loaded_aliases)}")
             errors = node.get("errors")
             if isinstance(errors, list):
                 for error in errors:
                     typer.echo(f"Error: {node.get('name', 'node')}: {error}", err=True)
 
     summary = payload.get("summary")
-    if isinstance(summary, dict) and summary.get("omlx_upgrade_hint"):
-        typer.echo(f"omlx_upgrade_hint: {summary['omlx_upgrade_hint']}")
+    if isinstance(summary, dict):
+        if summary.get("latest_omlx_version"):
+            typer.echo(f"latest_omlx_version: {summary['latest_omlx_version']}")
+        if summary.get("omlx_upgrade_hint"):
+            typer.echo(f"omlx_upgrade_hint: {summary['omlx_upgrade_hint']}")
 
 
 def _usage_report_default_period() -> str:
@@ -1354,6 +1491,15 @@ def cluster_prepare(
     resolved_olla_os = olla_os or config.services.olla_os
     resolved_olla_arch = olla_arch or config.services.olla_arch
     resolved_olla_bin_dir = olla_bin_dir or Path(config.services.olla_bin_dir)
+    configured_local_olla_binary = (
+        _repo_relative_path(repo_root, Path(config.services.olla_local_binary))
+        if config.services.olla_local_binary
+        else None
+    )
+    _resolved_binary, configured_local_olla_working_directory = _resolve_olla_binary_and_workdir(
+        repo_root=repo_root,
+        config=config,
+    )
     gateway_names, cache_names, inference_names = _resolve_prepare_targets(config, target)
     _print_prepare_plan(
         target=target,
@@ -1366,8 +1512,13 @@ def cluster_prepare(
 
     if dry_run:
         if gateway_names:
-            preview_olla_path = resolved_olla_bin_dir / "olla"
-            typer.echo(f"would: ensure Olla {resolved_olla_version} at {preview_olla_path}")
+            if configured_local_olla_binary is not None:
+                typer.echo(f"would: use local Olla binary {configured_local_olla_binary}")
+                if configured_local_olla_working_directory is not None:
+                    typer.echo(f"would: use local Olla working directory {configured_local_olla_working_directory}")
+            else:
+                preview_olla_path = resolved_olla_bin_dir / "olla"
+                typer.echo(f"would: ensure Olla {resolved_olla_version} at {preview_olla_path}")
             typer.echo("would: generate configs/olla-config.yaml")
         if cache_names:
             for name in cache_names:
@@ -1391,16 +1542,28 @@ def cluster_prepare(
     if gateway_names:
         typer.echo("")
         typer.echo("== Gateway Tooling ==")
-        olla_result = ensure_olla_binary(
-            version=resolved_olla_version,
-            os_name=resolved_olla_os,
-            arch=resolved_olla_arch,
-            bin_dir=_repo_relative_path(repo_root, resolved_olla_bin_dir),
-            progress=_progress,
-        )
-        binary_path = olla_result.binary_path
-        typer.echo(f"  latest_olla: {getattr(olla_result, 'version', resolved_olla_version)}")
-        typer.echo(f"  upgrade_note: {_olla_upgrade_note(getattr(olla_result, 'status', ''))}")
+        if configured_local_olla_binary is not None:
+            if not configured_local_olla_binary.exists():
+                typer.echo(
+                    f"Error: configured local Olla binary not found: {configured_local_olla_binary}",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            binary_path = configured_local_olla_binary
+            typer.echo(f"  local_olla_binary: {binary_path}")
+            if configured_local_olla_working_directory is not None:
+                typer.echo(f"  local_olla_workdir: {configured_local_olla_working_directory}")
+        else:
+            olla_result = ensure_olla_binary(
+                version=resolved_olla_version,
+                os_name=resolved_olla_os,
+                arch=resolved_olla_arch,
+                bin_dir=_repo_relative_path(repo_root, resolved_olla_bin_dir),
+                progress=_progress,
+            )
+            binary_path = olla_result.binary_path
+            typer.echo(f"  latest_olla: {getattr(olla_result, 'version', resolved_olla_version)}")
+            typer.echo(f"  upgrade_note: {_olla_upgrade_note(getattr(olla_result, 'status', ''))}")
         config_path = write_generated_olla_config(config, repo_root=repo_root)
         typer.echo(f"  config: generated {config_path}")
 
@@ -1424,6 +1587,7 @@ def cluster_prepare(
             olla_base_url=local_base_url(config.services.olla_port),
             users_env=EDGE_USER_PREFIX,
             access_log_path=_edge_access_log_path(repo_root, config, None),
+            olla_working_directory=configured_local_olla_working_directory,
             user=_gateway_operator_user(config, ""),
             admin_user=config.services.frontend_admin_user or gateway_node.admin_user,
             interactive_sudo=True,
@@ -1511,7 +1675,11 @@ def cluster_restart(
 ) -> None:
     """Restart gateway and inference daemons through the configured managers."""
     config, repo_root = _load_config()
-    resolved_binary = binary or Path(config.services.olla_bin_dir) / "olla"
+    resolved_binary, configured_local_olla_working_directory = _resolve_olla_binary_and_workdir(
+        repo_root=repo_root,
+        config=config,
+        binary_override=binary,
+    )
     gateway_names, _cache_names, inference_names = _resolve_prepare_targets(config, target)
     typer.echo("Thunder Forge cluster restart")
     typer.echo(f"target: {target or 'all'}")
@@ -1536,6 +1704,7 @@ def cluster_restart(
             apply=not dry_run,
             timeout=timeout,
             user=_gateway_operator_user(config, ""),
+            working_directory=configured_local_olla_working_directory,
         )
         typer.echo(f"  olla: {olla_result.label}")
         if not dry_run and _service_result_failed(olla_result):
@@ -1556,16 +1725,29 @@ def cluster_restart(
         if not dry_run and _service_result_failed(edge_result):
             _fail_on_setup_errors(edge_result.errors or ["TF edge restart did not verify cleanly"])
 
-    for node_name in inference_names:
-        runtime_node = _get_runtime_node(config, node_name)
-        if runtime_node.home_dir is None:
-            runtime_node.home_dir = f"/Users/{runtime_node.user}"
-        typer.echo("")
-        typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
-        result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
-        typer.echo(f"  omlx: {result.label}")
-        if not dry_run and _service_result_failed(result):
-            _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
+    if inference_names:
+        inference_jobs: list[tuple[str, object]] = []
+
+        def restart_inference(node_name: str):
+            runtime_node = _get_runtime_node(config, node_name)
+            if runtime_node.home_dir is None:
+                runtime_node.home_dir = f"/Users/{runtime_node.user}"
+            return node_name, runtime_node, run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+
+        max_workers = min(len(inference_names), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(restart_inference, node_name) for node_name in inference_names]
+            for future in as_completed(futures):
+                inference_jobs.append(future.result())
+
+        jobs_by_name = {node_name: (runtime_node, result) for node_name, runtime_node, result in inference_jobs}
+        for node_name in inference_names:
+            runtime_node, result = jobs_by_name[node_name]
+            typer.echo("")
+            typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
+            typer.echo(f"  omlx: {result.label}")
+            if not dry_run and _service_result_failed(result):
+                _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
 
     if not gateway_names and not inference_names:
         typer.echo("status: nothing to restart")
@@ -1588,7 +1770,7 @@ def cluster_status(
     if json_output:
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        _print_cluster_status_payload(payload)
+        _print_cluster_status_payload(payload, config=config)
 
 
 @cluster_app.command("sync")
@@ -1869,7 +2051,7 @@ def service_restart(
         help="Print plist and commands without executing by default.",
     ),
     timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds for service commands."),
-    binary: Path = typer.Option(Path(".tmp/olla-bin/olla"), "--binary", help="Olla binary path."),
+    binary: Path | None = typer.Option(None, "--binary", help="Olla binary path."),
     config_path: Path = typer.Option(Path("configs/olla-config.yaml"), "--config", help="Olla config path."),
     port: int | None = typer.Option(
         None,
@@ -1909,9 +2091,14 @@ def service_restart(
     if normalized_service == "olla":
         config, repo_root = _load_config()
         resolved_port = resolve_port(port, default=config.services.olla_port)
+        resolved_binary, resolved_working_directory = _resolve_olla_binary_and_workdir(
+            repo_root=repo_root,
+            config=config,
+            binary_override=binary,
+        )
         result = run_olla_service_restart(
             repo_root=repo_root,
-            binary=binary,
+            binary=resolved_binary,
             config_path=config_path,
             port=resolved_port,
             manager=normalized_manager,
@@ -1919,6 +2106,7 @@ def service_restart(
             timeout=timeout,
             interactive_sudo=allow_sudo_prompt,
             admin_user=config.services.frontend_admin_user if allow_sudo_prompt else "",
+            working_directory=resolved_working_directory,
         )
         _print_launchd_service_result(result, manager=normalized_manager, dry_run=dry_run)
         if _service_result_failed(result):
@@ -2154,17 +2342,20 @@ def usage_report(
     typer.echo(f"access_log: {summary.access_log_path}")
     if summary.node_metrics_path:
         typer.echo(f"node_metrics_log: {summary.node_metrics_path}")
-    typer.echo(f"requests_total: {summary.requests_total}")
-    typer.echo(f"consumed_ms_total: {summary.consumed_ms_total}")
-    typer.echo(f"invalid_lines: {summary.invalid_lines}")
+    def _fmt_number(value: int) -> str:
+        return f"{value:,}"
 
-    def _print_mapping(title: str, mapping: dict[str, object]) -> None:
+    typer.echo(f"requests_total: {_fmt_number(summary.requests_total)}")
+    typer.echo(f"consumed_ms_total: {_fmt_number(summary.consumed_ms_total)}")
+    typer.echo(f"invalid_lines: {_fmt_number(summary.invalid_lines)}")
+
+    def _print_mapping(title: str, mapping: dict[str, int]) -> None:
         typer.echo(f"{title}:")
         if not mapping:
             typer.echo("  []")
             return
         for key, value in mapping.items():
-            typer.echo(f"  - {key}: {value}")
+            typer.echo(f"  - {key}: {_fmt_number(value)}")
 
     _print_mapping("requests_by_user", summary.requests_by_user)
     _print_mapping("consumed_ms_by_user", summary.consumed_ms_by_user)
@@ -2173,18 +2364,22 @@ def usage_report(
         for client_id, models in summary.requests_by_user_model.items():
             typer.echo(f"  - {client_id}:")
             for model, count in models.items():
-                typer.echo(f"      {model}: {count}")
+                typer.echo(f"      {model}: {_fmt_number(count)}")
     _print_mapping("requests_by_node", summary.requests_by_node)
-    _print_mapping("consumed_ms_by_node", summary.consumed_ms_by_node)
+    if summary.requests_by_node_user:
+        typer.echo("requests_by_node_user:")
+        for node_name, users in summary.requests_by_node_user.items():
+            typer.echo(f"  - {node_name}:")
+            for user, count in users.items():
+                typer.echo(f"      {user}: {_fmt_number(count)}")
     _print_mapping("requests_by_model", summary.requests_by_model)
-    _print_mapping("consumed_ms_by_model", summary.consumed_ms_by_model)
     _print_mapping("requests_by_hour", summary.requests_by_hour)
     if summary.requests_by_node_model:
         typer.echo("requests_by_node_model:")
         for node_name, models in summary.requests_by_node_model.items():
             typer.echo(f"  - {node_name}:")
             for model, count in models.items():
-                typer.echo(f"      {model}: {count}")
+                typer.echo(f"      {model}: {_fmt_number(count)}")
 @usage_app.command("collect-node-metrics")
 def usage_collect_node_metrics(
     output: Path | None = typer.Option(
@@ -2541,7 +2736,7 @@ def edge_client_config(
         "--small-model",
         help="Optional default TF alias for OpenCode small_model.",
     ),
-    output_format: str = typer.Option("auto", "--format", help="Output format: auto, jsonc, json, or yaml."),
+    output_format: str = typer.Option("auto", "--format", help="Output format: auto, jsonc, or yaml."),
     copy: bool = typer.Option(False, "--copy", help="Copy the generated config to the terminal clipboard via OSC52."),
     output: Path | None = typer.Option(None, "--output", help="Optional file path to write the generated config."),
     inject_api_key: bool = typer.Option(
@@ -2571,6 +2766,11 @@ def edge_client_config(
 
     if normalized_target == "opencode":
         _validate_client_config_model_aliases(model_catalog, model=model, small_model=small_model)
+        resolved_api_key_env_name = _edge_api_key_env_name(
+            client_id=client_id,
+            api_key_env=api_key_env,
+            default_api_key_env=DEFAULT_OPENCODE_API_KEY_ENV,
+        )
         resolved_api_key = _resolve_opencode_api_key(
             client_id=client_id,
             api_key_env=api_key_env,
@@ -2579,29 +2779,23 @@ def edge_client_config(
             yes=yes,
         )
         if normalized_format == "jsonc":
-            output_text = _opencode_config_jsonc_from_catalog(
-                model_catalog=model_catalog,
-                provider_id=provider_id,
-                provider_name=provider_name,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_key_comment=_opencode_api_key_comment(client_id=client_id, api_key_env=api_key_env),
-                model=model,
-                small_model=small_model,
-            )
-        elif normalized_format == "json":
             payload = _opencode_config_from_catalog(
                 model_catalog=model_catalog,
                 provider_id=provider_id,
                 provider_name=provider_name,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
+                session_id=client_id,
                 model=model,
                 small_model=small_model,
             )
-            output_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            output_text = _render_opencode_config(
+                payload=payload,
+                model_catalog=model_catalog,
+                api_key_env_name=resolved_api_key_env_name,
+            )
         else:
-            typer.echo("Error: --format must be auto, jsonc, or json for opencode", err=True)
+            typer.echo("Error: --format must be auto or jsonc for opencode", err=True)
             raise typer.Exit(1)
         label = "OpenCode"
     elif normalized_target == "hermes":

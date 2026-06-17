@@ -51,7 +51,7 @@ from thunder_forge.cluster.services import (
 from thunder_forge.cluster.ssh import ssh_run
 from thunder_forge.cluster.usage import extract_hot_loaded_models
 
-OLLA_OPENAI_PREFIX = "/olla/openai-compatible/v1"
+OLLA_OMLX_PREFIX = "/olla/omlx/v1"
 EDGE_USER_PREFIX = "TF_USER_"
 EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
 EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
@@ -84,10 +84,9 @@ class EdgeAuthResult:
 
 @dataclass(frozen=True)
 class EdgeSessionID:
-    """Olla sticky-session id chosen for an edge request."""
+    """Caller-provided Olla sticky-session id, if present."""
 
     value: str
-    generated: bool
 
 
 @dataclass
@@ -116,6 +115,7 @@ class EdgeModelCatalogEntry:
     source_repo: str = ""
     base_model: str = ""
     context_length: int = 0
+    disk_gb: float = 0.0
     benchmark_only: bool = False
 
 
@@ -136,6 +136,8 @@ class EdgeProxyUpstreamRequest:
     forwarded_headers: dict[str, str]
     request_id: str
     client_id: str
+    sticky_id: str
+    client_ip: str
     model: str
     started: float
 
@@ -216,23 +218,24 @@ class EdgeAccessLog:
     model: str
     status_code: int
     latency_ms: int
+    sticky_id: str = ""
+    client_ip: str = ""
     olla_endpoint: str = ""
     node_name: str = ""
 
     def to_json_dict(self) -> dict[str, str | int]:
         payload: dict[str, str | int] = {
             "timestamp": self.timestamp,
-            "request_id": self.request_id,
             "client_id": self.client_id,
-            "path": self.path,
+            "sticky_id": self.sticky_id,
+            "node_name": self.node_name,
             "model": self.model,
-            "status_code": self.status_code,
             "latency_ms": self.latency_ms,
+            "status_code": self.status_code,
+            "client_ip": self.client_ip,
+            "path": self.path,
+            "request_id": self.request_id
         }
-        if self.olla_endpoint:
-            payload["olla_endpoint"] = self.olla_endpoint
-        if self.node_name:
-            payload["node_name"] = self.node_name
         return payload
 
 
@@ -560,17 +563,16 @@ def rewrite_openai_path(path: str) -> str:
         msg = "TF edge only /v1/* paths can be proxied to Olla"
         raise ValueError(msg)
     suffix = path.removeprefix("/v1")
-    return f"{OLLA_OPENAI_PREFIX}{suffix}"
+    return f"{OLLA_OMLX_PREFIX}{suffix}"
 
 
 def ensure_olla_session_id(headers: dict[str, str], *, request_id: str, client_id: str) -> EdgeSessionID:
-    """Preserve caller-provided sticky session id or create a stable edge id."""
+    """Return caller-provided sticky session id when present."""
+    _ = request_id, client_id
     for name, value in headers.items():
         if name.lower() == "x-olla-session-id" and value.strip():
-            return EdgeSessionID(value=value.strip(), generated=False)
-    safe_client_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in client_id)
-    safe_request_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in request_id)
-    return EdgeSessionID(value=f"tf-{safe_client_id}-{safe_request_id}", generated=True)
+            return EdgeSessionID(value=value.strip())
+    return EdgeSessionID(value="")
 
 
 def build_edge_access_log(
@@ -581,6 +583,8 @@ def build_edge_access_log(
     model: str,
     status_code: int,
     latency_ms: int,
+    client_ip: str = "",
+    sticky_id: str = "",
     olla_endpoint: str = "",
     api_key: str = "",
 ) -> EdgeAccessLog:
@@ -590,6 +594,8 @@ def build_edge_access_log(
         timestamp=datetime.now().astimezone().isoformat(),
         request_id=request_id,
         client_id=client_id,
+        sticky_id=sticky_id,
+        client_ip=client_ip,
         path=path,
         model=model,
         status_code=status_code,
@@ -616,6 +622,20 @@ def _header_value(headers: dict[str, str], name: str) -> str | None:
     return None
 
 
+def _extract_client_ip(headers: dict[str, str], *, peer_ip: str = "") -> str:
+    forwarded_for = _header_value(headers, "X-Forwarded-For")
+    if forwarded_for:
+        first = forwarded_for.split(",", 1)[0].strip()
+        if first:
+            return first
+    real_ip = _header_value(headers, "X-Real-IP")
+    if real_ip:
+        stripped = real_ip.strip()
+        if stripped:
+            return stripped
+    return peer_ip.strip()
+
+
 def _decode_json_object(body: bytes) -> dict[str, object] | None:
     if not body:
         return None
@@ -632,6 +652,10 @@ def _extract_model(body: bytes) -> str:
         return ""
     model = payload.get("model", "")
     return model if isinstance(model, str) else ""
+
+
+def _catalog_alias_ids(model_catalog: list[EdgeModelCatalogEntry]) -> set[str]:
+    return {entry.id for entry in model_catalog}
 
 
 def _as_non_negative_int(raw: object) -> int | None:
@@ -686,6 +710,23 @@ def _latest_olla_release_version(*, timeout: float = 5.0) -> str:
     except (OSError, TimeoutError, ValueError, TypeError):
         return ""
     return str(payload.get("tag_name", "")).strip()
+
+
+def _latest_omlx_release_version(*, timeout: float = 5.0) -> str:
+    request = Request(
+        "https://api.github.com/repos/jundot/omlx/releases/latest",
+        headers={"User-Agent": "thunder-forge"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode())
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return ""
+    return str(payload.get("tag_name", "")).strip()
+
+
+def _normalize_version_token(value: str) -> str:
+    return value.strip().lower().removeprefix("v")
 
 
 def _gateway_olla_version(config: EdgeProxyConfig) -> str:
@@ -763,6 +804,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
     cluster_config = config.cluster_config
     gateway_names, inference_names = _resolve_status_targets(cluster_config, target)
     latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
+    latest_omlx = _latest_omlx_release_version(timeout=min(config.status_timeout, 5.0))
 
     gateway_payload: dict[str, object] | None = None
     if gateway_names:
@@ -810,11 +852,17 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         result = check_omlx_health(base_url, include_models=True, timeout=config.status_timeout)
         omlx_version = _omlx_version(runtime_node, timeout=config.status_timeout)
         omlx_versions.append(omlx_version)
-        served_models = map_runtime_models_to_aliases(cluster_config, runtime_node, result.models)
+        served_models = map_runtime_models_to_aliases(
+            cluster_config,
+            runtime_node,
+            result.models,
+            include_unmanaged=False,
+        )
         hot_loaded_models = map_runtime_models_to_aliases(
             cluster_config,
             runtime_node,
             extract_hot_loaded_models(result.model_statuses),
+            include_unmanaged=False,
         )
         inference_payloads.append(
             {
@@ -832,8 +880,18 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
 
     known_versions = sorted({version for version in omlx_versions if version != "unknown"})
     unknown_count = sum(1 for version in omlx_versions if version == "unknown")
+    normalized_latest_omlx = _normalize_version_token(latest_omlx)
+    normalized_known_versions = sorted({_normalize_version_token(version) for version in known_versions})
     if len(known_versions) > 1:
         omlx_upgrade_hint = f"yes (version drift: {', '.join(known_versions)})"
+    elif (
+        normalized_latest_omlx
+        and normalized_known_versions
+        and normalized_known_versions[0] != normalized_latest_omlx
+    ):
+        omlx_upgrade_hint = (
+            f"yes (latest={latest_omlx}, installed={known_versions[0]})"
+        )
     elif unknown_count:
         omlx_upgrade_hint = "check (unknown versions present)"
     else:
@@ -851,6 +909,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
             "inference_healthy": sum(
                 1 for item in inference_payloads if item["health"] == "ok" and item["models"] == "ok"
             ),
+            "latest_omlx_version": latest_omlx or "unknown",
             "omlx_upgrade_hint": omlx_upgrade_hint,
         },
     }
@@ -887,6 +946,7 @@ def _edge_models_response(
     path: str,
     headers: dict[str, str],
     config: EdgeProxyConfig,
+    client_ip: str = "",
 ) -> EdgeProxyResponse | None:
     normalized_path = path.partition("?")[0]
     if method.upper() != "GET" or normalized_path != "/v1/models" or not config.model_catalog:
@@ -894,12 +954,15 @@ def _edge_models_response(
 
     started = time.perf_counter()
     request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    sticky_id = (_header_value(headers, "X-Olla-Session-ID") or "").strip()
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
         _record_edge_access_event(
             config,
             request_id=request_id,
             client_id="unauthenticated",
+            sticky_id=sticky_id,
+            client_ip=_extract_client_ip(headers, peer_ip=client_ip),
             path=path,
             model="",
             status_code=auth.status_code,
@@ -911,6 +974,8 @@ def _edge_models_response(
         config,
         request_id=request_id,
         client_id=auth.client_id,
+        sticky_id=sticky_id,
+        client_ip=_extract_client_ip(headers, peer_ip=client_ip),
         path=path,
         model="",
         status_code=200,
@@ -929,6 +994,10 @@ def _proxy_response_headers(headers: httpx.Headers) -> dict[str, str]:
         proxy_headers["Content-Type"] = content_type
     if olla_endpoint := headers.get("X-Olla-Endpoint"):
         proxy_headers["X-Olla-Endpoint"] = olla_endpoint
+    if sticky_session := headers.get("X-Olla-Sticky-Session"):
+        proxy_headers["X-Olla-Sticky-Session"] = sticky_session
+    if sticky_key_source := headers.get("X-Olla-Sticky-Key-Source"):
+        proxy_headers["X-Olla-Sticky-Key-Source"] = sticky_key_source
     return proxy_headers
 
 
@@ -939,16 +1008,21 @@ def _prepare_edge_upstream_request(
     headers: dict[str, str],
     body: bytes,
     config: EdgeProxyConfig,
+    client_ip: str = "",
 ) -> EdgeProxyUpstreamRequest | EdgeProxyResponse:
     started = time.perf_counter()
     request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    sticky_id = (_header_value(headers, "X-Olla-Session-ID") or "").strip()
     model = _extract_model(body)
+    resolved_client_ip = _extract_client_ip(headers, peer_ip=client_ip)
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
         _record_edge_access_event(
             config,
             request_id=request_id,
             client_id="unauthenticated",
+            sticky_id=sticky_id,
+            client_ip=resolved_client_ip,
             path=path,
             model=model,
             status_code=auth.status_code,
@@ -963,6 +1037,8 @@ def _prepare_edge_upstream_request(
             config,
             request_id=request_id,
             client_id=auth.client_id,
+            sticky_id=sticky_id,
+            client_ip=resolved_client_ip,
             path=path,
             model=model,
             status_code=404,
@@ -970,11 +1046,29 @@ def _prepare_edge_upstream_request(
         )
         return _json_response(404, {"error": "not_found"})
 
+    if model and config.model_catalog:
+        allowed_aliases = _catalog_alias_ids(config.model_catalog)
+        if model not in allowed_aliases:
+            _record_edge_access_event(
+                config,
+                request_id=request_id,
+                client_id=auth.client_id,
+                sticky_id=sticky_id,
+                client_ip=resolved_client_ip,
+                path=path,
+                model=model,
+                status_code=400,
+                started=started,
+            )
+            return _json_response(400, {"error": "invalid_model", "message": "model must be a configured alias"})
+
     if config.max_body_bytes > 0 and len(body) > config.max_body_bytes:
         _record_edge_access_event(
             config,
             request_id=request_id,
             client_id=auth.client_id,
+            sticky_id=sticky_id,
+            client_ip=resolved_client_ip,
             path=path,
             model=model,
             status_code=413,
@@ -984,9 +1078,13 @@ def _prepare_edge_upstream_request(
 
     session = ensure_olla_session_id(headers, request_id=request_id, client_id=auth.client_id)
     forwarded_headers = {
-        "X-Olla-Session-ID": session.value,
         "X-Request-ID": request_id,
     }
+    if session.value:
+        forwarded_headers["X-Olla-Session-ID"] = session.value
+    authorization = _header_value(headers, "Authorization")
+    if authorization:
+        forwarded_headers["Authorization"] = authorization
     content_type = _header_value(headers, "Content-Type")
     if content_type:
         forwarded_headers["Content-Type"] = content_type
@@ -996,6 +1094,8 @@ def _prepare_edge_upstream_request(
         forwarded_headers=forwarded_headers,
         request_id=request_id,
         client_id=auth.client_id,
+        sticky_id=sticky_id,
+        client_ip=resolved_client_ip,
         model=model,
         started=started,
     )
@@ -1006,6 +1106,8 @@ def _record_edge_access_event(
     *,
     request_id: str,
     client_id: str,
+    sticky_id: str = "",
+    client_ip: str,
     path: str,
     model: str,
     status_code: int,
@@ -1018,6 +1120,8 @@ def _record_edge_access_event(
     log_record = build_edge_access_log(
         request_id=request_id,
         client_id=client_id,
+        sticky_id=sticky_id,
+        client_ip=client_ip,
         path=path,
         model=model,
         status_code=status_code,
@@ -1039,6 +1143,8 @@ def _record_edge_access(
         config,
         request_id=upstream.request_id,
         client_id=upstream.client_id,
+        sticky_id=upstream.sticky_id,
+        client_ip=upstream.client_ip,
         path=path,
         model=upstream.model,
         status_code=status_code,
@@ -1055,9 +1161,10 @@ def proxy_edge_request(
     body: bytes,
     config: EdgeProxyConfig,
     transport: httpx.BaseTransport | None = None,
+    client_ip: str = "",
 ) -> EdgeProxyResponse:
     """Authenticate, rewrite, and proxy a single buffered edge request."""
-    edge_models = _edge_models_response(method=method, path=path, headers=headers, config=config)
+    edge_models = _edge_models_response(method=method, path=path, headers=headers, config=config, client_ip=client_ip)
     if edge_models is not None:
         return edge_models
 
@@ -1067,6 +1174,7 @@ def proxy_edge_request(
         headers=headers,
         body=body,
         config=config,
+        client_ip=client_ip,
     )
     if isinstance(upstream, EdgeProxyResponse):
         return upstream
@@ -1153,11 +1261,13 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
                 auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
                 client_id = auth.client_id if auth.allowed else "unauthenticated"
+                client_ip = _extract_client_ip(headers, peer_ip=self.client_address[0] if self.client_address else "")
                 status_code = 413 if auth.allowed else auth.status_code
                 _record_edge_access_event(
                     config,
                     request_id=request_id,
                     client_id=client_id,
+                    client_ip=client_ip,
                     path=self.path,
                     model="",
                     status_code=status_code,
@@ -1176,6 +1286,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 headers=headers,
                 body=body,
                 config=config,
+                client_ip=self.client_address[0] if self.client_address else "",
             )
             self.send_response(result.status_code)
             for name, value in result.headers.items():
@@ -1195,6 +1306,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 headers=dict(self.headers.items()),
                 body=body,
                 config=config,
+                client_ip=self.client_address[0] if self.client_address else "",
             )
             if isinstance(upstream, EdgeProxyResponse):
                 self._send_edge_response(upstream)
@@ -1459,8 +1571,8 @@ def _wait_edge_healthy(
     for attempt in range(1, retries + 1):
         try:
             with httpx.Client(base_url=base_url, timeout=timeout, trust_env=False) as client:
-                response = client.get("/v1/models")
-                if response.status_code == 401:
+                response = client.get("/health")
+                if response.is_success:
                     return True
         except httpx.HTTPError:
             pass

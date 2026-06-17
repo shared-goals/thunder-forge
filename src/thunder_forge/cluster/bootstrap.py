@@ -133,7 +133,7 @@ def _resolve_olla_version(version: str, *, timeout: int, progress: Progress | No
 def write_generated_olla_config(config: ClusterConfig, *, repo_root: Path, port: int | None = None) -> Path:
     config_path = generated_olla_config_path(repo_root)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(generate_olla_config(config, port=port))
+    config_path.write_text(generate_olla_config(config, port=port, repo_root=repo_root))
     return config_path
 
 

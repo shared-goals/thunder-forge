@@ -65,6 +65,7 @@ def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path
     assert summary.consumed_ms_by_user == {"alice": 300, "bob": 150}
     assert summary.requests_by_user_model == {"alice": {"coder": 2}, "bob": {"agent": 1}}
     assert summary.requests_by_node == {"msm1": 2, "msm2": 1}
+    assert summary.requests_by_node_user == {"msm1": {"alice": 2}, "msm2": {"bob": 1}}
     assert summary.requests_by_node_model == {"msm1": {"coder": 2}, "msm2": {"agent": 1}}
     assert summary.requests_by_model == {"agent": 1, "coder": 2}
     assert summary.requests_by_hour == {"08": 2, "09": 1}

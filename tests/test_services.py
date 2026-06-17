@@ -465,6 +465,34 @@ def test_edge_service_restart_uses_requested_user_home(tmp_path: Path, monkeypat
     assert "/Users/shag/.local/bin" in result.plist_content
 
 
+def test_wait_edge_healthy_uses_anonymous_health_endpoint(monkeypatch) -> None:
+    import thunder_forge.cluster.edge as edge_module
+
+    requested_paths: list[str] = []
+
+    class _Response:
+        is_success = True
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            return
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, path: str):
+            requested_paths.append(path)
+            return _Response()
+
+    monkeypatch.setattr(edge_module.httpx, "Client", _Client)
+
+    assert edge_module._wait_edge_healthy("http://127.0.0.1:40116", retries=1, interval=0.0, timeout=1.0)
+    assert requested_paths == ["/health"]
+
+
 def test_run_edge_service_restart_daemon_apply_reinstalls_every_time(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cluster.edge as edge_module
 

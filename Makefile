@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check sync-env test lint check bootstrap restart smoke status sync prune config usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes
 ARG ?= $(word 2,$(MAKECMDGOALS))
 EDGE_CLIENTS ?=
 
@@ -37,6 +37,10 @@ help:
 	@printf "  %-24s %s\n" "dev-test" "run pytest"
 	@printf "  %-24s %s\n" "dev-lint" "run ruff"
 	@printf "  %-24s %s\n" "dev-check" "run tests and lint"
+	@printf "  %-24s %s\n" "sync-env" "alias of dev-sync"
+	@printf "  %-24s %s\n" "test" "alias of dev-test"
+	@printf "  %-24s %s\n" "lint" "alias of dev-lint"
+	@printf "  %-24s %s\n" "check" "alias of dev-check"
 	@echo ""
 	@echo "Reference:"
 	@printf "  %-24s %s\n" "cli-help" "show thunder-forge CLI help"
@@ -56,9 +60,17 @@ dev-test:
 	$(UV) pytest --tb=short -q
 
 dev-lint:
-	$(UV) ruff check .
+	$(UV) ruff check src/thunder_forge tests
 
 dev-check: dev-test dev-lint
+
+sync-env: dev-sync
+
+test: dev-test
+
+lint: dev-lint
+
+check: dev-check
 
 bootstrap:
 	$(UV) thunder-forge cluster prepare $(ARG) --apply

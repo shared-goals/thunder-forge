@@ -119,6 +119,7 @@ class DailyUsageSummary:
     consumed_ms_by_user: dict[str, int] = field(default_factory=dict)
     requests_by_user_model: dict[str, dict[str, int]] = field(default_factory=dict)
     requests_by_node: dict[str, int] = field(default_factory=dict)
+    requests_by_node_user: dict[str, dict[str, int]] = field(default_factory=dict)
     consumed_ms_by_node: dict[str, int] = field(default_factory=dict)
     requests_by_node_model: dict[str, dict[str, int]] = field(default_factory=dict)
     requests_by_model: dict[str, int] = field(default_factory=dict)
@@ -140,6 +141,7 @@ class DailyUsageSummary:
                 "by_user": self.requests_by_user,
                 "by_user_model": self.requests_by_user_model,
                 "by_node": self.requests_by_node,
+                "by_node_user": self.requests_by_node_user,
                 "by_node_model": self.requests_by_node_model,
                 "by_model": self.requests_by_model,
                 "by_hour": self.requests_by_hour,
@@ -175,6 +177,7 @@ def summarize_daily_usage(
     consumed_ms_by_user: Counter[str] = Counter()
     requests_by_user_model: dict[str, Counter[str]] = defaultdict(Counter)
     requests_by_node: Counter[str] = Counter()
+    requests_by_node_user: dict[str, Counter[str]] = defaultdict(Counter)
     consumed_ms_by_node: Counter[str] = Counter()
     requests_by_model: Counter[str] = Counter()
     consumed_ms_by_model: Counter[str] = Counter()
@@ -221,6 +224,7 @@ def summarize_daily_usage(
 
         if node_name:
             requests_by_node[node_name] += 1
+            requests_by_node_user[node_name][client_id] += 1
             consumed_ms_by_node[node_name] += latency_ms
             if model_name:
                 requests_by_node_model[node_name][model_name] += 1
@@ -286,6 +290,7 @@ def summarize_daily_usage(
         consumed_ms_by_user=_ordered_counter(consumed_ms_by_user),
         requests_by_user_model=_ordered_nested_counter(requests_by_user_model),
         requests_by_node=_ordered_counter(requests_by_node),
+        requests_by_node_user=_ordered_nested_counter(requests_by_node_user),
         consumed_ms_by_node=_ordered_counter(consumed_ms_by_node),
         requests_by_node_model=_ordered_nested_counter(requests_by_node_model),
         requests_by_model=_ordered_counter(requests_by_model),

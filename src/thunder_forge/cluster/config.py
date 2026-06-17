@@ -156,6 +156,7 @@ class ServiceConfig:
     olla_os: str = DEFAULT_OLLA_OS
     olla_arch: str = DEFAULT_OLLA_ARCH
     olla_bin_dir: str = DEFAULT_OLLA_BIN_DIR
+    olla_local_binary: str = ""
     omlx_port: int = DEFAULT_OMLX_PORT
     edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
@@ -427,6 +428,12 @@ def _parse_services(raw: object) -> ServiceConfig:
         olla_os=str(olla_raw.get("os", DEFAULT_OLLA_OS)).strip() or DEFAULT_OLLA_OS,
         olla_arch=str(olla_raw.get("arch", DEFAULT_OLLA_ARCH)).strip() or DEFAULT_OLLA_ARCH,
         olla_bin_dir=str(olla_raw.get("bin_dir", DEFAULT_OLLA_BIN_DIR)).strip() or DEFAULT_OLLA_BIN_DIR,
+        olla_local_binary=_parse_optional_non_empty_string(
+            olla_raw.get("local_binary"),
+            name="services.olla.local_binary",
+            default="",
+        )
+        or "",
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
         edge_access_log=edge_access_log,
         log_retention_days=log_retention_days,
@@ -658,8 +665,9 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     return config
 
 
-def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> str:
+def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo_root: Path | None = None) -> str:
     olla_port = resolve_port(port, default=config.services.olla_port)
+    log_output_path = str((repo_root / "logs" / "olla.log").resolve()) if repo_root else "../logs/olla.log"
     endpoints: list[dict[str, str | int]] = []
     aliases: dict[str, list[str]] = {}
     seen_nodes: set[str] = set()
@@ -676,17 +684,28 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
             raise ValueError(msg)
         if runtime.type != RuntimeType.OMLX:
             continue
+        endpoint_runtime_ids: list[str] = []
+        for model_id in node.models:
+            if model_id not in config.models:
+                msg = f"Node '{node_name}' references unknown model '{model_id}'"
+                raise ValueError(msg)
+            runtime_model_id = config.models[model_id].runtime_model_id
+            if runtime_model_id not in endpoint_runtime_ids:
+                endpoint_runtime_ids.append(runtime_model_id)
         if node_name not in seen_nodes:
             endpoints.append(
                 {
                     "url": f"http://{node.host}:{runtime.port}",
                     "name": f"{node_name}-omlx-live",
-                    "type": "openai-compatible",
+                    "type": "omlx",
                     "priority": 100,
                     "model_url": "/v1/models",
                     "health_check_url": "/health",
                     "check_interval": "3s",
                     "check_timeout": "2s",
+                    # Restrict model discovery to assigned runtime ids for this endpoint.
+                    # This prevents stale/local oMLX models from becoming routable.
+                    "model_filter": {"include": endpoint_runtime_ids},
                 }
             )
             seen_nodes.add(node_name)
@@ -719,7 +738,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
                 "enabled": True,
                 "idle_ttl_seconds": 600,
                 "max_sessions": 10000,
-                "key_sources": ["session_header", "prefix_hash", "auth_header"],
+                "key_sources": ["session_header", "auth_header", "prefix_hash"],
                 "prefix_hash_bytes": 512,
             },
             "retry": {
@@ -761,7 +780,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None) -> s
         "logging": {
             "level": "info",
             "format": "json",
-            "output": "stdout",
+            "output": log_output_path,
         },
         "model_aliases": aliases,
     }

@@ -23,7 +23,7 @@ def test_smoke_olla_router_reports_green_paths_and_expected_root_v1_absence() ->
                     ]
                 },
             )
-        if request.url.path == "/olla/openai-compatible/v1/models":
+        if request.url.path == "/olla/omlx/v1/models":
             return httpx.Response(
                 200,
                 json={
@@ -31,7 +31,7 @@ def test_smoke_olla_router_reports_green_paths_and_expected_root_v1_absence() ->
                     "data": [{"id": "Qwen3-1.7B-4bit", "object": "model"}],
                 },
             )
-        if request.url.path == "/olla/openai-compatible/v1/chat/completions":
+        if request.url.path == "/olla/omlx/v1/chat/completions":
             payload = request.read().decode()
             if "qwen3-1.7b-omlx-infer-03-test" in payload:
                 response_model = "Qwen3-1.7B-4bit"
@@ -84,12 +84,12 @@ def test_smoke_olla_router_accepts_alias_on_different_healthy_endpoint() -> None
                     ]
                 },
             )
-        if request.url.path == "/olla/openai-compatible/v1/models":
+        if request.url.path == "/olla/omlx/v1/models":
             return httpx.Response(
                 200,
                 json={"object": "list", "data": [{"id": "gpt-oss-20b-MXFP4-Q8", "object": "model"}]},
             )
-        if request.url.path == "/olla/openai-compatible/v1/chat/completions":
+        if request.url.path == "/olla/omlx/v1/chat/completions":
             payload = json.loads(request.read().decode())
             endpoint = "infer-03-omlx-live" if payload["model"] == "memory" else "infer-01-omlx-live"
             return httpx.Response(
@@ -133,12 +133,12 @@ def test_smoke_olla_router_fails_when_same_session_routes_to_different_endpoints
                     ]
                 },
             )
-        if request.url.path == "/olla/openai-compatible/v1/models":
+        if request.url.path == "/olla/omlx/v1/models":
             return httpx.Response(
                 200,
                 json={"object": "list", "data": [{"id": "Qwen3-1.7B-4bit", "object": "model"}]},
             )
-        if request.url.path == "/olla/openai-compatible/v1/chat/completions":
+        if request.url.path == "/olla/omlx/v1/chat/completions":
             payload = json.loads(request.read().decode())
             if payload["model"] == "Qwen3-1.7B-4bit":
                 assert request.headers.get("X-Olla-Session-ID") == "tf-olla-smoke-session"
