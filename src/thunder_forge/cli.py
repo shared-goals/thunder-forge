@@ -12,9 +12,9 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import cast
 
@@ -76,7 +76,6 @@ from thunder_forge.cluster.ports import (
     local_base_url,
     resolve_port,
 )
-
 from thunder_forge.cluster.remote_cache import (
     cache_hub_setup_command as _cache_hub_setup_command,
 )
@@ -1423,7 +1422,9 @@ def cluster_prepare(
     resolved_olla_arch = olla_arch or config.services.olla_arch
     resolved_olla_bin_dir = olla_bin_dir or Path(config.services.olla_bin_dir)
     configured_local_olla_binary = (
-        _repo_relative_path(repo_root, Path(config.services.olla_local_binary)) if config.services.olla_local_binary else None
+        _repo_relative_path(repo_root, Path(config.services.olla_local_binary))
+        if config.services.olla_local_binary
+        else None
     )
     _resolved_binary, configured_local_olla_working_directory = _resolve_olla_binary_and_workdir(
         repo_root=repo_root,

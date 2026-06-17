@@ -84,10 +84,9 @@ class EdgeAuthResult:
 
 @dataclass(frozen=True)
 class EdgeSessionID:
-    """Olla sticky-session id chosen for an edge request."""
+    """Caller-provided Olla sticky-session id, if present."""
 
     value: str
-    generated: bool
 
 
 @dataclass
@@ -137,6 +136,7 @@ class EdgeProxyUpstreamRequest:
     forwarded_headers: dict[str, str]
     request_id: str
     client_id: str
+    sticky_id: str
     client_ip: str
     model: str
     started: float
@@ -218,6 +218,7 @@ class EdgeAccessLog:
     model: str
     status_code: int
     latency_ms: int
+    sticky_id: str = ""
     client_ip: str = ""
     olla_endpoint: str = ""
     node_name: str = ""
@@ -225,18 +226,16 @@ class EdgeAccessLog:
     def to_json_dict(self) -> dict[str, str | int]:
         payload: dict[str, str | int] = {
             "timestamp": self.timestamp,
-            "request_id": self.request_id,
             "client_id": self.client_id,
+            "sticky_id": self.sticky_id,
+            "node_name": self.node_name,
+            "model": self.model,
+            "latency_ms": self.latency_ms,
+            "status_code": self.status_code,
             "client_ip": self.client_ip,
             "path": self.path,
-            "model": self.model,
-            "status_code": self.status_code,
-            "latency_ms": self.latency_ms,
+            "request_id": self.request_id
         }
-        if self.olla_endpoint:
-            payload["olla_endpoint"] = self.olla_endpoint
-        if self.node_name:
-            payload["node_name"] = self.node_name
         return payload
 
 
@@ -568,13 +567,12 @@ def rewrite_openai_path(path: str) -> str:
 
 
 def ensure_olla_session_id(headers: dict[str, str], *, request_id: str, client_id: str) -> EdgeSessionID:
-    """Preserve caller-provided sticky session id or create a stable edge id."""
+    """Return caller-provided sticky session id when present."""
+    _ = request_id, client_id
     for name, value in headers.items():
         if name.lower() == "x-olla-session-id" and value.strip():
-            return EdgeSessionID(value=value.strip(), generated=False)
-    safe_client_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in client_id)
-    safe_request_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in request_id)
-    return EdgeSessionID(value=f"tf-{safe_client_id}-{safe_request_id}", generated=True)
+            return EdgeSessionID(value=value.strip())
+    return EdgeSessionID(value="")
 
 
 def build_edge_access_log(
@@ -586,6 +584,7 @@ def build_edge_access_log(
     status_code: int,
     latency_ms: int,
     client_ip: str = "",
+    sticky_id: str = "",
     olla_endpoint: str = "",
     api_key: str = "",
 ) -> EdgeAccessLog:
@@ -595,6 +594,7 @@ def build_edge_access_log(
         timestamp=datetime.now().astimezone().isoformat(),
         request_id=request_id,
         client_id=client_id,
+        sticky_id=sticky_id,
         client_ip=client_ip,
         path=path,
         model=model,
@@ -925,12 +925,14 @@ def _edge_models_response(
 
     started = time.perf_counter()
     request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    sticky_id = (_header_value(headers, "X-Olla-Session-ID") or "").strip()
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
         _record_edge_access_event(
             config,
             request_id=request_id,
             client_id="unauthenticated",
+            sticky_id=sticky_id,
             client_ip=_extract_client_ip(headers, peer_ip=client_ip),
             path=path,
             model="",
@@ -943,6 +945,7 @@ def _edge_models_response(
         config,
         request_id=request_id,
         client_id=auth.client_id,
+        sticky_id=sticky_id,
         client_ip=_extract_client_ip(headers, peer_ip=client_ip),
         path=path,
         model="",
@@ -962,6 +965,10 @@ def _proxy_response_headers(headers: httpx.Headers) -> dict[str, str]:
         proxy_headers["Content-Type"] = content_type
     if olla_endpoint := headers.get("X-Olla-Endpoint"):
         proxy_headers["X-Olla-Endpoint"] = olla_endpoint
+    if sticky_session := headers.get("X-Olla-Sticky-Session"):
+        proxy_headers["X-Olla-Sticky-Session"] = sticky_session
+    if sticky_key_source := headers.get("X-Olla-Sticky-Key-Source"):
+        proxy_headers["X-Olla-Sticky-Key-Source"] = sticky_key_source
     return proxy_headers
 
 
@@ -976,6 +983,7 @@ def _prepare_edge_upstream_request(
 ) -> EdgeProxyUpstreamRequest | EdgeProxyResponse:
     started = time.perf_counter()
     request_id = _header_value(headers, "X-Request-ID") or uuid4().hex
+    sticky_id = (_header_value(headers, "X-Olla-Session-ID") or "").strip()
     model = _extract_model(body)
     resolved_client_ip = _extract_client_ip(headers, peer_ip=client_ip)
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
@@ -984,6 +992,7 @@ def _prepare_edge_upstream_request(
             config,
             request_id=request_id,
             client_id="unauthenticated",
+            sticky_id=sticky_id,
             client_ip=resolved_client_ip,
             path=path,
             model=model,
@@ -999,6 +1008,7 @@ def _prepare_edge_upstream_request(
             config,
             request_id=request_id,
             client_id=auth.client_id,
+            sticky_id=sticky_id,
             client_ip=resolved_client_ip,
             path=path,
             model=model,
@@ -1014,6 +1024,7 @@ def _prepare_edge_upstream_request(
                 config,
                 request_id=request_id,
                 client_id=auth.client_id,
+                sticky_id=sticky_id,
                 client_ip=resolved_client_ip,
                 path=path,
                 model=model,
@@ -1027,6 +1038,7 @@ def _prepare_edge_upstream_request(
             config,
             request_id=request_id,
             client_id=auth.client_id,
+            sticky_id=sticky_id,
             client_ip=resolved_client_ip,
             path=path,
             model=model,
@@ -1037,9 +1049,13 @@ def _prepare_edge_upstream_request(
 
     session = ensure_olla_session_id(headers, request_id=request_id, client_id=auth.client_id)
     forwarded_headers = {
-        "X-Olla-Session-ID": session.value,
         "X-Request-ID": request_id,
     }
+    if session.value:
+        forwarded_headers["X-Olla-Session-ID"] = session.value
+    authorization = _header_value(headers, "Authorization")
+    if authorization:
+        forwarded_headers["Authorization"] = authorization
     content_type = _header_value(headers, "Content-Type")
     if content_type:
         forwarded_headers["Content-Type"] = content_type
@@ -1049,6 +1065,7 @@ def _prepare_edge_upstream_request(
         forwarded_headers=forwarded_headers,
         request_id=request_id,
         client_id=auth.client_id,
+        sticky_id=sticky_id,
         client_ip=resolved_client_ip,
         model=model,
         started=started,
@@ -1060,6 +1077,7 @@ def _record_edge_access_event(
     *,
     request_id: str,
     client_id: str,
+    sticky_id: str = "",
     client_ip: str,
     path: str,
     model: str,
@@ -1073,6 +1091,7 @@ def _record_edge_access_event(
     log_record = build_edge_access_log(
         request_id=request_id,
         client_id=client_id,
+        sticky_id=sticky_id,
         client_ip=client_ip,
         path=path,
         model=model,
@@ -1095,6 +1114,7 @@ def _record_edge_access(
         config,
         request_id=upstream.request_id,
         client_id=upstream.client_id,
+        sticky_id=upstream.sticky_id,
         client_ip=upstream.client_ip,
         path=path,
         model=upstream.model,

@@ -4,6 +4,8 @@
 
 - Follow DRY, KISS, and YAGNI by default.
 - Prefer a single clear code path over layered fallback logic.
+- Use `uv` for Python dependency management and command execution (for example: `uv sync`, `uv run pytest`).
+- Prefer existing `make` targets for routine workflows when available (for example: `make dev-test`, `make dev-lint`, `make dev-check`).
 - Do not add backward-compatibility shims unless explicitly requested.
 - If a path is broken, fix the primary path directly instead of adding alternate execution paths.
 

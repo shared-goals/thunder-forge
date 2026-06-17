@@ -314,21 +314,19 @@ def test_build_edge_status_payload_hides_unmanaged_runtime_ids(monkeypatch, tmp_
     assert payload["inference"][0]["hot_loaded_models"] == ["memory"]
 
 
-def test_session_id_is_preserved_or_generated_without_using_api_key() -> None:
+def test_session_id_is_preserved_or_empty_without_using_api_key() -> None:
     provided = ensure_olla_session_id({"X-Olla-Session-ID": "session-123"}, request_id="req-1", client_id="client-a")
-    generated = ensure_olla_session_id({}, request_id="req-2", client_id="client-a")
+    empty = ensure_olla_session_id({}, request_id="req-2", client_id="client-a")
 
     assert provided.value == "session-123"
-    assert provided.generated is False
-    assert generated.generated is True
-    assert generated.value.startswith("tf-client-a-req-2")
-    assert "secret" not in generated.value
+    assert empty.value == ""
 
 
 def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     record = build_edge_access_log(
         request_id="req-1",
         client_id="client-a",
+        sticky_id="session-123",
         path="/v1/chat/completions",
         model="qwen3-1.7b-omlx-infer-03-test",
         status_code=200,
@@ -343,13 +341,31 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     assert isinstance(payload["timestamp"], str)
     assert payload["request_id"] == "req-1"
     assert payload["client_id"] == "client-a"
+    assert payload["sticky_id"] == "session-123"
     assert payload["client_ip"] == ""
     assert payload["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert payload["status_code"] == 200
     assert payload["latency_ms"] == 42
-    assert payload["olla_endpoint"] == "infer-03-omlx-live"
+    assert payload["node_name"] == "infer-03"
     assert "api_key" not in payload
     assert "dev-secret" not in str(payload)
+    assert list(payload) == [
+        "timestamp",
+        "client_id",
+        "sticky_id",
+        "node_name",
+        "model",
+        "latency_ms",
+        "status_code",
+        "client_ip",
+        "path",
+        "request_id",
+    ]
+
+    serialized = json.dumps(payload, separators=(",", ":"))
+    assert serialized.startswith('{"timestamp":"')
+    assert '"node_name":"infer-03"' in serialized
+    assert serialized.endswith(',"request_id":"req-1"}')
 
 
 def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_olla() -> None:
@@ -624,16 +640,55 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     assert forwarded[0].method == "POST"
     assert forwarded[0].url == "http://olla.local:40115/olla/omlx/v1/chat/completions"
     assert forwarded[0].headers["X-Olla-Session-ID"] == "session-123"
-    assert "authorization" not in forwarded[0].headers
+    assert forwarded[0].headers["Authorization"] == "Bearer dev-secret"
     assert len(logs) == 1
     logged = json.loads(logs[0])
     assert logged["client_id"] == "client-a"
+    assert logged["sticky_id"] == "session-123"
     assert logged["client_ip"] == "198.51.100.20"
     assert logged["path"] == "/v1/chat/completions"
     assert logged["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert logged["status_code"] == 200
-    assert logged["olla_endpoint"] == "infer-03-omlx-live"
+    assert logged["node_name"] == "infer-03"
+    assert "olla_endpoint" not in logged
     assert "dev-secret" not in logs[0]
+
+
+def test_proxy_edge_request_does_not_generate_session_header_and_passthrough_sticky_debug_headers() -> None:
+    forwarded: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append(request)
+        return httpx.Response(
+            200,
+            headers={
+                "X-Olla-Endpoint": "infer-03-omlx-live",
+                "X-Olla-Sticky-Session": "miss",
+                "X-Olla-Sticky-Key-Source": "auth_header",
+            },
+            json={"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]},
+        )
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps({"model": "memory", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 200
+    assert len(forwarded) == 1
+    assert "X-Olla-Session-ID" not in forwarded[0].headers
+    assert forwarded[0].headers["Authorization"] == "Bearer dev-secret"
+    assert result.headers["X-Olla-Sticky-Session"] == "miss"
+    assert result.headers["X-Olla-Sticky-Key-Source"] == "auth_header"
 
 
 def test_proxy_edge_request_logs_forwarded_client_ip() -> None:

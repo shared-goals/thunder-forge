@@ -966,8 +966,16 @@ def test_cluster_restart_apply_restarts_inference_nodes_in_parallel(tmp_path: Pa
 
         monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
         monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
-        monkeypatch.setattr(cli_module, "run_olla_service_restart", lambda **kwargs: fake_service(service="olla", **kwargs))
-        monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
+        monkeypatch.setattr(
+            cli_module,
+            "run_olla_service_restart",
+            lambda **kwargs: fake_service(service="olla", **kwargs),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "run_edge_service_restart",
+            lambda **kwargs: fake_service(service="edge", **kwargs),
+        )
         monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_omlx_restart)
 
         result = runner.invoke(app, ["cluster", "restart", "--apply"])
@@ -1024,10 +1032,18 @@ def test_cluster_restart_apply_uses_configured_local_olla_binary(tmp_path: Path,
         return fake_service(service="olla", **kwargs)
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setattr(cli_module, "write_generated_olla_config", lambda config, *, repo_root, port=None: repo_root / "configs/olla-config.yaml")
+    monkeypatch.setattr(
+        cli_module,
+        "write_generated_olla_config",
+        lambda config, *, repo_root, port=None: repo_root / "configs/olla-config.yaml",
+    )
     monkeypatch.setattr(cli_module, "run_olla_service_restart", fake_run_olla_service_restart)
     monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
-    monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", lambda *args, **kwargs: fake_service(service="omlx", **kwargs))
+    monkeypatch.setattr(
+        cli_module,
+        "run_omlx_daemon_restart",
+        lambda *args, **kwargs: fake_service(service="omlx", **kwargs),
+    )
 
     result = runner.invoke(app, ["cluster", "restart", "--apply"])
 
