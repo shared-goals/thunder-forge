@@ -34,9 +34,9 @@ make bootstrap infer-01
 make restart infer-01
 make smoke infer-01
 make sync infer-01
-uv run thunder-forge service restart --service olla --binary .tmp/olla-bin/olla --config configs/olla-config.yaml --apply
+uv run thunder-forge service restart --service olla --binary olla-bin/olla --config config/olla-config.yaml --apply
 uv run thunder-forge service restart --service edge --apply
-uv run thunder-forge olla dev-smoke --binary .tmp/olla-bin/olla --model <model> --alias <alias>
+uv run thunder-forge olla dev-smoke --binary olla-bin/olla --model <model> --alias <alias>
 uv run thunder-forge edge keys --client <client-id>
 uv run thunder-forge generate-olla-config
 uv run thunder-forge edge serve

@@ -33,7 +33,7 @@ def _cluster_config(*, edge_port: int = 40116, olla_port: int = 40115) -> Cluste
 
 def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
-    config_dir = repo / "configs"
+    config_dir = repo / "config"
     config_dir.mkdir()
     (repo / "tfconfig.yaml").write_text(
         dedent("""\
@@ -68,7 +68,7 @@ def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypat
 
 def test_runtime_start_apply_starts_remote_runtime(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
-    config_dir = repo / "configs"
+    config_dir = repo / "config"
     config_dir.mkdir()
     (repo / "tfconfig.yaml").write_text(
         dedent("""\
@@ -496,12 +496,12 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
 
     def fake_ensure_olla_binary(**kwargs):
         calls.append("olla")
-        kwargs["progress"]("olla: already current at .tmp/olla-bin/olla")
-        return SimpleNamespace(binary_path=repo / ".tmp/olla-bin/olla")
+        kwargs["progress"]("olla: already current at olla-bin/olla")
+        return SimpleNamespace(binary_path=repo / "olla-bin/olla")
 
     def fake_write_generated_olla_config(config, *, repo_root, port=None):
         calls.append("config")
-        return repo_root / "configs/olla-config.yaml"
+        return repo_root / "config/olla-config.yaml"
 
     def fake_run_gateway_daemon_setup(**kwargs):
         calls.append("gateway")
@@ -645,11 +645,11 @@ def test_cluster_prepare_apply_uses_latest_olla_when_config_is_unpinned(tmp_path
 
         def fake_ensure_olla_binary(**kwargs):
                 assert kwargs["version"] == "latest"
-                kwargs["progress"]("olla: upgraded .tmp/olla-bin/olla")
-                return SimpleNamespace(binary_path=repo / ".tmp/olla-bin/olla")
+                kwargs["progress"]("olla: upgraded olla-bin/olla")
+                return SimpleNamespace(binary_path=repo / "olla-bin/olla")
 
         def fake_write_generated_olla_config(config, *, repo_root, port=None):
-                return repo_root / "configs/olla-config.yaml"
+                return repo_root / "config/olla-config.yaml"
 
         def fake_run_gateway_daemon_setup(**kwargs):
                 kwargs["progress"]("health: gateway ok")
@@ -708,7 +708,7 @@ def test_cluster_prepare_apply_uses_configured_local_olla_binary(tmp_path: Path,
         raise AssertionError("release downloader should not run when services.olla.local_binary is set")
 
     def fake_write_generated_olla_config(config, *, repo_root, port=None):
-        return repo_root / "configs/olla-config.yaml"
+        return repo_root / "config/olla-config.yaml"
 
     gateway_calls: list[dict] = []
 
@@ -773,12 +773,12 @@ def test_cluster_prepare_apply_prepares_remote_cache_hub(tmp_path: Path, monkeyp
 
     def fake_ensure_olla_binary(**kwargs):
         calls.append("olla")
-        kwargs["progress"]("olla: already current at .tmp/olla-bin/olla")
-        return SimpleNamespace(binary_path=repo / ".tmp/olla-bin/olla")
+        kwargs["progress"]("olla: already current at olla-bin/olla")
+        return SimpleNamespace(binary_path=repo / "olla-bin/olla")
 
     def fake_write_generated_olla_config(config, *, repo_root, port=None):
         calls.append("config")
-        return repo_root / "configs/olla-config.yaml"
+        return repo_root / "config/olla-config.yaml"
 
     def fake_run_gateway_daemon_setup(**kwargs):
         calls.append("gateway")
@@ -871,7 +871,7 @@ def test_cluster_restart_apply_dispatches_gateway_and_inference(tmp_path: Path, 
 
     def fake_write_generated_olla_config(config, *, repo_root, port=None):
         calls.append("config")
-        return repo_root / "configs/olla-config.yaml"
+        return repo_root / "config/olla-config.yaml"
 
     def fake_service(**kwargs):
         calls.append(kwargs.get("service", "service"))
@@ -946,7 +946,7 @@ def test_cluster_restart_apply_restarts_inference_nodes_in_parallel(tmp_path: Pa
 
         def fake_write_generated_olla_config(config, *, repo_root, port=None):
                 calls.append("config")
-                return repo_root / "configs/olla-config.yaml"
+                return repo_root / "config/olla-config.yaml"
 
         def fake_service(**kwargs):
                 calls.append(kwargs.get("service", "service"))
@@ -1035,7 +1035,7 @@ def test_cluster_restart_apply_uses_configured_local_olla_binary(tmp_path: Path,
     monkeypatch.setattr(
         cli_module,
         "write_generated_olla_config",
-        lambda config, *, repo_root, port=None: repo_root / "configs/olla-config.yaml",
+        lambda config, *, repo_root, port=None: repo_root / "config/olla-config.yaml",
     )
     monkeypatch.setattr(cli_module, "run_olla_service_restart", fake_run_olla_service_restart)
     monkeypatch.setattr(cli_module, "run_edge_service_restart", lambda **kwargs: fake_service(service="edge", **kwargs))
@@ -1878,7 +1878,7 @@ def test_runtime_smoke_reports_direct_chat_result(tmp_path: Path, monkeypatch) -
 
 def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
-    config_dir = repo / "configs"
+    config_dir = repo / "config"
     config_dir.mkdir()
     assignments = repo / "tfconfig.yaml"
     assignments.write_text(
@@ -1924,7 +1924,7 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
 
 def test_generate_olla_config_cli_uses_service_port(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
-    config_dir = repo / "configs"
+    config_dir = repo / "config"
     config_dir.mkdir()
     (repo / "tfconfig.yaml").write_text(
         dedent("""\
@@ -2068,7 +2068,7 @@ def test_olla_dev_smoke_cli_prints_summary(monkeypatch) -> None:
     )
     fake_dev_smoke = OllaDevSmokeResult(
         config_generated=True,
-        config_path="/tmp/configs/olla-config.yaml",
+        config_path="/tmp/config/olla-config.yaml",
         olla_started=True,
         olla_healthy=True,
         smoke_result=fake_smoke,
@@ -2111,7 +2111,7 @@ def test_olla_dev_smoke_cli_passes_expected_endpoint(monkeypatch) -> None:
 
     fake_dev_smoke = OllaDevSmokeResult(
         config_generated=True,
-        config_path="/tmp/configs/olla-config.yaml",
+        config_path="/tmp/config/olla-config.yaml",
         olla_started=True,
         olla_healthy=True,
         smoke_result=OllaSmokeResult(

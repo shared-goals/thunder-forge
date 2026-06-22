@@ -1,0 +1,209 @@
+# Olla Configuration (default)
+server:
+  host: "localhost" # Use 0.0.0.0 to bind to all interfaces (so it's accessible externally)
+  port: 40114 # default port for Olla - 4-OLLA
+  read_timeout: 20s
+  read_header_timeout: 10s # max time to read request headers; guards against Slowloris, 10s suits any legitimate client
+  write_timeout: 0s # for LLMs streaming, leave this as 0s
+  shutdown_timeout: 10s # Graceful shutdown timeout, increase this for heavy sites that have long-running requests or lots of endpoints (30s is a good)
+  request_logging: true # logs Http Requests, may be useful for debugging, noise for other use cases
+
+  # CORS (Cross-Origin Resource Sharing) for browser-based clients (OpenWebUI, dashboards).
+  # Off by default. Non-browser clients (curl, SDKs, coding agents) ignore CORS entirely,
+  # so enabling this has no effect on them. When a request carries no Origin header it is
+  # passed through untouched.
+  #
+  # Caveat: allow_credentials: true is incompatible with allowed_origins: ["*"] (the CORS
+  # spec forbids it and browsers reject the response). List explicit origins when using
+  # credentials. exposed_headers left empty auto-exposes the full X-Olla-* response header
+  # set, so browser clients can read routing/model metadata.
+  cors:
+    enabled: false                   # opt-in: only enable when browser clients need access
+    allowed_origins:
+      - "*"
+    allowed_methods:
+      - "GET"
+      - "POST"
+      - "OPTIONS"
+    allowed_headers:
+      - "*"
+    exposed_headers: []              # empty: auto-exposes the X-Olla-* headers
+    allow_credentials: false         # set true only with explicit allowed_origins (not "*")
+    max_age: 300                     # preflight cache in seconds (5 minutes)
+
+  request_limits:
+    max_body_size: 52428800  # 50MB
+    max_header_size: 524288  # 512KB
+  rate_limits:
+    global_requests_per_minute: 1000
+    per_ip_requests_per_minute: 100
+    health_requests_per_minute: 1000
+    burst_size: 50
+    per_endpoint:
+      default_requests_per_minute: 200
+    cleanup_interval: 5m
+    trust_proxy_headers: false
+    trusted_proxy_cidrs: [
+      "127.0.0.0/8",
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16"
+    ]
+
+proxy:
+  # NOTE: From v0.1.0+ we'll switch to Olla as the default proxy engine
+  #       Sherpa will continue to be maintained and supported for the
+  #       foreseeable future
+  engine: "olla" # Available: sherpa, olla
+  # Profile controls proxy engine (http) transport buffer behaviour
+  # - "auto": Dynamically selects based on request size, type and other factors (default)
+  # - "streaming": No buffering, tokens stream immediately, low latency & low memory usage
+  # - "standard": Normal HTTP delivery without forced flushing, suitable for REST APIs
+  profile: "auto" # Available: auto, streaming, standard
+  load_balancer: "least-connections" # Available: round-robin, least-connections, priority
+  stream_buffer_size: 8192 # Buffer size per request - larger = fewer syscalls, more memory
+  connection_timeout: 60s
+  connection_keep_alive: 30s # TCP keep-alive interval for backend connections
+  response_timeout: 900s
+  read_timeout: 600s
+  response_header_timeout: 30s # max wait for the backend's first response header; raise for backends that load models on demand (e.g. Lemonade)
+  tls_handshake_timeout: 10s # max time allowed for a TLS handshake with a backend
+
+  # KV-cache affinity routing (opt-in)
+  # Routes repeat turns in a conversation to the same backend, maximising KV-cache
+  # hit rates for long multi-turn sessions at the cost of reduced load distribution.
+  sticky_sessions:
+    enabled: false              # opt-in: route same-prefix conversations to same backend
+    idle_ttl_seconds: 600       # 10-min sliding window (refreshed on each matched request)
+    max_sessions: 10000         # LRU evicts oldest sessions when full
+    key_sources:                # tried in order; first match wins
+      - "session_header"        # X-Olla-Session-ID header (explicit client opt-in)
+      - "prefix_hash"           # FNV-1a hash of first N bytes of messages JSON (best cache locality)
+      - "auth_header"           # Authorization header hash (per-user affinity)
+      # - "ip"                  # client IP (opt-in; unreliable behind NAT/Docker)
+    prefix_hash_bytes: 512      # how many leading bytes of the messages field to hash
+
+  # DEPRECATED as of v0.0.16 - These fields are no longer used
+  # max_retries: 3        # Replaced by retry.max_attempts
+  # retry_backoff: 500ms  # Now uses intelligent exponential backoff
+  
+  # Connection failure retry settings (applies to both Sherpa and Olla engines)
+  # When enabled, the proxy will automatically retry failed requests on other healthy endpoints
+  retry:
+    enabled: true # Enable automatic retry on connection failures
+    on_connection_failure: true # Retry when connection to backend fails (connection refused, reset, timeout)
+    max_attempts: 0 # Maximum retry attempts (0 = try all available endpoints once)
+    # Connection errors that trigger retry:
+    # - Connection refused (backend is down)
+    # - Connection reset (backend crashed)
+    # - Connection timeout (backend is overloaded)
+    # - Network unreachable (network issues)
+    # Failed endpoints are immediately marked as unhealthy and removed from the retry pool
+
+discovery:
+  type: "static"
+  refresh_interval: 30s
+  
+  # Health check and recovery settings
+  health_check:
+    initial_delay: 1s # Delay before first health check
+    # When an endpoint fails during request processing:
+    # - It's immediately marked as unhealthy
+    # - Consecutive failures increment, causing exponential backoff
+    # - Next check time = now + (consecutive_failures * 2) seconds (max 60s)
+    # - Health checker will automatically recover endpoints when they're back online
+  
+  static:
+    endpoints:
+      # See docs for details on configuring endpoints:
+      # http://127.0.0.1:8000/olla/configuration/overview/#endpoint-configuration
+      - url: "http://localhost:11434"
+        name: "local-ollama"
+        type: "ollama"
+        priority: 100
+        model_url: "/api/tags"
+        health_check_url: "/"
+        check_interval: 2s # How often to check when healthy
+        check_timeout: 1s
+      - url: "http://localhost:1234"
+        name: "local-lm-studio"
+        type: "lm-studio"
+        priority: 100
+        model_url: "/v1/models"
+        health_check_url: "/"
+        check_interval: 2s
+        check_timeout: 1s
+      - url: "http://localhost:8000"
+        name: "local-vllm"
+        type: "vllm"
+        priority: 100
+        model_url: "/v1/models"
+        health_check_url: "/health"
+        check_interval: 5s
+        check_timeout: 2s
+  model_discovery:
+    enabled: true
+    interval: 5m
+    timeout: 30s
+    concurrent_workers: 5
+    retry_attempts: 3
+    retry_backoff: 1s
+
+model_registry:
+  type: "memory"
+  enable_unifier: true
+
+  unification:
+    enabled: true
+    stale_threshold: 24h  # How long to keep models in memory after last seen
+    cleanup_interval: 10m  # How often to check for stale models
+  
+  # Model routing strategy (v0.0.16+)
+  # Controls how requests are routed when models aren't available on all endpoints
+  routing_strategy:
+    type: "strict"  # Options: strict, optimistic, discovery
+    options:
+      # Fallback behavior when model not found (optimistic mode)
+      fallback_behavior: "compatible_only"  # Options: compatible_only, all, none
+      
+      # Discovery mode settings
+      discovery_timeout: 2s  # Timeout for discovery refresh
+      discovery_refresh_on_miss: false  # Refresh discovery when model not found
+
+translators:
+  #####
+  # Anthropic Messages API Translation (v0.0.20+)
+  # Enabled by default. Still actively being improved - please report any issues or feedback.
+  #####
+  anthropic:
+    enabled: true
+    # passthrough_enabled only applies when enabled=true
+    # When true: Forwards requests directly to backends with native Anthropic support (optimal performance)
+    # When false: Always translates Anthropic ↔ OpenAI format (useful for debugging/testing)
+    passthrough_enabled: true
+    max_message_size: 10485760  # 10MB - Anthropic API limit
+    # !! WARNING: Do not enable inspector in production without reviewing data privacy !!
+    #             Anthropic messages may contain sensitive user data.
+    #  This release is quite taxing and unoptimised, so use with caution & only for debug.
+    inspector:
+      enabled: false                          # Enable request/response logging
+      output_dir: "logs/inspector/anthropic"  # Where to write logs
+      session_header: "X-Session-ID"          # Header to use for session grouping
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, file
+
+engineering:
+  show_nerdstats: false
+
+# Model aliases allow mapping a single virtual model name to multiple actual model names
+# across different backends. When a request arrives with an alias, olla finds endpoints
+# serving any of the listed actual models and rewrites the model name in the request to
+# match what the selected backend expects.
+# Example:
+#   model_aliases:
+#     gpt-oss-120b:             # The alias name used in API requests
+#       - gpt-oss:120b          # Ollama format
+#       - gpt-oss-120b-MLX      # LM Studio MLX format
+#       - gguf_gpt_oss_120b.gguf  # llamacpp GGUF file

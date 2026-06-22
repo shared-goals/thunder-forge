@@ -1519,7 +1519,7 @@ def cluster_prepare(
             else:
                 preview_olla_path = resolved_olla_bin_dir / "olla"
                 typer.echo(f"would: ensure Olla {resolved_olla_version} at {preview_olla_path}")
-            typer.echo("would: generate configs/olla-config.yaml")
+            typer.echo("would: generate config/olla-config.yaml")
         if cache_names:
             for name in cache_names:
                 cache_node = config.nodes[name]
@@ -1580,7 +1580,7 @@ def cluster_prepare(
         result = run_gateway_daemon_setup(
             repo_root=repo_root,
             binary=binary_path,
-            config_path=repo_root / "configs" / "olla-config.yaml",
+            config_path=repo_root / "config" / "olla-config.yaml",
             edge_host=config.services.edge_host,
             olla_port=resolve_port(None, default=config.services.olla_port),
             edge_port=resolve_port(None, default=config.services.edge_port),
@@ -1690,15 +1690,15 @@ def cluster_restart(
         typer.echo("")
         typer.echo("== Gateway ==")
         if dry_run:
-            typer.echo("  would: generate configs/olla-config.yaml")
+            typer.echo("  would: generate config/olla-config.yaml")
         else:
             write_generated_olla_config(config, repo_root=repo_root)
-            typer.echo("  config: generated configs/olla-config.yaml")
+            typer.echo("  config: generated config/olla-config.yaml")
 
         olla_result = run_olla_service_restart(
             repo_root=repo_root,
             binary=resolved_binary,
-            config_path=repo_root / "configs" / "olla-config.yaml",
+            config_path=repo_root / "config" / "olla-config.yaml",
             port=resolve_port(None, default=config.services.olla_port),
             manager=frontend_manager,
             apply=not dry_run,
@@ -1963,8 +1963,8 @@ def service_setup_daemon(
         "--script-path",
         help="Local path for the generated setup script. Defaults to .tmp/run/thunder-forge-gateway-daemon-setup.sh.",
     ),
-    binary: Path = typer.Option(Path(".tmp/olla-bin/olla"), "--binary", help="Olla binary path."),
-    config_path: Path = typer.Option(Path("configs/olla-config.yaml"), "--config", help="Olla config path."),
+    binary: Path = typer.Option(Path("olla-bin/olla"), "--binary", help="Olla binary path."),
+    config_path: Path = typer.Option(Path("config/olla-config.yaml"), "--config", help="Olla config path."),
     edge_host: str | None = typer.Option(
         None,
         "--host",
@@ -2052,7 +2052,7 @@ def service_restart(
     ),
     timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds for service commands."),
     binary: Path | None = typer.Option(None, "--binary", help="Olla binary path."),
-    config_path: Path = typer.Option(Path("configs/olla-config.yaml"), "--config", help="Olla config path."),
+    config_path: Path = typer.Option(Path("config/olla-config.yaml"), "--config", help="Olla config path."),
     port: int | None = typer.Option(
         None,
         "--port",

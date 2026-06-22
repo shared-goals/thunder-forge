@@ -14,7 +14,7 @@ services:
     # local_binary: /absolute/path/to/olla
     os: macos
     arch: arm64
-    bin_dir: .tmp/olla-bin
+    bin_dir: olla-bin
   edge:
     # Authenticated TF edge is the LAN-facing API. Keep raw Olla loopback-only.
     host: "0.0.0.0"

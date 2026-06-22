@@ -178,7 +178,7 @@ Thunder Forge keeps secrets and operational config separate:
 - `.env` is ignored and secrets-only. Keep `HF_TOKEN`, `TF_USER_<CLIENT>`, and similar credentials there.
 - `tfconfig.yaml` is ignored and is the local source of truth for services, operator defaults, model registry, and node placement.
 - `tfconfig.example.yaml` is tracked as the schema/example mirror.
-- `configs/` is ignored generated output, currently including `configs/olla-config.yaml`.
+- `config/olla-config.yaml` is generated output managed by Thunder Forge.
 - Config node roles are `gateway`, `cache`, and `inference`. Use `roles: [gateway, cache]` for multi-role hosts such as `gateway-cache-01`; use `roles: [inference]` for oMLX-serving nodes such as `infer-01`.
 
 Create a local config with `cp tfconfig.example.yaml tfconfig.yaml`, then edit the local file for this host.
@@ -191,7 +191,7 @@ Thunder Forge service ports live in `tfconfig.yaml` under `services:`:
 |------------|---------|---------|
 | `services.olla.port` | `40115` | Local Olla router on the frontend host |
 | `services.olla.version` | `v0.0.27` | Olla release used by `cluster prepare` |
-| `services.olla.bin_dir` | `.tmp/olla-bin` | Local Olla binary install directory |
+| `services.olla.bin_dir` | `olla-bin` | Local Olla binary install directory |
 | `services.edge.host` | `0.0.0.0` | TF edge bind address; use `0.0.0.0` for LAN clients, keep raw Olla private |
 | `services.edge.port` | `40116` | Local TF edge OpenAI-compatible proxy |
 | `services.omlx.port` | `8018` | Default oMLX node runtime port when a node runtime omits `port` |

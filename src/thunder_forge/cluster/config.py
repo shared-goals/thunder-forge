@@ -21,7 +21,7 @@ from thunder_forge.cluster.ports import (
 
 TF_CONFIG_FILENAME = "tfconfig.yaml"
 TF_CONFIG_EXAMPLE_FILENAME = "tfconfig.example.yaml"
-GENERATED_CONFIG_DIR = "configs"
+GENERATED_CONFIG_DIR = "config"
 GENERATED_OLLA_CONFIG_FILENAME = "olla-config.yaml"
 DEFAULT_EDGE_ACCESS_LOG = "logs/tf-edge-access.jsonl"
 DEFAULT_LOG_RETENTION_DAYS = 3
@@ -29,7 +29,7 @@ DEFAULT_EDGE_HOST = "0.0.0.0"
 DEFAULT_OLLA_VERSION = "v0.0.27"
 DEFAULT_OLLA_OS = "macos"
 DEFAULT_OLLA_ARCH = "arm64"
-DEFAULT_OLLA_BIN_DIR = ".tmp/olla-bin"
+DEFAULT_OLLA_BIN_DIR = "olla-bin"
 DEFAULT_SYNC_TRANSPORT = "auto"
 DEFAULT_SYNC_TIMEOUT = 7200
 DEFAULT_SYNC_RESTART_RUNTIME = True

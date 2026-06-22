@@ -1,3 +1,6 @@
+# Binary
+olla-bin/
+
 # Secrets
 .env
 
@@ -5,8 +8,9 @@
 tfconfig.yaml
 
 # Generated configs
-configs/*.yaml
-configs/*.yaml.bak*
+config/olla-config.yaml
+config/olla-config.yaml.bak*
+
 
 # Python
 .venv/

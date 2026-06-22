@@ -15,7 +15,7 @@ from thunder_forge.cluster.olla import (
 def test_dev_smoke_olla_generates_config_spawns_and_smokes(tmp_path: Path, monkeypatch) -> None:
     """dev_smoke_olla: generate config → spawn Olla → wait healthy → smoke → kill → report."""
     repo = tmp_path
-    config_dir = repo / "configs"
+    config_dir = repo / "config"
     config_dir.mkdir()
     (repo / "tfconfig.yaml").write_text(
         "models:\n"

@@ -512,8 +512,8 @@ def build_gateway_daemon_setup_result(
 def run_gateway_daemon_setup(
     *,
     repo_root: Path,
-    binary: Path = Path(".tmp/olla-bin/olla"),
-    config_path: Path = Path("configs/olla-config.yaml"),
+    binary: Path = Path("olla-bin/olla"),
+    config_path: Path = Path("config/olla-config.yaml"),
     edge_host: str = "127.0.0.1",
     olla_port: int | None = None,
     edge_port: int | None = None,

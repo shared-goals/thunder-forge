@@ -559,8 +559,8 @@ def _apply_local_olla_service(
 def run_olla_service_restart(
     *,
     repo_root: Path,
-    binary: Path = Path(".tmp/olla-bin/olla"),
-    config_path: Path = Path("configs/olla-config.yaml"),
+    binary: Path = Path("olla-bin/olla"),
+    config_path: Path = Path("config/olla-config.yaml"),
     port: int | None = None,
     user: str | None = None,
     manager: str = "launchd",

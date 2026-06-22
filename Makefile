@@ -22,7 +22,7 @@ help:
 	@printf "  %-24s %s\n" "status [node]" "check oMLX health on inference nodes"
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
 	@printf "  %-24s %s\n" "prune [node]" "sync, prune unassigned node cache models, and restart runtime"
-	@printf "  %-24s %s\n" "config" "generate configs/olla-config.yaml"
+	@printf "  %-24s %s\n" "config" "generate config/olla-config.yaml"
 	@printf "  %-24s %s\n" "usage [day]" "print usage summary (day: YYYY-MM-DD)"
 	@printf "  %-24s %s\n" "usage-json [day]" "print usage summary as JSON"
 	@printf "  %-24s %s\n" "usage-trim [days]" "trim local TF logs (default 3 days)"
