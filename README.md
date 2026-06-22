@@ -501,6 +501,42 @@ Hermes output always uses `key_env`; it does not embed API keys. `make hermes <c
 uv run thunder-forge edge client-config hermes shag --create-missing-key --yes --copy --base-url http://studio.lan:40116/v1 --output $HOME/.hermes/thunder-forge.yaml
 ```
 
+### VS Code Provider
+
+VS Code's BYOK flow uses `chatLanguageModels.json`. Thunder Forge generates the custom-endpoint provider entry with one model object per assigned TF alias, keeping the alias in both `id` and `name`, pointing every model at the TF edge base URL, and enabling both `toolCalling` and `vision`.
+
+The generated shape follows the VS Code model configuration reference:
+
+```json
+[
+	{
+		"name": "Thunder Forge",
+		"vendor": "customendpoint",
+		"apiKey": "<API-ID-VALUE>",
+		"apiType": "chat-completions",
+		"models": [
+			{
+				"id": "memory",
+				"name": "memory",
+				"url": "http://gateway-01.lan:40116/v1",
+				"toolCalling": true,
+				"vision": true,
+				"maxInputTokens": 117965,
+				"maxOutputTokens": 13107
+			}
+		]
+	}
+]
+```
+
+`make vscode` prints the generated JSON and copies it to the terminal clipboard. Pass a client id to inject the resolved TF edge key and create it in `.env` when missing:
+
+```bash
+make vscode
+make vscode shag
+uv run thunder-forge edge client-config vscode shag --inject-api-key --create-missing-key --yes --copy
+```
+
 ### Client Config Generator
 
 OpenCode and Hermes config snippets are generated from the same TF edge source of truth: the gateway base URL, `TF_USER_<CLIENT>` key name, assigned model aliases, backing model comments, and benchmark-only status. The target is explicit:
@@ -508,6 +544,7 @@ OpenCode and Hermes config snippets are generated from the same TF edge source o
 ```bash
 uv run thunder-forge edge client-config opencode [client-id] --copy
 uv run thunder-forge edge client-config hermes [client-id] --copy
+uv run thunder-forge edge client-config vscode [client-id] --copy
 ```
 
 Behavior:
@@ -518,6 +555,7 @@ Behavior:
 - OpenCode can use `--inject-api-key` when the client config must contain the real key.
 - Hermes always emits `key_env: TF_USER_<CLIENT>` and never embeds the secret.
 - Keep OpenCode output as JSONC/JSON because OpenCode needs static `provider.<id>.models`.
+- Keep VS Code output as JSON because `chatLanguageModels.json` expects strict model objects with `maxInputTokens` and `maxOutputTokens` that stay within the model context window.
 - Keep Hermes output as a YAML snippet with `custom_providers:`, `base_url`, `key_env`, `api_mode: chat_completions`, and alias `models:`. It does not rewrite the top-level Hermes `model:` block.
 - Preserve `--base-url`, `--output`, `--copy`, and OSC52/tmux clipboard behavior across both clients.
 

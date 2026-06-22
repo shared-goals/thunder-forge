@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check sync-env test lint check bootstrap restart smoke status sync prune config usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes
+_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check sync-env test lint check bootstrap restart smoke status sync prune config usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes vscode
 ARG ?= $(word 2,$(MAKECMDGOALS))
 EDGE_CLIENTS ?=
 
@@ -31,6 +31,7 @@ help:
 	@printf "  %-24s %s\n" "edge-usage" "summarize TF edge access logs"
 	@printf "  %-24s %s\n" "opencode [id]" "create client key and print/copy OpenCode config"
 	@printf "  %-24s %s\n" "hermes [id]" "create client key and print/copy Hermes config"
+	@printf "  %-24s %s\n" "vscode [id]" "create client key and print/copy VS Code model config"
 	@echo ""
 	@echo "Developer:"
 	@printf "  %-24s %s\n" "dev-sync" "update the uv environment"
@@ -126,6 +127,9 @@ opencode:
 
 hermes:
 	@$(UV) thunder-forge edge client-config hermes --copy $(if $(strip $(ARG)),--create-missing-key "$(ARG)")
+
+vscode:
+	@$(UV) thunder-forge edge client-config vscode --copy $(if $(strip $(ARG)),--inject-api-key --create-missing-key "$(ARG)")
 
 .PHONY: $(_TARGETS)
 .DEFAULT_GOAL := help

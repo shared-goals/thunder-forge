@@ -28,6 +28,10 @@ def _parse_jsonc(text: str) -> dict[str, object]:
     return json.loads(json_only)
 
 
+def _parse_json(text: str) -> object:
+    return json.loads(text)
+
+
 def test_osc52_clipboard_sequence_encodes_payload() -> None:
     from thunder_forge.cli import _multiplexer_aware_osc52_sequence
 
@@ -552,6 +556,46 @@ def test_edge_client_config_copy_uses_generated_payload(monkeypatch) -> None:
     assert "copied OpenCode config to clipboard" in result.stderr
 
 
+def test_edge_client_config_vscode_copy_prints_api_key_update_hint(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    copied: list[str] = []
+    monkeypatch.setattr(cli_module, "_copy_to_clipboard", copied.append, raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                        max_context=131072,
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            Path.cwd(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["edge", "client-config", "vscode", "--copy"])
+
+    assert result.exit_code == 0
+    assert copied == [result.stdout]
+    assert "copied VS Code config to clipboard" in result.stderr
+    assert "Update API Key with VS Code menu item in Language models management panel" in result.stderr
+
+
 def test_edge_client_config_opencode_jsonc_comments_show_backing_models(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
@@ -629,6 +673,116 @@ def test_edge_client_config_opencode_jsonc_comments_show_disk_gb_when_configured
 
     assert result.exit_code == 0
     assert "// mlx-community/gpt-oss-20b-mxfp4-bf16; disk_gb: 13.0" in result.stdout
+
+
+def test_edge_client_config_vscode_prints_model_config_with_token_budget_and_secret_injection(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import thunder_forge.cli as cli_module
+
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("TF_USER_SHAG", raising=False)
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (tmp_path, env_file), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                        max_context=131072,
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            tmp_path,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "edge",
+            "client-config",
+            "vscode",
+            "shag",
+            "--inject-api-key",
+            "--create-missing-key",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = _parse_json(result.stdout)
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    provider = payload[0]
+    api_key_prefix = "TF_USER_SHAG="
+    api_key = next(line.removeprefix(api_key_prefix) for line in env_file.read_text().splitlines() if line.startswith(api_key_prefix))
+    assert provider["name"] == "Thunder Forge"
+    assert provider["vendor"] == "customendpoint"
+    assert provider["apiType"] == "chat-completions"
+    assert provider["apiKey"] == api_key
+    assert provider["models"][0]["id"] == "memory"
+    assert provider["models"][0]["name"] == "memory"
+    assert provider["models"][0]["url"] == "http://127.0.0.1:40116/v1"
+    assert provider["models"][0]["toolCalling"] is True
+    assert provider["models"][0]["vision"] is True
+    assert provider["models"][0]["maxInputTokens"] == 117965
+    assert provider["models"][0]["maxOutputTokens"] == 13107
+    assert provider["models"][0]["requestHeaders"]["X-Olla-Session-ID"] == "memory-shag"
+
+
+def test_edge_client_config_vscode_uses_placeholder_without_client_id(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "_load_config",
+        lambda: (
+            ClusterConfig(
+                models={
+                    "memory": Model(
+                        source=ModelSource(type="huggingface", repo="mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                        runtime_model_id="gpt-oss-20b-MXFP4-Q8",
+                        max_context=131072,
+                    )
+                },
+                nodes={
+                    "infer-03": Node(
+                        host="infer-03.lan",
+                        ram_gb=128,
+                        roles=[NodeRole.INFERENCE],
+                        runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                        models=["memory"],
+                    )
+                },
+            ),
+            Path.cwd(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["edge", "client-config", "vscode"])
+
+    assert result.exit_code == 0
+    payload = _parse_json(result.stdout)
+    assert payload[0]["apiKey"] == "<API-ID-VALUE>"
+    assert payload[0]["models"][0]["maxInputTokens"] == 117965
+    assert payload[0]["models"][0]["maxOutputTokens"] == 13107
+    assert "requestHeaders" not in payload[0]["models"][0]
 
 
 def test_edge_client_config_opencode_rejects_unassigned_default_model(monkeypatch) -> None:

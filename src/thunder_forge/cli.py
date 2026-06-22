@@ -117,6 +117,7 @@ app.add_typer(usage_app, name="usage")
 
 DEFAULT_OPENCODE_API_KEY_ENV = "TF_USER_OPENCODE"
 DEFAULT_HERMES_API_KEY_ENV = "TF_USER_HERMES"
+DEFAULT_VSCODE_API_KEY_ENV = "TF_USER_VSCODE"
 REMOTE_CACHE_EXEC_ENV = "TF_CACHE_REMOTE_EXEC"
 
 
@@ -862,6 +863,101 @@ def _resolve_opencode_api_key(
     status = result.keys[0].status if result.keys else "present"
     typer.echo(f"{resolved_env}: {status} in {env_file}", err=True)
     return api_key
+
+
+def _resolve_vscode_api_key(
+    *,
+    client_id: str | None,
+    api_key_env: str | None,
+    inject_api_key: bool,
+    create_missing_key: bool,
+    yes: bool,
+) -> str:
+    if not inject_api_key:
+        return "<API-ID-VALUE>"
+
+    resolved_env = api_key_env or DEFAULT_VSCODE_API_KEY_ENV
+    if client_id:
+        resolved_env, api_key = edge_api_key_from_env(client_id=client_id, users_env=EDGE_USER_PREFIX)
+    else:
+        _repo_root, env_file = _load_repo_dotenv()
+        api_key = os.environ.get(resolved_env, "").strip()
+        if not api_key:
+            api_key = _dotenv_value(env_file, resolved_env)
+
+    if api_key:
+        return api_key
+    if not client_id or not create_missing_key:
+        typer.echo(f"Error: {resolved_env} is not set", err=True)
+        raise typer.Exit(1)
+
+    _repo_root, env_file = _load_repo_dotenv()
+    if not yes and not _confirm_create_edge_key(resolved_env, env_file):
+        typer.echo(f"Error: {resolved_env} was not created", err=True)
+        raise typer.Exit(1)
+
+    result = ensure_edge_api_keys(env_file=env_file, clients=[client_id], users_env=EDGE_USER_PREFIX)
+    api_key = _dotenv_value(env_file, resolved_env)
+    if not api_key:
+        typer.echo(f"Error: failed to create {resolved_env} in {env_file}", err=True)
+        raise typer.Exit(1)
+    status = result.keys[0].status if result.keys else "present"
+    typer.echo(f"{resolved_env}: {status} in {env_file}", err=True)
+    return api_key
+
+
+def _vscode_model_token_budget(context_length: int) -> tuple[int, int]:
+    if context_length <= 1:
+        return 1, 0
+    max_output_tokens = max(1024, context_length // 10)
+    if max_output_tokens >= context_length:
+        max_output_tokens = max(1, context_length // 2)
+    max_input_tokens = context_length - max_output_tokens
+    return max_input_tokens, max_output_tokens
+
+
+def _vscode_model_config(
+    entry: EdgeModelCatalogEntry,
+    *,
+    base_url: str,
+    session_id: str | None,
+) -> dict[str, object]:
+    model_config: dict[str, object] = {
+        "id": entry.id,
+        "name": entry.name,
+        "url": base_url,
+        "toolCalling": True,
+        "vision": True,
+    }
+
+    context_length = _context_length(entry)
+    if context_length is not None:
+        max_input_tokens, max_output_tokens = _vscode_model_token_budget(context_length)
+        model_config["maxInputTokens"] = max_input_tokens
+        model_config["maxOutputTokens"] = max_output_tokens
+    if session_id:
+        model_config["requestHeaders"] = {"X-Olla-Session-ID": f"{entry.id}-{session_id}"}
+    return model_config
+
+
+def _vscode_config_from_catalog(
+    *,
+    model_catalog: list[EdgeModelCatalogEntry],
+    provider_name: str,
+    base_url: str,
+    api_key: str,
+    session_id: str | None = None,
+) -> list[dict[str, object]]:
+    provider: dict[str, object] = {
+        "name": provider_name,
+        "vendor": "customendpoint",
+        "apiKey": api_key,
+        "apiType": "chat-completions",
+        "models": [],
+    }
+    for entry in sorted(model_catalog, key=lambda item: item.id):
+        provider["models"].append(_vscode_model_config(entry, base_url=base_url, session_id=session_id))
+    return [provider]
 
 
 def _gateway_restart_notice(config: ClusterConfig) -> str:
@@ -2717,7 +2813,7 @@ def _validate_client_config_model_aliases(
 
 @edge_app.command("client-config")
 def edge_client_config(
-    target: str = typer.Argument(..., help="Client config target: opencode or hermes."),
+    target: str = typer.Argument(..., help="Client config target: opencode, hermes, or vscode."),
     client_id: str | None = typer.Argument(
         None,
         help="Optional TF edge client id. For Hermes this selects key_env; for OpenCode it can inject the key.",
@@ -2728,7 +2824,7 @@ def edge_client_config(
         help="TF edge OpenAI-compatible base URL. Defaults to http://<gateway-host>:<edge-port>/v1.",
     ),
     provider_id: str = typer.Option("thunder-forge", "--provider-id", help="Provider id/name for the client config."),
-    provider_name: str = typer.Option("Thunder Forge", "--provider-name", help="OpenCode provider display name."),
+    provider_name: str = typer.Option("Thunder Forge", "--provider-name", help="Provider display name."),
     api_key_env: str | None = typer.Option(None, "--api-key-env", help="Env var name used for API key references."),
     model: str | None = typer.Option(None, "--model", help="Optional default TF alias for OpenCode model."),
     small_model: str | None = typer.Option(
@@ -2761,7 +2857,12 @@ def edge_client_config(
     normalized_target = target.strip().lower()
     normalized_format = output_format.strip().lower()
     if normalized_format == "auto":
-        normalized_format = "jsonc" if normalized_target == "opencode" else "yaml"
+        if normalized_target == "opencode":
+            normalized_format = "jsonc"
+        elif normalized_target == "hermes":
+            normalized_format = "yaml"
+        else:
+            normalized_format = "json"
     resolved_base_url = base_url or _edge_base_url_from_config(config)
 
     if normalized_target == "opencode":
@@ -2820,8 +2921,28 @@ def edge_client_config(
             ),
         )
         label = "Hermes"
+    elif normalized_target == "vscode":
+        if normalized_format not in {"json", "jsonc"}:
+            typer.echo("Error: --format must be auto or json for vscode", err=True)
+            raise typer.Exit(1)
+        resolved_api_key = _resolve_vscode_api_key(
+            client_id=client_id,
+            api_key_env=api_key_env,
+            inject_api_key=inject_api_key,
+            create_missing_key=create_missing_key,
+            yes=yes,
+        )
+        payload = _vscode_config_from_catalog(
+            model_catalog=model_catalog,
+            provider_name=provider_name,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            session_id=client_id,
+        )
+        output_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        label = "VS Code"
     else:
-        typer.echo("Error: target must be opencode or hermes", err=True)
+        typer.echo("Error: target must be opencode, hermes, or vscode", err=True)
         raise typer.Exit(1)
 
     typer.echo(output_text, nl=False)
@@ -2832,6 +2953,11 @@ def edge_client_config(
     if copy:
         _copy_to_clipboard(output_text)
         typer.echo(f"copied {label} config to clipboard", err=True)
+        if normalized_target == "vscode":
+            typer.echo(
+                "Update API Key with VS Code menu item in Language models management panel",
+                err=True,
+            )
 
 @artifact_app.command("status")
 def artifact_status(
