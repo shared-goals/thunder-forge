@@ -1403,6 +1403,10 @@ def _print_cluster_status_payload(payload: dict[str, object], *, config: Cluster
                 f"{node.get('name', 'node')}: health={node.get('health', 'fail')} "
                 f"models={node.get('models', 'fail')}"
             )
+            # Show admin URL if available
+            admin_url = node.get("admin_url")
+            if admin_url:
+                typer.echo(f"  {admin_url}")
             typer.echo(f"  omlx_version: {node.get('omlx_version', 'unknown')}")
             served_models = node.get("served_models")
             if isinstance(served_models, list) and served_models:

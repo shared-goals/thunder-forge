@@ -199,6 +199,8 @@ class Node:
     shell: str | None
     home_dir: str | None
     homebrew_prefix: str | None
+    # Optional public hostname (e.g., NetBird cloud hostname)
+    public_host: str | None = None
 
     def __init__(
         self,
@@ -215,6 +217,7 @@ class Node:
         shell: str | None = None,
         home_dir: str | None = None,
         homebrew_prefix: str | None = None,
+        public_host: str | None = None,
     ) -> None:
         if not host:
             msg = "Node requires host"
@@ -231,6 +234,7 @@ class Node:
         self.shell = shell
         self.home_dir = home_dir
         self.homebrew_prefix = homebrew_prefix
+        self.public_host = public_host
 
     @property
     def role(self) -> NodeRole:
@@ -628,6 +632,7 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             shell=v.get("shell"),
             home_dir=v.get("home_dir"),
             homebrew_prefix=v.get("homebrew_prefix"),
+            public_host=v.get("public_host"),
         )
 
     return ClusterConfig(

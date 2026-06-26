@@ -864,10 +864,15 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
             extract_hot_loaded_models(result.model_statuses),
             include_unmanaged=False,
         )
+        # Build admin URL using public_host if available, otherwise use host
+        admin_host = runtime_node.public_host or runtime_node.host
+        admin_url = f"http://{admin_host}:{runtime.port}/admin"
         inference_payloads.append(
             {
                 "name": node_name,
                 "host": runtime_node.host,
+                "public_host": runtime_node.public_host,
+                "admin_url": admin_url,
                 "health": "ok" if result.health_ok else "fail",
                 "models": "ok" if result.models_ok else "fail",
                 "omlx_version": omlx_version,
