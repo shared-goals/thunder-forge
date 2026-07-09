@@ -1573,6 +1573,11 @@ def cluster_prepare(
         help="Override the inference admin account used for remote su/sudo bootstrap.",
     ),
     timeout: int = typer.Option(300, "--timeout", help="Timeout in seconds for daemon setup commands."),
+    upgrade_omlx: bool = typer.Option(
+        True,
+        "--upgrade-omlx/--no-upgrade-omlx",
+        help="Upgrade oMLX tooling during prepare instead of keeping the current installed version.",
+    ),
     olla_version: str | None = typer.Option(
         None,
         "--olla-version",
@@ -1624,7 +1629,8 @@ def cluster_prepare(
             for name in cache_names:
                 cache_node = config.nodes[name]
                 home_dir = cache_node.home_dir or f"/Users/{cache_node.user}"
-                typer.echo(f"would: ensure/upgrade oMLX CLI at {home_dir}/.local/bin/omlx")
+                action = "upgrade" if upgrade_omlx else "ensure"
+                typer.echo(f"would: {action} oMLX CLI at {home_dir}/.local/bin/omlx")
                 if _is_local_host(cache_node.host):
                     typer.echo(f"would: ensure cache hub {cache_omlx_models_dir_from_env()}")
                 else:
@@ -1634,7 +1640,8 @@ def cluster_prepare(
             resolved_admin_user = admin_user or node.admin_user
             escalation = f"su={resolved_admin_user}" if resolved_admin_user else f"sudo={node.user}"
             home_dir = node.home_dir or f"/Users/{node.user}"
-            typer.echo(f"would: ensure/upgrade oMLX CLI at {home_dir}/.local/bin/omlx")
+            action = "upgrade" if upgrade_omlx else "ensure"
+            typer.echo(f"would: {action} oMLX CLI at {home_dir}/.local/bin/omlx")
             typer.echo(f"would: bootstrap {name} ssh={node.user}@{node.host} {escalation}")
         return
 
@@ -1732,7 +1739,7 @@ def cluster_prepare(
             runtime_node,
             apply=True,
             timeout=timeout,
-            upgrade=True,
+            upgrade=upgrade_omlx,
             progress=_progress,
         )
         _fail_on_setup_errors(tooling_result.errors)
@@ -1740,7 +1747,11 @@ def cluster_prepare(
             typer.echo("Error: oMLX tooling setup did not verify cleanly", err=True)
             raise typer.Exit(1)
         typer.echo(f"  latest_omlx: {tooling_result.resolved_omlx_version or 'unknown'}")
-        typer.echo("  upgrade_note: checked and applied if newer")
+        typer.echo(
+            "  upgrade_note: upgrade enabled"
+            if upgrade_omlx
+            else "  upgrade_note: upgrade disabled; keeping current installed version"
+        )
         result = run_omlx_daemon_setup(
             runtime_node,
             admin_user=resolved_admin_user or None,

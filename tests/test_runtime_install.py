@@ -183,7 +183,7 @@ def test_run_omlx_daemon_restart_dry_run_describes_sudo_commands() -> None:
     assert not result.applied
     assert any("sudo -n /usr/bin/install" in c for c in result.commands)
     assert any("sudo -n /bin/launchctl bootstrap system" in c for c in result.commands)
-    assert any("sudo -n /bin/launchctl kickstart -k system/com.thunder-forge.omlx-8018" in c for c in result.commands)
+    assert any('sudo -n /bin/launchctl kickstart -k "system/com.thunder-forge.omlx-8018"' in c for c in result.commands)
 
 
 def test_generate_daemon_sudoers_limits_commands_to_daemon_manager() -> None:
@@ -219,8 +219,12 @@ def test_ensure_omlx_tooling_dry_run_installs_user_local_uv_and_omlx() -> None:
     assert result.omlx_path == "/Users/shag/.local/bin/omlx"
     assert result.tool_spec == "git+https://github.com/jundot/omlx.git"
     assert "OMLX_UPGRADE=0" in result.command
+    assert 'OMLX_TOOL_PYTHON=3.13' in result.command
     assert "https://astral.sh/uv/install.sh" in result.command
-    assert '"$UV_BINARY" tool install "$OMLX_TOOL_SPEC"' in result.command
+    assert '"$UV_BINARY" tool install --python "$OMLX_TOOL_PYTHON" "$OMLX_TOOL_SPEC"' in result.command
+    assert 'OMLX_PYTHON=' in result.command
+    assert 'mlx.core import check failed' in result.command
+    assert 'tool install --python "$OMLX_TOOL_PYTHON" --reinstall "$OMLX_TOOL_SPEC"' in result.command
     assert '"$OMLX_BINARY" --help >/dev/null' in result.command
 
 
@@ -228,7 +232,7 @@ def test_ensure_omlx_tooling_dry_run_upgrade_mode_requests_tool_upgrade() -> Non
     result = ensure_omlx_tooling(_make_runtime_node(), apply=False, upgrade=True)
 
     assert "OMLX_UPGRADE=1" in result.command
-    assert '"$UV_BINARY" tool install --upgrade "$OMLX_TOOL_SPEC"' in result.command
+    assert '"$UV_BINARY" tool install --python "$OMLX_TOOL_PYTHON" --upgrade "$OMLX_TOOL_SPEC"' in result.command
 
 
 def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
@@ -244,6 +248,8 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
                 stdout="/Users/shag/.local/bin/omlx\n",
                 stderr="",
             )
+        if "import mlx.core as mx" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="mlx.core\n", stderr="")
         if cmd == "/Users/shag/.local/bin/omlx --version":
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="omlx 0.4.2.dev2\n", stderr="")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")

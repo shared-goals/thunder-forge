@@ -118,19 +118,64 @@ def system_launchd_bootstrap_script(
 ) -> str:
     label_ref = f"${{{label_var}}}"
     plist_ref = f"${{{plist_path_var}}}"
-    return f"""{run_root} /bin/launchctl enable "system/{label_ref}" 2>/dev/null || true
-set +e
-{run_root} /bin/launchctl bootstrap system "{plist_ref}"
-_tf_bootstrap_exit=$?
-set -e
-if [[ $_tf_bootstrap_exit -ne 0 ]]; then
-    echo "launchd bootstrap failed: label={label_ref} exit=$_tf_bootstrap_exit" >&2
-    echo "launchd plist: {plist_ref}" >&2
-    {run_root} /bin/launchctl print "system/{label_ref}" 2>&1 || true
-    exit $_tf_bootstrap_exit
-fi
-{run_root} /bin/launchctl kickstart -k "system/{label_ref}"
-{run_root} /bin/launchctl print "system/{label_ref}" >/dev/null"""
+    return "\n".join(_system_launchd_bootstrap_commands(label_ref=label_ref, plist_ref=plist_ref, run_root=run_root))
+
+
+def _system_launchd_bootstrap_commands(*, label_ref: str, plist_ref: str, run_root: str) -> list[str]:
+    root = run_root.rstrip()
+    return [
+        f"{root} /bin/launchctl enable \"system/{label_ref}\" 2>/dev/null || true",
+        "set +e",
+        f"{root} /bin/launchctl bootstrap system \"{plist_ref}\"",
+        "_tf_bootstrap_exit=$?",
+        "set -e",
+        "if [[ $_tf_bootstrap_exit -eq 5 ]]; then",
+        "    echo \"launchd bootstrap returned 5; retrying bootout/bootstrap once\" >&2",
+        "    set +e",
+        f"    {root} /bin/launchctl bootout \"system/{label_ref}\" 2>/dev/null || true",
+        f"    {root} /bin/launchctl enable \"system/{label_ref}\" 2>/dev/null || true",
+        f"    {root} /bin/launchctl bootstrap system \"{plist_ref}\"",
+        "    _tf_bootstrap_retry_exit=$?",
+        "    set -e",
+        "    if [[ $_tf_bootstrap_retry_exit -eq 0 ]]; then",
+        "        _tf_bootstrap_exit=0",
+        "    fi",
+        "fi",
+        "if [[ $_tf_bootstrap_exit -eq 5 ]]; then",
+        "    set +e",
+        f"    {root} /bin/launchctl kickstart -k \"system/{label_ref}\"",
+        "    _tf_kickstart_exit=$?",
+        f"    _tf_print_output=$({root} /bin/launchctl print \"system/{label_ref}\" 2>&1)",
+        "    _tf_print_exit=$?",
+        "    set -e",
+        "    if [[ $_tf_print_exit -eq 0 ]] && printf '%s\\n' \"$_tf_print_output\" | /usr/bin/grep -q \"job state = running\"; then",
+        "        echo \"launchd bootstrap returned 5; continuing because service is running\" >&2",
+        "        _tf_bootstrap_exit=0",
+        "    fi",
+        "fi",
+        "if [[ $_tf_bootstrap_exit -ne 0 ]]; then",
+        f"    echo \"launchd bootstrap failed: label={label_ref} exit=$_tf_bootstrap_exit\" >&2",
+        f"    echo \"launchd plist: {plist_ref}\" >&2",
+        f"    {root} /bin/launchctl print \"system/{label_ref}\" 2>&1 || true",
+        "    exit $_tf_bootstrap_exit",
+        "fi",
+        "set +e",
+        f"{root} /bin/launchctl kickstart -k \"system/{label_ref}\"",
+        "_tf_final_kickstart_exit=$?",
+        f"_tf_final_print_output=$({root} /bin/launchctl print \"system/{label_ref}\" 2>&1)",
+        "_tf_final_print_exit=$?",
+        "set -e",
+        "if [[ $_tf_final_print_exit -ne 0 ]]; then",
+        f"    echo \"launchd print failed after bootstrap: label={label_ref} exit=$_tf_final_print_exit\" >&2",
+        "    printf '%s\\n' \"$_tf_final_print_output\" >&2",
+        "    exit $_tf_final_print_exit",
+        "fi",
+        "if [[ $_tf_final_kickstart_exit -ne 0 ]] && ! printf '%s\\n' \"$_tf_final_print_output\" | /usr/bin/grep -q \"job state = running\"; then",
+        f"    echo \"launchd kickstart failed after bootstrap: label={label_ref} exit=$_tf_final_kickstart_exit\" >&2",
+        "    printf '%s\\n' \"$_tf_final_print_output\" >&2",
+        "    exit $_tf_final_kickstart_exit",
+        "fi",
+    ]
 
 
 def system_launchd_stop_wait_command(
@@ -177,25 +222,12 @@ def system_launchd_bootstrap_command(
     plist_path: str,
     root_prefix: str = "/usr/bin/sudo -n ",
 ) -> str:
-    return " ; ".join(
-        [
-            f"{root_prefix}/bin/launchctl enable system/{label} 2>/dev/null || true",
-            "set +e",
-            f"{root_prefix}/bin/launchctl bootstrap system {plist_path}",
-            "_tf_bootstrap_exit=$?",
-            "set -e",
-            (
-                "if [[ $_tf_bootstrap_exit -ne 0 ]]; then "
-                f"echo 'launchd bootstrap failed: label={label} exit='$_tf_bootstrap_exit >&2; "
-                f"echo 'launchd plist: {plist_path}' >&2; "
-                f"{root_prefix}/bin/launchctl print system/{label} 2>&1 || true; "
-                "exit $_tf_bootstrap_exit; "
-                "fi"
-            ),
-            f"{root_prefix}/bin/launchctl kickstart -k system/{label}",
-            f"{root_prefix}/bin/launchctl print system/{label} >/dev/null",
-        ]
+    commands = _system_launchd_bootstrap_commands(
+        label_ref=label,
+        plist_ref=plist_path,
+        run_root=root_prefix,
     )
+    return " ; ".join(line.strip() for line in commands if line.strip())
 
 
 def generate_launchd_plist(spec: LaunchdServiceSpec, *, system_daemon: bool = False) -> str:

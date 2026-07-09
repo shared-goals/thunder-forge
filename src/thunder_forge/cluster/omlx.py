@@ -30,6 +30,7 @@ from thunder_forge.cluster.ssh import scp_content, ssh_run
 
 LAUNCHD_LABEL_PREFIX = "com.thunder-forge.omlx"
 DEFAULT_OMLX_TOOL_SPEC = "git+https://github.com/jundot/omlx.git"
+DEFAULT_OMLX_TOOL_PYTHON = "3.13"
 
 
 def _omlx_process_pattern(*, bind_host: str, port: int) -> str:
@@ -418,6 +419,13 @@ def _omlx_binary_path(node: Node) -> str:
     return f"{node.home_dir}/.local/bin/omlx"
 
 
+def _omlx_python_binary_path(node: Node) -> str:
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+    return f"{node.home_dir}/.local/share/uv/tools/omlx/bin/python3"
+
+
 def _uv_binary_path(node: Node) -> str:
     if node.home_dir is None:
         msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
@@ -442,6 +450,7 @@ def _omlx_tooling_command(
     node: Node,
     *,
     tool_spec: str = DEFAULT_OMLX_TOOL_SPEC,
+    tool_python: str = DEFAULT_OMLX_TOOL_PYTHON,
     upgrade: bool = False,
 ) -> str:
     if node.home_dir is None:
@@ -456,6 +465,7 @@ NODE_HOME={shlex.quote(node.home_dir)}
 UV_BINARY={shlex.quote(uv_binary)}
 OMLX_BINARY={shlex.quote(omlx_binary)}
 OMLX_TOOL_SPEC={shlex.quote(tool_spec)}
+OMLX_TOOL_PYTHON={shlex.quote(tool_python)}
 OMLX_UPGRADE={"1" if upgrade else "0"}
 
 export HOME="$NODE_HOME"
@@ -477,10 +487,10 @@ fi
 
 if [[ ! -x "$OMLX_BINARY" ]]; then
     echo "oMLX: installing $OMLX_TOOL_SPEC"
-    "$UV_BINARY" tool install "$OMLX_TOOL_SPEC"
+    "$UV_BINARY" tool install --python "$OMLX_TOOL_PYTHON" "$OMLX_TOOL_SPEC"
 elif [[ "$OMLX_UPGRADE" == "1" ]]; then
     echo "oMLX: upgrading $OMLX_TOOL_SPEC"
-    "$UV_BINARY" tool install --upgrade "$OMLX_TOOL_SPEC"
+    "$UV_BINARY" tool install --python "$OMLX_TOOL_PYTHON" --upgrade "$OMLX_TOOL_SPEC"
 else
     echo "oMLX: already installed at $OMLX_BINARY"
 fi
@@ -489,6 +499,31 @@ if [[ ! -x "$OMLX_BINARY" ]]; then
     echo "oMLX binary is missing or not executable after install: $OMLX_BINARY" >&2
     exit 1
 fi
+
+OMLX_PYTHON={shlex.quote(_omlx_python_binary_path(node))}
+if [[ ! -x "$OMLX_PYTHON" ]]; then
+    echo "oMLX python interpreter is missing or not executable: $OMLX_PYTHON" >&2
+    exit 1
+fi
+
+    if ! "$OMLX_PYTHON" - <<'PY'
+try:
+    import mlx.core as mx
+except Exception as exc:
+    raise SystemExit(f"mlx.core import check failed: {{exc}}") from exc
+print(mx.__name__)
+PY
+    then
+        echo "oMLX: repairing install with --reinstall"
+        "$UV_BINARY" tool install --python "$OMLX_TOOL_PYTHON" --reinstall "$OMLX_TOOL_SPEC"
+        "$OMLX_PYTHON" - <<'PY'
+try:
+    import mlx.core as mx
+except Exception as exc:
+    raise SystemExit(f"mlx.core import check failed after reinstall: {{exc}}") from exc
+print(mx.__name__)
+PY
+    fi
 
 "$OMLX_BINARY" --help >/dev/null
 echo "oMLX: ready at $OMLX_BINARY"
@@ -501,6 +536,7 @@ def ensure_omlx_tooling(
     apply: bool = True,
     timeout: int = 300,
     tool_spec: str = DEFAULT_OMLX_TOOL_SPEC,
+    tool_python: str = DEFAULT_OMLX_TOOL_PYTHON,
     upgrade: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> OmlxToolingResult:
@@ -514,7 +550,7 @@ def ensure_omlx_tooling(
         uv_path=_uv_binary_path(node),
         omlx_path=_omlx_binary_path(node),
         tool_spec=tool_spec,
-        command=_omlx_tooling_command(node, tool_spec=tool_spec, upgrade=upgrade),
+        command=_omlx_tooling_command(node, tool_spec=tool_spec, tool_python=tool_python, upgrade=upgrade),
     )
     if not apply:
         return result

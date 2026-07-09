@@ -459,7 +459,7 @@ def test_cluster_prepare_dry_run_prints_unified_plan(tmp_path: Path, monkeypatch
     assert "cache: gateway-cache-01 (gateway-cache-01.lan) -> oMLX model hub" in result.stdout
     assert "inference: infer-03 -> oMLX LaunchDaemon" in result.stdout
     assert "would: ensure Olla v0.0.27" in result.stdout
-    assert "would: ensure/upgrade oMLX CLI at /Users/shag/.local/bin/omlx" in result.stdout
+    assert "would: upgrade oMLX CLI at /Users/shag/.local/bin/omlx" in result.stdout
     assert "would: bootstrap infer-03 ssh=shag@infer-03.lan su=admin" in result.stdout
 
 

@@ -12,6 +12,7 @@ from thunder_forge.cluster.services import (
     generate_launchd_plist,
     generate_systemd_unit,
     run_local_commands,
+    system_launchd_bootstrap_command,
     system_launchd_commands,
     systemd_commands,
 )
@@ -85,7 +86,7 @@ def test_system_launchd_commands_can_prompt_for_install_repair() -> None:
     assert "/usr/bin/sudo -p" in commands[3]
     assert "[%h] password: user=%p reason=manage Thunder Forge daemon com.thunder-forge.sample" in commands[3]
     assert "/usr/bin/install" in commands[3]
-    assert "launchctl enable system/com.thunder-forge.sample" in "\n".join(commands)
+    assert 'launchctl enable "system/com.thunder-forge.sample"' in "\n".join(commands)
     assert "/usr/bin/sudo -n" not in "\n".join(commands)
 
 
@@ -107,7 +108,7 @@ def test_system_launchd_commands_can_prompt_through_admin_user() -> None:
     assert "password prompt: host=%h method=sudo user=serpo" in joined
     assert "[%h] password: user=serpo reason=manage Thunder Forge daemon com.thunder-forge.sample" in joined
     assert "/usr/bin/install" in joined
-    assert "launchctl enable system/com.thunder-forge.sample" in joined
+    assert 'launchctl enable "system/com.thunder-forge.sample"' in joined
     assert "/usr/bin/sudo -n /bin/launchctl bootstrap system" in joined
     assert commands[-1] == "true"
 
@@ -330,6 +331,23 @@ def test_run_local_commands_stream_failure_reports_exit_code() -> None:
 
     assert ok is False
     assert "Command failed with exit code 1" in error
+
+
+def test_system_launchd_bootstrap_command_tolerates_exit_five_when_running() -> None:
+    command = system_launchd_bootstrap_command(
+        label="com.thunder-forge.sample",
+        plist_path="/Library/LaunchDaemons/com.thunder-forge.sample.plist",
+    )
+
+    assert "launchd bootstrap returned 5; retrying bootout/bootstrap once" in command
+    assert '/bin/launchctl bootout "system/com.thunder-forge.sample"' in command
+    assert "_tf_print_output=$(" in command
+    assert "job state = running" in command
+    assert "launchd bootstrap returned 5; continuing because service is running" in command
+    assert "continuing because kickstart and print succeeded" not in command
+    assert "launchd bootstrap failed: label=com.thunder-forge.sample exit=" in command
+    assert "_tf_final_kickstart_exit=$?" in command
+    assert "launchd kickstart failed after bootstrap: label=com.thunder-forge.sample exit=" in command
 
 
 def test_run_olla_service_restart_dry_run_describes_frontend_launch_agent(tmp_path: Path) -> None:
