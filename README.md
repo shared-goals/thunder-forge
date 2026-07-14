@@ -15,6 +15,21 @@ Client → TF edge → Olla → oMLX nodes (Apple Silicon)
 - **oMLX** — multi-model inference server for Apple Silicon (MLX native)
 - **Artifacts** — oMLX-native model dirs under `~/.omlx/models/<owner>/<repo>`, e.g. `~/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8`
 
+## Upstream-First Goal
+
+Thunder Forge aims to be the thinnest possible operator layer for a homelab Mac cluster while delegating inference and routing behavior to upstream projects that already solve those concerns well:
+
+- **oMLX as the inference runtime** for Apple Silicon model serving, model lifecycle, and node-level performance behavior.
+- **Olla as the router/balancer** for endpoint health checks, sticky sessions, and request distribution.
+- **Thunder Forge as integration and operations glue** for auth boundary (TF edge), topology/model placement, bootstrap/restart/smoke workflows, and auditable usage reporting.
+
+Design intent:
+
+- Minimize Thunder Forge-specific control-plane logic over time.
+- Reuse existing upstream capabilities before adding new local behavior.
+- Prefer upstream issue/PR contributions for general routing or runtime needs.
+- Keep local stopgaps small, explicit, and removable.
+
 ## Shared Goals Vision
 
 Shared Goals starts from a simple loop: people clarify motives and goals, turn them into texts and memory, then use AI agents to help convert that context into coordinated action. Thunder Forge is the local inference layer for that loop. It should let a household, workshop, lab, or small group run useful AI capacity on machines they control, with private data staying on-premise.
@@ -354,6 +369,42 @@ Summary dimensions include:
 - by model: requests, consumed time, tokens when present
 - node hot-loaded model sets from collected node snapshots
 
+### Cluster Optimization Metrics
+
+Use the following metrics to assess cluster balance and identify model-map/routing improvements.
+
+Core balance signals (per node, per minute):
+
+- `busy_ms`: sum of request `latency_ms` from `logs/tf-edge-access.jsonl` routed to that node in that minute.
+- `capacity_ms`: per-minute node capacity baseline (default `60000` for single-concurrency proxy accounting).
+- `balance_ms = busy_ms - capacity_ms`.
+- `idle_negative_ms = min(balance_ms, 0)`.
+- `queue_positive_ms = max(balance_ms, 0)`.
+
+Cluster overlap signal (most important for model-map tuning):
+
+- **idle+overload overlap minute**: a minute where at least one node has `balance_ms < 0` and at least one other node has `balance_ms > 0`.
+- `overlap_ratio = overlap_minutes / total_minutes`.
+
+Model spread and saturation signals:
+
+- `requests_by_model_node` during overlap windows (which nodes carry each model while others are idle).
+- p50/p95/p99 latency by model and by node.
+- per-node queued-minute percentage (`queue_positive_ms > 0`).
+- per-node idle-minute percentage (`idle_negative_ms < 0`).
+
+Correlated node-state context from `logs/tf-node-metrics.jsonl`:
+
+- `hot_loaded_models` by node over time.
+- health status flags and error samples.
+
+Recommended SLO-style targets:
+
+- Minimize idle+overload overlap ratio.
+- Reduce queue-positive concentration on a single node.
+- Improve per-model request spread across eligible nodes.
+- Keep hot-loaded model placement aligned with observed demand peaks.
+
 For ad hoc SQL analysis, use DuckDB directly over JSONL:
 
 ```bash
@@ -364,6 +415,61 @@ duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
 # or
 make usage-duckdb 2026-06-02
 ```
+
+## Similar Repo Landscape (Olla/oMLX/Mac Cluster)
+
+The current landscape has partial matches but few complete implementations of the exact target architecture (Olla + oMLX + small multi-node Mac homelab cluster).
+
+| Repo | Core idea | Match to TF target | Good findings to reuse |
+|---|---|---|---|
+| [shared-goals/thunder-forge](https://github.com/shared-goals/thunder-forge) | TF edge + Olla routing + oMLX nodes for Apple Silicon | **Direct match** | Existing baseline for auth boundary, model aliases, node metrics, and operator workflows |
+| [JoacoEsteban/omlx-ollama-proxy](https://github.com/JoacoEsteban/omlx-ollama-proxy) | Lightweight Ollama-compatible proxy in front of oMLX | **Partial** (bridge pattern, not cluster orchestration) | Clean API translation pattern (`/api/tags` and `/api/chat`), minimal adapter philosophy, simple client compatibility layer |
+| [ThiagoLPereira/ollama-swarm-balancer](https://github.com/ThiagoLPereira/ollama-swarm-balancer) | Async application-level balancer for multiple Ollama nodes | **Partial** (balancing patterns, no oMLX/Olla stack) | Round-robin + health-check failover pattern, connection pooling behavior, per-request node attribution + latency annotations |
+| [robert-mcdermott/ollama-batch-cluster](https://github.com/robert-mcdermott/ollama-batch-cluster) | Batch processing across many Ollama instances/hosts | **Partial** (distributed execution ideas, not Mac/oMLX) | Host-level parallel dispatch ideas, simple cluster config for multi-host fanout, throughput-oriented benchmarking examples |
+
+Interpretation:
+
+- There is no widely adopted public repo that already ships the full Olla + oMLX + 2-4 Mac node homelab operator workflow.
+- Thunder Forge should continue as the integration reference while pushing reusable behaviors upstream to Olla/oMLX.
+
+## Reuse Plan and Roadmap
+
+The roadmap is upstream-first: integrate existing upstream features first, then propose upstream improvements before expanding Thunder Forge-local logic.
+
+### Phase 1: Measure and Attribute (now)
+
+- Standardize balance/overlap metrics in `usage report` outputs.
+- Add overlap-window views by model/node/time for model-map decisions.
+- Correlate edge-access pressure with node hot-loaded model snapshots.
+
+### Phase 2: Thin Integration Enhancements
+
+- Keep balancing and sticky behavior in Olla configuration, not custom TF routing code.
+- Keep inference scheduling/runtime behaviors in oMLX.
+- Keep TF changes focused on topology config, auth boundary, observability, and operator ergonomics.
+
+### Phase 3: Upstream Contributions
+
+Open upstream issues/PRs when the need is generic:
+
+- **Olla candidates**:
+	- richer per-endpoint load/queue telemetry surfaces for operators,
+	- model-aware routing hints that remain generic,
+	- clearer balancing introspection for sticky-session-heavy workloads.
+- **oMLX candidates**:
+	- explicit queue/active-job fields in status for external schedulers/operators,
+	- stronger runtime model-state telemetry for hot-loaded/cold-loaded transitions,
+	- scheduling observability hooks that reduce local heuristics.
+
+### Phase 4: Deletion-Oriented Cleanup
+
+- Remove Thunder Forge-local stopgaps once upstream support lands.
+- Keep a small migration checklist per removed workaround.
+- Track net reduction of Thunder Forge-specific control-plane code as a success metric.
+
+Execution rule:
+
+- For each feature request, decide in order: **reuse upstream as-is -> wire existing upstream capability -> contribute upstream -> only then add minimal local temporary workaround**.
 
 ### OpenCode Provider
 
