@@ -2443,7 +2443,12 @@ def usage_report(
     node_metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
     if period is None:
         period = _usage_report_default_period()
-    summary = summarize_daily_usage(access_log_path, period=period, node_metrics_path=node_metrics_path)
+    summary = summarize_daily_usage(
+        access_log_path,
+        period=period,
+        node_metrics_path=node_metrics_path,
+        excluded_models=config.operations.usage.exclude_models,
+    )
 
     if json_output:
         typer.echo(json.dumps(summary.to_json_dict(), indent=2, sort_keys=True))

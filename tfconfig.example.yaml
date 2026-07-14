@@ -34,6 +34,10 @@ operations:
     transport: auto
     timeout: 7200
     restart_runtime: true
+  usage:
+    # Exclude non-LLM tool models from usage model breakdowns.
+    exclude_models:
+      - MarkItDown
 
 # ── Model registry ──────────────────────────────────
 # Add new models here. Model ids are public aliases by default.

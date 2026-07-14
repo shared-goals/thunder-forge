@@ -13,6 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
+_DEFAULT_MODELS_EXCLUDED_FROM_USAGE = {"markitdown"}
+
+
 def _parse_timestamp(raw: object) -> datetime | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -83,6 +86,17 @@ def _as_non_negative_int(raw: object) -> int | None:
 
 def _ordered_list_map(values: dict[str, list[str]]) -> dict[str, list[str]]:
     return {key: values[key] for key in sorted(values)}
+
+
+def _normalize_excluded_models(excluded_models: list[str] | set[str] | None) -> set[str]:
+    if excluded_models is None:
+        return set(_DEFAULT_MODELS_EXCLUDED_FROM_USAGE)
+    normalized = {item.strip().lower() for item in excluded_models if isinstance(item, str) and item.strip()}
+    return normalized
+
+
+def _include_model_in_usage(model_name: str, excluded_models: set[str]) -> bool:
+    return model_name.strip().lower() not in excluded_models
 
 
 def extract_hot_loaded_models(model_statuses: dict[str, dict[str, object]]) -> list[str]:
@@ -168,6 +182,7 @@ def summarize_daily_usage(
     *,
     period: str | None = None,
     node_metrics_path: Path | None = None,
+    excluded_models: list[str] | set[str] | None = None,
 ) -> DailyUsageSummary:
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
     if period == "all":
@@ -187,6 +202,7 @@ def summarize_daily_usage(
     requests_total = 0
     invalid_lines = 0
     consumed_ms_total = 0
+    excluded_model_names = _normalize_excluded_models(excluded_models)
 
     records, invalid = _load_jsonl_lines(access_log_path)
     invalid_lines += invalid
@@ -219,19 +235,19 @@ def summarize_daily_usage(
 
         requests_by_user[client_id] += 1
         consumed_ms_by_user[client_id] += latency_ms
-        if model_name:
+        if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_user_model[client_id][model_name] += 1
 
         if node_name:
             requests_by_node[node_name] += 1
             requests_by_node_user[node_name][client_id] += 1
             consumed_ms_by_node[node_name] += latency_ms
-            if model_name:
+            if model_name and _include_model_in_usage(model_name, excluded_model_names):
                 requests_by_node_model[node_name][model_name] += 1
             if timestamp is not None:
                 requests_by_node_hour[node_name][hour_bucket] += 1
 
-        if model_name:
+        if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_model[model_name] += 1
             consumed_ms_by_model[model_name] += latency_ms
 
@@ -260,9 +276,15 @@ def summarize_daily_usage(
             raw_models = payload.get("hot_loaded_models")
             hot_loaded_models: list[str] = []
             if isinstance(raw_models, list):
-                hot_loaded_models = [item.strip() for item in raw_models if isinstance(item, str) and item.strip()]
+                hot_loaded_models = [
+                    item.strip()
+                    for item in raw_models
+                    if isinstance(item, str)
+                    and item.strip()
+                    and _include_model_in_usage(item, excluded_model_names)
+                ]
             hot_loaded_count = _as_non_negative_int(payload.get("hot_loaded_count"))
-            if hot_loaded_count is None and isinstance(raw_models, list):
+            if isinstance(raw_models, list):
                 hot_loaded_count = len(hot_loaded_models)
             if hot_loaded_count is None and not hot_loaded_models:
                 continue

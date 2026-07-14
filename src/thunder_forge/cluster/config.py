@@ -34,6 +34,7 @@ DEFAULT_SYNC_TRANSPORT = "auto"
 DEFAULT_SYNC_TIMEOUT = 7200
 DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
+DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 
 
 class RuntimeType(StrEnum):
@@ -179,9 +180,15 @@ class OperationSyncConfig:
 
 
 @dataclass
+class OperationUsageConfig:
+    exclude_models: list[str] = field(default_factory=lambda: list(DEFAULT_USAGE_EXCLUDE_MODELS))
+
+
+@dataclass
 class OperationConfig:
     smoke: OperationSmokeConfig = field(default_factory=OperationSmokeConfig)
     sync: OperationSyncConfig = field(default_factory=OperationSyncConfig)
+    usage: OperationUsageConfig = field(default_factory=OperationUsageConfig)
 
 
 @dataclass(init=False)
@@ -387,6 +394,25 @@ def _parse_transport(raw: object, *, name: str, default: str) -> str:
     return value
 
 
+def _parse_non_empty_string_list(raw: object, *, name: str, default: list[str]) -> list[str]:
+    if raw is None:
+        return list(default)
+    if not isinstance(raw, list):
+        msg = f"{name} must be a list of strings"
+        raise ValueError(msg)
+    parsed: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            msg = f"{name} must be a list of strings"
+            raise ValueError(msg)
+        value = item.strip()
+        if not value:
+            msg = f"{name} entries must not be empty"
+            raise ValueError(msg)
+        parsed.append(value)
+    return parsed
+
+
 def _parse_services(raw: object) -> ServiceConfig:
     if raw is None:
         raw = {}
@@ -459,6 +485,10 @@ def _parse_operations(raw: object) -> OperationConfig:
     if not isinstance(sync_raw, dict):
         msg = "operations.sync must be a mapping"
         raise ValueError(msg)
+    usage_raw = raw.get("usage", {}) or {}
+    if not isinstance(usage_raw, dict):
+        msg = "operations.usage must be a mapping"
+        raise ValueError(msg)
     return OperationConfig(
         smoke=OperationSmokeConfig(
             alias=str(smoke_raw.get("alias", "")).strip(),
@@ -486,6 +516,13 @@ def _parse_operations(raw: object) -> OperationConfig:
                 name="operations.sync.restart_runtime",
                 default=DEFAULT_SYNC_RESTART_RUNTIME,
             ),
+        ),
+        usage=OperationUsageConfig(
+            exclude_models=_parse_non_empty_string_list(
+                usage_raw.get("exclude_models"),
+                name="operations.usage.exclude_models",
+                default=DEFAULT_USAGE_EXCLUDE_MODELS,
+            )
         ),
     )
 
@@ -743,8 +780,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
                 "enabled": True,
                 "idle_ttl_seconds": 600,
                 "max_sessions": 10000,
-                "key_sources": ["session_header", "prefix_hash"],
-                "prefix_hash_bytes": 2048,
+                "key_sources": ["session_header"],
             },
             "retry": {
                 "enabled": True,

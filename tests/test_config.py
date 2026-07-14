@@ -110,6 +110,7 @@ def test_parse_config_admin_users() -> None:
     assert config.operations.sync.transport == "management"
     assert config.operations.sync.timeout == 123
     assert config.operations.sync.restart_runtime is False
+    assert config.operations.usage.exclude_models == ["MarkItDown"]
     assert config.nodes["gateway-cache-01"].roles == ["gateway", "cache"]
     assert config.nodes["gateway-cache-01"].admin_user == "serpo"
     assert config.nodes["infer-03"].user == "shag"
@@ -170,6 +171,37 @@ def test_parse_config_log_retention_days_default() -> None:
     )
 
     assert config.services.log_retention_days == DEFAULT_LOG_RETENTION_DAYS
+
+
+def test_parse_config_usage_exclude_models_override() -> None:
+    config = parse_cluster_config(
+        {
+            "operations": {
+                "usage": {
+                    "exclude_models": ["MarkItDown", "ToolX"],
+                }
+            },
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.operations.usage.exclude_models == ["MarkItDown", "ToolX"]
+
+
+def test_parse_config_rejects_invalid_usage_exclude_models() -> None:
+    with pytest.raises(ValueError, match="operations.usage.exclude_models"):
+        parse_cluster_config(
+            {
+                "operations": {
+                    "usage": {
+                        "exclude_models": ["MarkItDown", "   "],
+                    }
+                },
+                "models": {},
+                "nodes": {},
+            }
+        )
 
 
 def test_parse_config_rejects_role_field() -> None:
@@ -491,7 +523,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
     assert parsed["proxy"]["engine"] == "olla"
     assert parsed["proxy"]["connection_timeout"] == "5s"
     assert parsed["proxy"]["sticky_sessions"]["enabled"] is True
-    assert parsed["proxy"]["sticky_sessions"]["key_sources"] == ["session_header", "auth_header", "prefix_hash"]
+    assert parsed["proxy"]["sticky_sessions"]["key_sources"] == ["session_header"]
     endpoints = parsed["discovery"]["static"]["endpoints"]
     assert endpoints == [
         {
