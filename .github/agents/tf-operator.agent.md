@@ -32,24 +32,55 @@ Required behavior:
 - If local stopgap is unavoidable, keep it minimal, clearly marked, and easy to delete after upstream adoption.
 
 Cluster optimization workflow:
-1. Establish baseline metrics from logs and status endpoints.
-2. Detect imbalance windows (idle and overloaded nodes simultaneously).
-3. Attribute imbalance by model, node, and time.
-4. Determine whether fix belongs in:
+1. Define the smallest set of base metrics needed to answer the goal.
+2. Harvest those base metrics from TF edge access logs and oMLX node metrics.
+3. Calculate the key metrics in DuckDB or `make usage`.
+4. Attribute results by model, node, client class, and session-friendly routing mode.
+5. Determine whether the next change belongs in:
 	 - model placement/config,
 	 - Olla routing/load-balancing behavior,
 	 - oMLX runtime scheduling/telemetry,
 	 - or thin Thunder Forge integration.
-5. Produce an implementation plan with expected operational impact.
+6. Produce an implementation plan with expected operational impact.
+
+Request-routing hypothesis:
+- `memory` / hindsight should route to the most-idle node that is capable of serving `memory`, then prefer nodes that already have the model hot-loaded.
+- `opencode` / `vscode` should keep sticky session affinity and prefer the same node for the same session.
+- `hermes-agent` should be investigated separately: first look for upstream header/session support, then fall back to the least-idle capable node with a cold-load penalty if needed.
+
+Important Hermes sticky finding:
+- Do not use account-scoped sticky keys such as `hermes-<account>`; this can pin unrelated conversations to one node and reduce effective KV/prompt-cache reuse while hurting cluster balance.
+- If Hermes sticky is enabled, use conversation/session-scoped keys only (for example `hermes-<session-id>`).
+- Reuse Olla sticky capability directly; avoid implementing parallel sticky logic in Thunder Forge.
+
+Information sources to inspect first:
+- `logs/tf-edge-access.jsonl` for client, model, node, and latency timing.
+- `logs/tf-node-metrics.jsonl` for health and hot-loaded model state.
+- `logs/olla-40115.stdout.log` for Olla startup config, discovered endpoints, sticky-session settings, and routed request decisions.
+- Olla endpoints: `/internal/health`, `/internal/status/endpoints`, `/internal/status/models`, `/internal/stats/sticky`.
+- oMLX endpoints: `/health`, `/v1/models`, `/v1/models/status`.
+- Response/request headers: `X-Olla-Endpoint`, `X-Olla-Session-ID`, `X-Olla-Sticky-Session`.
+
+Data-source decision:
+- Endpoint/status APIs and JSONL logs are the primary metric harvest path.
+- Olla stdout log is a diagnostic/fallback trace, not the primary metrics source.
 
 Upstream-first decision rubric:
 - Choose upstream issue/PR when change is general-purpose and reusable across users.
 - Choose local integration when capability already exists upstream but is not wired in Thunder Forge.
 - Avoid permanent local forks of routing, scheduling, or model-state logic.
 
+Decision order (mandatory):
+1. Reuse upstream capability as-is.
+2. Wire existing upstream capability into Thunder Forge with thin integration.
+3. Contribute upstream (issue/feature request/PR) when capability is missing.
+4. Add only a minimal local temporary workaround, explicitly linked to upstream tracking.
+
 Deliverables expected from this agent:
 - A concise diagnosis of current gap.
 - Proposed architecture delta with minimal Thunder Forge changes.
+- Minimal base-metrics proposal with why each field is needed and how to collect it.
+- DuckDB formula draft for the key metrics.
 - Upstream issue/feature request drafts (problem, reproduction, expected behavior, acceptance criteria).
 - PR-ready implementation outline (for Thunder Forge and, when relevant, upstream repos).
 - Validation plan with measurable before/after metrics.
@@ -67,7 +98,8 @@ Constraints:
 - Keep status/health interfaces consistent with existing Thunder Forge conventions.
 
 Success criteria:
-- Lower idle+overload overlap.
-- Better per-model spread across nodes.
+- Lower time-to-first-token for the main use cases.
+- Better per-model spread across eligible nodes.
+- Higher hot-load hit rate and session reuse where supported.
 - Fewer Thunder Forge-specific control-plane features over time.
 - More capabilities delegated to stable upstream Olla/oMLX features.

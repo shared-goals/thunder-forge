@@ -369,41 +369,103 @@ Summary dimensions include:
 - by model: requests, consumed time, tokens when present
 - node hot-loaded model sets from collected node snapshots
 
-### Cluster Optimization Metrics
+### Minimal Metric Strategy
 
-Use the following metrics to assess cluster balance and identify model-map/routing improvements.
+Thunder Forge should collect only the smallest set of base signals needed to answer two questions:
 
-Core balance signals (per node, per minute):
+1. How fast does a request reach its first useful answer?
+2. How well is the cluster being used across nodes, models, and sessions?
 
-- `busy_ms`: sum of request `latency_ms` from `logs/tf-edge-access.jsonl` routed to that node in that minute.
-- `capacity_ms`: per-minute node capacity baseline (default `60000` for single-concurrency proxy accounting).
-- `balance_ms = busy_ms - capacity_ms`.
-- `idle_negative_ms = min(balance_ms, 0)`.
-- `queue_positive_ms = max(balance_ms, 0)`.
+Base signals to collect:
 
-Cluster overlap signal (most important for model-map tuning):
+#### `logs/tf-edge-access.jsonl`
 
-- **idle+overload overlap minute**: a minute where at least one node has `balance_ms < 0` and at least one other node has `balance_ms > 0`.
-- `overlap_ratio = overlap_minutes / total_minutes`.
+| Field | Keep? | Why |
+|---|---|---|
+| `timestamp` | useful | Required for all time-bucketed metrics |
+| `client_id` | useful | Needed to split by user/account/use-case class |
+| `model` | useful | Needed to split latency and routing by model |
+| `node_name` | useful | Needed to attribute routing outcomes to nodes |
+| `time_to_first_token_ms` | useful | Primary latency metric for "shortest wait before answer" |
+| `completion_latency_ms` | secondary only | Keep only if total-response analysis is needed; not required for the key cluster metrics |
+| `session_key` or sticky header value | useful when available | Needed to measure session reuse and sticky routing effectiveness |
 
-Model spread and saturation signals:
+#### `logs/tf-node-metrics.jsonl`
 
-- `requests_by_model_node` during overlap windows (which nodes carry each model while others are idle).
-- p50/p95/p99 latency by model and by node.
-- per-node queued-minute percentage (`queue_positive_ms > 0`).
-- per-node idle-minute percentage (`idle_negative_ms < 0`).
+| Field | Keep? | Why |
+|---|---|---|
+| `timestamp` | useful | Required for joining with edge-access by minute or sample time |
+| `node_name` | useful | Required to attribute metrics to a node |
+| `health_ok` / `status_ok` | useful | Needed to exclude unhealthy nodes from routing decisions |
+| `hot_loaded_models` | useful | Needed to measure hot-load hit rate and warm-node reuse |
+| `active_jobs` | new, needed if oMLX exposes it | Needed to measure node pressure directly instead of inferring it indirectly |
+| `queue_depth` | new, needed if oMLX exposes it | Needed to measure queue time / overload pressure directly |
+| `cache_hit` / `prompt_cache_hit` | new, needed if oMLX exposes it | Needed to measure reuse of prior session/request context |
 
-Correlated node-state context from `logs/tf-node-metrics.jsonl`:
+Key metrics to compute from those base signals:
 
-- `hot_loaded_models` by node over time.
-- health status flags and error samples.
+| Key metric | Formula |
+|---|---|
+| Time-to-first-token p95 | `percentile(time_to_first_token_ms, 95)` grouped by model, client class, and node |
+| Hot-load hit rate | `requests where chosen node had model in hot_loaded_models / total requests` |
+| Sticky/session reuse rate | `requests with same session_key routed to the same node as the previous request for that session / total repeat-session requests` |
+| Model spread | `count(distinct node_name serving model) / count(distinct eligible nodes for that model)` |
+| Routing regret | `chosen_node_ttf_ms - min(ttf_ms over eligible nodes in same time bucket)` |
+| Node pressure spread | `max(active_jobs + queue_depth) - min(active_jobs + queue_depth)` across eligible nodes in the same time bucket |
+| Cluster imbalance ratio | `minutes where max(node_pressure) > 0 and min(node_pressure) = 0 / total minutes` |
 
-Recommended SLO-style targets:
+What to avoid:
 
-- Minimize idle+overload overlap ratio.
-- Reduce queue-positive concentration on a single node.
-- Improve per-model request spread across eligible nodes.
-- Keep hot-loaded model placement aligned with observed demand peaks.
+- Do not keep base metrics that are not used to compute one of the key metrics above.
+- Do not add secondary metrics unless they directly improve a routing or placement decision.
+- Prefer the smallest set of measurements that can drive the next implementation step.
+
+Implementation rule:
+
+- Collect base metrics first, calculate key metrics in DuckDB, then use the results to refine Olla routing, oMLX observability, or Thunder Forge integration only when needed.
+
+### Request Routing by Use Case
+
+The routing policy should be use-case aware, not global.
+
+| Use case | Desired routing rule | Why |
+|---|---|---|
+| `memory` / hindsight | Route to the most-idle node that is capable of serving `memory`, then prefer nodes with the model already hot-loaded | Minimize total wait time without wasting a warm node on a busier request |
+| `opencode` / `vscode` | Keep sticky session affinity and prefer the same node for the same session | Reuse model load and prompt/session cache to reduce time-to-first-token |
+| `hermes-agent` | Investigate upstream/session-header support first; until then use the least-idle capable node with a cold-load penalty | Preserve latency while avoiding a weaker sticky strategy than the editor clients |
+
+Important Hermes sticky finding:
+
+- Injecting a sticky key as `hermes-<account>` is too coarse: it can pin unrelated conversations from one user to one node, which reduces effective KV/prompt-cache reuse and harms cluster balance.
+- If sticky is used for Hermes, the key must be conversation/session-scoped (`hermes-<session-id>`), not account-scoped.
+- Reuse Olla sticky capability directly; avoid implementing a parallel Thunder Forge sticky router.
+
+### Information Sources To Inspect
+
+The following sources are the first places to look when debugging routing or building better metrics:
+
+| Source | What it tells us | How to query it |
+|---|---|---|
+| `logs/tf-edge-access.jsonl` | Per-request client, model, node, and latency timing | Read JSONL directly or summarize with `make usage` |
+| `logs/tf-node-metrics.jsonl` | Node health plus hot-loaded model sets | Read JSONL directly or collect via `usage collect-node-metrics` |
+| `logs/olla-40115.stdout.log` | Olla startup config, discovered endpoints, model filters, sticky-session settings, and routed request decisions | Read the log directly if available; it is a useful operational trace |
+| `GET /internal/health` | Olla liveness/ready status | Probe Olla directly |
+| `GET /internal/status/endpoints` | Which endpoints are healthy/routable | Probe Olla directly |
+| `GET /internal/status/models` | Model catalog by endpoint | Probe Olla directly |
+| `GET /internal/stats/sticky` | Sticky-session statistics | Probe Olla directly |
+| `GET /health` on oMLX | Node-level runtime health | Probe each oMLX node directly |
+| `GET /v1/models` on oMLX | Models visible on the node | Probe each oMLX node directly |
+| `GET /v1/models/status` on oMLX | Model load state and runtime status | Probe each oMLX node directly |
+| `X-Olla-Endpoint` response header | Which backend actually handled a request | Inspect routed responses |
+| `X-Olla-Session-ID` request/response header | Caller-provided session identity for stickiness | Send an explicit sticky-session id |
+| `X-Olla-Sticky-Session` response header | Sticky-session outcome (`hit`, `miss`, `repin`, `disabled`) | Inspect routed responses |
+
+Olla log observations from the local stdout trace support the same model: startup loads `config/olla-config.yaml`, registers endpoints, applies model filters, enables sticky-session affinity, and logs each routed request with the selected endpoint and completion latency. That makes `logs/olla-40115.stdout.log` a useful complement to the JSONL summaries when diagnosing routing decisions.
+
+Data-source decision:
+
+- Use Olla/oMLX endpoints and TF JSONL logs as the primary harvest path for metrics.
+- Use `logs/olla-40115.stdout.log` as a diagnostic/fallback trace, not as the primary metrics source.
 
 For ad hoc SQL analysis, use DuckDB directly over JSONL:
 
@@ -438,26 +500,26 @@ The roadmap is upstream-first: integrate existing upstream features first, then 
 
 ### Phase 1: Measure and Attribute (now)
 
-- Standardize balance/overlap metrics in `usage report` outputs.
-- Add overlap-window views by model/node/time for model-map decisions.
-- Correlate edge-access pressure with node hot-loaded model snapshots.
+- Harvest the minimal base metrics from TF edge access logs and oMLX node snapshots.
+- Encode the key metric calculations in DuckDB and surface them in `make usage`.
+- Compare request latency by model, client class, node, and session-friendly client type.
 
 ### Phase 2: Thin Integration Enhancements
 
 - Keep balancing and sticky behavior in Olla configuration, not custom TF routing code.
 - Keep inference scheduling/runtime behaviors in oMLX.
-- Keep TF changes focused on topology config, auth boundary, observability, and operator ergonomics.
+- Keep TF changes focused on topology config, auth boundary, minimal observability, and operator ergonomics.
 
 ### Phase 3: Upstream Contributions
 
 Open upstream issues/PRs when the need is generic:
 
 - **Olla candidates**:
-	- richer per-endpoint load/queue telemetry surfaces for operators,
+	- richer routing telemetry for endpoint decisions,
 	- model-aware routing hints that remain generic,
 	- clearer balancing introspection for sticky-session-heavy workloads.
 - **oMLX candidates**:
-	- explicit queue/active-job fields in status for external schedulers/operators,
+	- explicit time-to-first-token and cache/reuse fields in status for external schedulers/operators,
 	- stronger runtime model-state telemetry for hot-loaded/cold-loaded transitions,
 	- scheduling observability hooks that reduce local heuristics.
 
