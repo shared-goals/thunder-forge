@@ -72,6 +72,7 @@ def test_parse_config_admin_users() -> None:
                     "version": "v9.9.9",
                     "bin_dir": ".tmp/custom-olla",
                     "local_binary": "olla/bin/olla",
+                    "log_level": "info",
                 },
             },
             "operations": {
@@ -104,6 +105,7 @@ def test_parse_config_admin_users() -> None:
     assert config.services.olla_version_pinned is True
     assert config.services.olla_bin_dir == ".tmp/custom-olla"
     assert config.services.olla_local_binary == "olla/bin/olla"
+    assert config.services.olla_log_level == "info"
     assert config.operations.smoke.alias == "memory"
     assert config.operations.smoke.client_id == "admin"
     assert config.operations.smoke.timeout == 12
@@ -133,6 +135,7 @@ def test_parse_config_olla_version_is_unpinned_when_olla_block_omits_version() -
 
     assert config.services.olla_version == "v0.0.27"
     assert config.services.olla_version_pinned is False
+    assert config.services.olla_log_level == "debug"
 
 
 def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing() -> None:
@@ -145,6 +148,7 @@ def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing(
 
     assert config.services.olla_version == "v0.0.27"
     assert config.services.olla_version_pinned is True
+    assert config.services.olla_log_level == "debug"
 
 
 def test_parse_config_rejects_empty_olla_local_binary() -> None:
@@ -519,6 +523,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
     assert result.startswith("# AUTO-GENERATED")
     assert parsed["server"]["host"] == "127.0.0.1"
     assert parsed["server"]["port"] == 40115
+    assert parsed["logging"]["level"] == "debug"
     assert parsed["logging"]["output"] == str((tmp_path / "logs" / "olla.log").resolve())
     assert parsed["proxy"]["engine"] == "olla"
     assert parsed["proxy"]["connection_timeout"] == "5s"
@@ -547,7 +552,7 @@ def test_generate_olla_config_uses_service_port_and_ignores_env(monkeypatch) -> 
     monkeypatch.setenv("TF_OLLA_PORT", "45115")
     config = parse_cluster_config(
         {
-            "services": {"olla": {"port": 46115}},
+            "services": {"olla": {"port": 46115, "log_level": "warning"}},
             "models": {
                 "memory": {
                     "source": {"repo": "mlx-community/gpt-oss-20b-MXFP4-Q8"},
@@ -569,6 +574,7 @@ def test_generate_olla_config_uses_service_port_and_ignores_env(monkeypatch) -> 
     parsed = yaml_lib.safe_load(generate_olla_config(config))
 
     assert parsed["server"]["port"] == 46115
+    assert parsed["logging"]["level"] == "warning"
 
 
 def test_runtime_port_defaults_to_shared_omlx_service_port() -> None:

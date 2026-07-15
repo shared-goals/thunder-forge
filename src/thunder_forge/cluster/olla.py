@@ -395,7 +395,7 @@ def _olla_service_spec(
         label=olla_launchd_label(port=port),
         program_arguments=[str(binary_path), "-config", str(config_file)],
         working_directory=str(working_directory or repo_root),
-        stdout_log=str(log_dir / f"olla-{port}.stdout.log"),
+        stdout_log="/dev/null",
         stderr_log=str(log_dir / f"olla-{port}.stderr.log"),
         environment={
             "HOME": str(user_home),

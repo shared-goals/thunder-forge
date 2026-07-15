@@ -72,6 +72,24 @@ def test_generate_systemd_unit_with_environment_and_user() -> None:
     assert "WantedBy=multi-user.target" in unit
 
 
+def test_generate_systemd_unit_uses_null_stdout_for_dev_null() -> None:
+    spec = LaunchdServiceSpec(
+        name="sample",
+        label="com.thunder-forge.sample",
+        program_arguments=["/usr/local/bin/sample", "serve"],
+        working_directory="/tmp/thunder-forge",
+        stdout_log="/dev/null",
+        stderr_log="/tmp/sample.err",
+        environment={"HOME": "/home/shag", "PATH": "/usr/bin:/bin"},
+        user="shag",
+    )
+
+    unit = generate_systemd_unit(spec)
+
+    assert "StandardOutput=null" in unit
+    assert "StandardError=append:/tmp/sample.err" in unit
+
+
 def test_system_launchd_commands_can_prompt_for_install_repair() -> None:
     commands = system_launchd_commands(
         label="com.thunder-forge.sample",
@@ -361,7 +379,8 @@ def test_run_olla_service_restart_dry_run_describes_frontend_launch_agent(tmp_pa
     assert result.staging_plist_path == ""
     assert str(repo_root / "olla-bin/olla") in result.plist_content
     assert str(repo_root / "config/olla-config.yaml") in result.plist_content
-    assert str(repo_root / "logs/olla-40115.stdout.log") in result.plist_content
+    assert "/dev/null" in result.plist_content
+    assert str(repo_root / "logs/olla-40115.stderr.log") in result.plist_content
     assert any("launchctl bootstrap gui/$(id -u)" in command for command in result.commands)
     assert any(
         "launchctl kickstart -k gui/$(id -u)/com.thunder-forge.olla-40115" in command for command in result.commands

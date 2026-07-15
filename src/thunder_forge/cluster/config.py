@@ -30,6 +30,7 @@ DEFAULT_OLLA_VERSION = "v0.0.27"
 DEFAULT_OLLA_OS = "macos"
 DEFAULT_OLLA_ARCH = "arm64"
 DEFAULT_OLLA_BIN_DIR = "olla-bin"
+DEFAULT_OLLA_LOG_LEVEL = "debug"
 DEFAULT_SYNC_TRANSPORT = "auto"
 DEFAULT_SYNC_TIMEOUT = 7200
 DEFAULT_SYNC_RESTART_RUNTIME = True
@@ -158,6 +159,7 @@ class ServiceConfig:
     olla_arch: str = DEFAULT_OLLA_ARCH
     olla_bin_dir: str = DEFAULT_OLLA_BIN_DIR
     olla_local_binary: str = ""
+    olla_log_level: str = DEFAULT_OLLA_LOG_LEVEL
     omlx_port: int = DEFAULT_OMLX_PORT
     edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
@@ -464,6 +466,11 @@ def _parse_services(raw: object) -> ServiceConfig:
             default="",
         )
         or "",
+        olla_log_level=_parse_optional_non_empty_string(
+            olla_raw.get("log_level"),
+            name="services.olla.log_level",
+            default=DEFAULT_OLLA_LOG_LEVEL,
+        ) or DEFAULT_OLLA_LOG_LEVEL,
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
         edge_access_log=edge_access_log,
         log_retention_days=log_retention_days,
@@ -819,7 +826,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
             },
         },
         "logging": {
-            "level": "info",
+            "level": config.services.olla_log_level,
             "format": "json",
             "output": log_output_path,
         },

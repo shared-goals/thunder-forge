@@ -280,6 +280,8 @@ def generate_systemd_unit(spec: LaunchdServiceSpec) -> str:
     )
     exec_start = " ".join(shlex.quote(argument) for argument in spec.program_arguments)
     user_line = f"User={spec.user}\n" if spec.user else ""
+    stdout_line = "StandardOutput=null" if spec.stdout_log == "/dev/null" else f"StandardOutput=append:{spec.stdout_log}"
+    stderr_line = f"StandardError=append:{spec.stderr_log}"
 
     return (
         "[Unit]\n"
@@ -294,8 +296,8 @@ def generate_systemd_unit(spec: LaunchdServiceSpec) -> str:
         f"ExecStart={exec_start}\n"
         "Restart=always\n"
         "RestartSec=2\n"
-        f"StandardOutput=append:{spec.stdout_log}\n"
-        f"StandardError=append:{spec.stderr_log}\n\n"
+        f"{stdout_line}\n"
+        f"{stderr_line}\n\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
     )

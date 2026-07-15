@@ -1917,6 +1917,7 @@ def test_generate_olla_config_cli_writes_generated_yaml(tmp_path: Path, monkeypa
     assert output_path.exists()
     parsed = yaml_lib.safe_load(output_path.read_text())
     assert parsed["server"]["port"] == 40115
+    assert parsed["logging"]["level"] == "debug"
     assert parsed["logging"]["output"] == str((repo / "logs" / "olla.log").resolve())
     assert parsed["model_aliases"] == {"qwen3-1.7b-omlx-infer-03-test": ["Qwen3-1.7B-4bit"]}
     assert f"generated: {output_path}" in result.stdout
