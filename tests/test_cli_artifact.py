@@ -965,7 +965,7 @@ def test_cluster_sync_with_prune_removes_unassigned_node_cache_models(tmp_path: 
         calls.append((plan.repo_id, timeout))
         return subprocess.CompletedProcess(args=plan.rsync_args, returncode=0)
 
-    def fake_ssh_run(user, ip, cmd, *, timeout=30, stream=False, shell=None, node_name=None, tty=False):
+    def fake_ssh_run(user, ip, cmd, *, timeout=30, stream=False, shell=None, node_id=None, tty=False):
         if "find \"$MODELS_DIR\" -mindepth 2 -maxdepth 2 -type d" in cmd:
             return subprocess.CompletedProcess(
                 args=[cmd],

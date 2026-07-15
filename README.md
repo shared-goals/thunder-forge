@@ -385,7 +385,7 @@ Base signals to collect:
 | `timestamp` | useful | Required for all time-bucketed metrics |
 | `client_id` | useful | Needed to split by user/account/use-case class |
 | `model` | useful | Needed to split latency and routing by model |
-| `node_name` | useful | Needed to attribute routing outcomes to nodes |
+| `node_id` | useful | Needed to attribute routing outcomes to nodes |
 | `time_to_first_token_ms` | useful | Primary latency metric for "shortest wait before answer" |
 | `completion_latency_ms` | secondary only | Keep only if total-response analysis is needed; not required for the key cluster metrics |
 | `session_key` or sticky header value | useful when available | Needed to measure session reuse and sticky routing effectiveness |
@@ -395,7 +395,7 @@ Base signals to collect:
 | Field | Keep? | Why |
 |---|---|---|
 | `timestamp` | useful | Required for joining with edge-access by minute or sample time |
-| `node_name` | useful | Required to attribute metrics to a node |
+| `node_id` | useful | Required to attribute metrics to a node |
 | `health_ok` / `status_ok` | useful | Needed to exclude unhealthy nodes from routing decisions |
 | `hot_loaded_models` | useful | Needed to measure hot-load hit rate and warm-node reuse |
 | `active_jobs` | new, needed if oMLX exposes it | Needed to measure node pressure directly instead of inferring it indirectly |
@@ -409,7 +409,7 @@ Key metrics to compute from those base signals:
 | Time-to-first-token p95 | `percentile(time_to_first_token_ms, 95)` grouped by model, client class, and node |
 | Hot-load hit rate | `requests where chosen node had model in hot_loaded_models / total requests` |
 | Sticky/session reuse rate | `requests with same session_key routed to the same node as the previous request for that session / total repeat-session requests` |
-| Model spread | `count(distinct node_name serving model) / count(distinct eligible nodes for that model)` |
+| Model spread | `count(distinct node_id serving model) / count(distinct eligible nodes for that model)` |
 | Routing regret | `chosen_node_ttf_ms - min(ttf_ms over eligible nodes in same time bucket)` |
 | Node pressure spread | `max(active_jobs + queue_depth) - min(active_jobs + queue_depth)` across eligible nodes in the same time bucket |
 | Cluster imbalance ratio | `minutes where max(node_pressure) > 0 and min(node_pressure) = 0 / total minutes` |

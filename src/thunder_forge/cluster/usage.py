@@ -38,7 +38,7 @@ def _hour_bucket(timestamp: datetime | None) -> str:
     return f"{timestamp.hour:02d}"
 
 
-def _derive_node_name(raw: object) -> str:
+def _derive_node_id_from_olla_endpoint(raw: object) -> str:
     if not isinstance(raw, str):
         return ""
     endpoint = raw.strip()
@@ -224,10 +224,7 @@ def summarize_daily_usage(
 
         requests_total += 1
         consumed_ms_total += latency_ms
-        node_name = payload.get("node_name")
-        if not isinstance(node_name, str) or not node_name.strip():
-            node_name = _derive_node_name(payload.get("olla_endpoint"))
-        node_name = node_name.strip()
+        node_id = _derive_node_id_from_olla_endpoint(payload.get("olla_endpoint")).strip()
 
         model = payload.get("model")
         model_name = model.strip() if isinstance(model, str) else ""
@@ -238,14 +235,14 @@ def summarize_daily_usage(
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_user_model[client_id][model_name] += 1
 
-        if node_name:
-            requests_by_node[node_name] += 1
-            requests_by_node_user[node_name][client_id] += 1
-            consumed_ms_by_node[node_name] += latency_ms
+        if node_id:
+            requests_by_node[node_id] += 1
+            requests_by_node_user[node_id][client_id] += 1
+            consumed_ms_by_node[node_id] += latency_ms
             if model_name and _include_model_in_usage(model_name, excluded_model_names):
-                requests_by_node_model[node_name][model_name] += 1
+                requests_by_node_model[node_id][model_name] += 1
             if timestamp is not None:
-                requests_by_node_hour[node_name][hour_bucket] += 1
+                requests_by_node_hour[node_id][hour_bucket] += 1
 
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_model[model_name] += 1
@@ -267,11 +264,11 @@ def summarize_daily_usage(
             timestamp = _parse_timestamp(payload.get("timestamp"))
             if period is not None and (timestamp is None or timestamp.date().isoformat() != period):
                 continue
-            node_name = payload.get("node_name")
-            if not isinstance(node_name, str) or not node_name.strip():
+            node_id = payload.get("node_id")
+            if not isinstance(node_id, str) or not node_id.strip():
                 invalid_lines += 1
                 continue
-            node_name = node_name.strip()
+            node_id = node_id.strip()
 
             raw_models = payload.get("hot_loaded_models")
             hot_loaded_models: list[str] = []
@@ -289,16 +286,16 @@ def summarize_daily_usage(
             if hot_loaded_count is None and not hot_loaded_models:
                 continue
 
-            previous_timestamp = latest_node_metric_timestamp.get(node_name)
+            previous_timestamp = latest_node_metric_timestamp.get(node_id)
             if previous_timestamp is not None and timestamp is not None and timestamp < previous_timestamp:
                 continue
 
             node_metrics_present = True
-            latest_node_metric_timestamp[node_name] = timestamp
+            latest_node_metric_timestamp[node_id] = timestamp
             if hot_loaded_models:
-                node_hot_loaded_models[node_name] = hot_loaded_models
+                node_hot_loaded_models[node_id] = hot_loaded_models
             if hot_loaded_count is not None:
-                node_hot_loaded_count[node_name] = hot_loaded_count
+                node_hot_loaded_count[node_id] = hot_loaded_count
 
     return DailyUsageSummary(
         period=period or "all",

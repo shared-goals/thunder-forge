@@ -239,7 +239,7 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
     node = _make_runtime_node()
     calls: list[tuple[str, str, str, bool]] = []
 
-    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_name=None, tty=False):
+    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_id=None, tty=False):
         calls.append((user, ip, cmd, stream))
         if cmd == "command -v omlx":
             return subprocess.CompletedProcess(
@@ -277,7 +277,7 @@ def test_ensure_omlx_tooling_apply_falls_back_to_direct_path_when_omlx_is_missin
     node = _make_runtime_node()
     calls: list[tuple[str, str, str, bool]] = []
 
-    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_name=None, tty=False):
+    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_id=None, tty=False):
         calls.append((user, ip, cmd, stream))
         if cmd == "command -v omlx":
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="not found")
@@ -325,7 +325,7 @@ def test_run_omlx_daemon_setup_apply_copies_and_runs_script(monkeypatch) -> None
         assert content.startswith("#!/bin/zsh")
         return subprocess.CompletedProcess(args=remote_path, returncode=0, stdout="", stderr="")
 
-    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_name=None, tty=False):
+    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_id=None, tty=False):
         calls.append(("ssh", user, cmd))
         if "sudo /bin/zsh" in cmd:
             assert user == "shag"
@@ -360,7 +360,7 @@ def test_run_omlx_daemon_setup_accepts_service_health_before_models(monkeypatch)
     def fake_scp_content(user, ip, content, remote_path, *, shell=None):
         return subprocess.CompletedProcess(args=remote_path, returncode=0, stdout="", stderr="")
 
-    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_name=None, tty=False):
+    def fake_ssh_run(user, ip, cmd, *, timeout, stream=False, shell=None, node_id=None, tty=False):
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     import thunder_forge.cluster.omlx as omlx_module

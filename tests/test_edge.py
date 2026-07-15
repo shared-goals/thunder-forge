@@ -351,14 +351,14 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     assert payload["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert payload["status_code"] == 200
     assert payload["latency_ms"] == 42
-    assert payload["node_name"] == "infer-03"
+    assert payload["olla_endpoint"] == "infer-03-omlx-live"
     assert "api_key" not in payload
     assert "dev-secret" not in str(payload)
     assert list(payload) == [
         "timestamp",
         "client_id",
         "sticky_id",
-        "node_name",
+        "olla_endpoint",
         "model",
         "latency_ms",
         "status_code",
@@ -369,7 +369,7 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
 
     serialized = json.dumps(payload, separators=(",", ":"))
     assert serialized.startswith('{"timestamp":"')
-    assert '"node_name":"infer-03"' in serialized
+    assert '"olla_endpoint":"infer-03-omlx-live"' in serialized
     assert serialized.endswith(',"request_id":"req-1"}')
 
 
@@ -654,8 +654,7 @@ def test_proxy_edge_request_rewrites_path_forwards_session_and_logs_without_secr
     assert logged["path"] == "/v1/chat/completions"
     assert logged["model"] == "qwen3-1.7b-omlx-infer-03-test"
     assert logged["status_code"] == 200
-    assert logged["node_name"] == "infer-03"
-    assert "olla_endpoint" not in logged
+    assert logged["olla_endpoint"] == "infer-03-omlx-live"
     assert "dev-secret" not in logs[0]
 
 

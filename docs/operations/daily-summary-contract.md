@@ -48,7 +48,6 @@ Expected keys:
 - `status_code`
 - `latency_ms`
 - `olla_endpoint`
-- `node_name` (derived from endpoint when available)
 - optional token fields: `prompt_tokens`, `completion_tokens`, `total_tokens`
 
 ### Node Snapshot JSONL
@@ -58,7 +57,7 @@ Source: `usage collect-node-metrics` (one row per inference node per run).
 Expected keys:
 
 - `timestamp`
-- `node_name`
+- `node_id`
 - `health_ok`
 - `models_ok`
 - `status_ok`

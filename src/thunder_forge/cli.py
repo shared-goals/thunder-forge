@@ -241,7 +241,7 @@ def _trim_logs_with_policy(
 
 def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> list[dict[str, object]]:
     snapshots: list[dict[str, object]] = []
-    for node_name, node in sorted(config.compute_nodes.items()):
+    for node_id, node in sorted(config.compute_nodes.items()):
         if node.runtime is None:
             continue
         base_url = f"http://{node.host}:{_runtime(node).port}"
@@ -251,7 +251,7 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         snapshots.append(
             {
                 "timestamp": datetime.now().astimezone().isoformat(),
-                "node_name": node_name,
+                "node_id": node_id,
                 "health_ok": health.health_ok,
                 "models_ok": health.models_ok,
                 "status_ok": health.status_ok,
@@ -271,14 +271,14 @@ def _append_snapshots(metrics_path: Path, snapshots: list[dict[str, object]]) ->
 
 def _print_snapshot_summary(snapshots: list[dict[str, object]]) -> None:
     for snapshot in snapshots:
-        node_name = str(snapshot.get("node_name", ""))
+        node_id = str(snapshot.get("node_id", ""))
         hot_loaded = snapshot.get("hot_loaded_models")
         if isinstance(hot_loaded, list):
             hot_loaded_display = ",".join(str(item) for item in hot_loaded)
         else:
             hot_loaded_display = ""
         typer.echo(
-            f"node: {node_name} health={'ok' if snapshot.get('health_ok') else 'fail'} "
+            f"node: {node_id} health={'ok' if snapshot.get('health_ok') else 'fail'} "
             f"models={'ok' if snapshot.get('models_ok') else 'fail'} "
             f"hot_loaded_count={snapshot.get('hot_loaded_count', 0)} "
             f"hot_loaded={hot_loaded_display}"
@@ -286,9 +286,9 @@ def _print_snapshot_summary(snapshots: list[dict[str, object]]) -> None:
 
 
 def _first_cache_node(config: ClusterConfig) -> tuple[str, Node] | None:
-    for node_name, node in config.nodes.items():
+    for node_id, node in config.nodes.items():
         if node.has_role(NodeRole.CACHE):
-            return node_name, node
+            return node_id, node
     return None
 
 
@@ -348,7 +348,7 @@ def _dispatch_cache_command_if_remote(
         timeout=timeout,
         stream=True,
         shell=cache_node.shell,
-        node_name=cache_name,
+        node_id=cache_name,
     )
     if result.returncode != 0:
         typer.echo(f"Error: remote cache command failed with exit code {result.returncode}", err=True)
@@ -407,7 +407,7 @@ def _resolve_transport_plan_for_sync(
         _remote_transport_plan_probe_command(payload_b64=payload_b64),
         timeout=max(timeout + 30, 60),
         shell=cache_node.shell,
-        node_name=cache_name,
+        node_id=cache_name,
     )
     if result.returncode != 0:
         typer.echo(f"Error: remote transport probe failed on {cache_name} ({cache_node.host})", err=True)
@@ -468,7 +468,7 @@ def _prepare_cache_role_node(*, cache_name: str, cache_node: Node, timeout: int)
         timeout=timeout,
         stream=True,
         shell=cache_node.shell,
-        node_name=cache_name,
+        node_id=cache_name,
     )
     if setup_result.returncode != 0:
         typer.echo(f"Error: remote cache setup failed on {cache_name} ({cache_node.host})", err=True)
@@ -972,16 +972,16 @@ def _gateway_restart_notice(config: ClusterConfig) -> str:
     )
 
 
-def _assigned_repo_ids_for_node(config: ClusterConfig, node_name: str, runtime_node: Node) -> list[str]:
+def _assigned_repo_ids_for_node(config: ClusterConfig, node_id: str, runtime_node: Node) -> list[str]:
     if not runtime_node.models:
-        typer.echo(f"Error: node '{node_name}' has no models configured", err=True)
+        typer.echo(f"Error: node '{node_id}' has no models configured", err=True)
         raise typer.Exit(1)
 
     repo_ids: list[str] = []
     for model_id in runtime_node.models:
         configured_model = config.models.get(model_id)
         if configured_model is None:
-            typer.echo(f"Error: node '{node_name}' references unknown model '{model_id}'", err=True)
+            typer.echo(f"Error: node '{node_id}' references unknown model '{model_id}'", err=True)
             raise typer.Exit(1)
         repo_id = configured_model.source.repo.strip()
         if not repo_id:
@@ -992,8 +992,8 @@ def _assigned_repo_ids_for_node(config: ClusterConfig, node_name: str, runtime_n
     return repo_ids
 
 
-def _assigned_model_dirs_for_node(config: ClusterConfig, node_name: str, runtime_node: Node) -> set[str]:
-    repo_ids = _assigned_repo_ids_for_node(config, node_name, runtime_node)
+def _assigned_model_dirs_for_node(config: ClusterConfig, node_id: str, runtime_node: Node) -> set[str]:
+    repo_ids = _assigned_repo_ids_for_node(config, node_id, runtime_node)
     return {
         build_artifact_identity(repo_id).model_dir_name
         for repo_id in repo_ids
@@ -1040,14 +1040,14 @@ def _list_node_cache_model_dirs(runtime_node: Node, *, timeout: int) -> list[str
 def _prune_node_cache_models(
     *,
     config: ClusterConfig,
-    node_name: str,
+    node_id: str,
     runtime_node: Node,
     dry_run: bool,
     timeout: int,
 ) -> None:
     if runtime_node.home_dir is None:
         runtime_node.home_dir = f"/Users/{runtime_node.user}"
-    assigned_model_dirs = _assigned_model_dirs_for_node(config, node_name, runtime_node)
+    assigned_model_dirs = _assigned_model_dirs_for_node(config, node_id, runtime_node)
     current_model_dirs = _list_node_cache_model_dirs(runtime_node, timeout=timeout)
     stale_model_dirs = [model_dir for model_dir in current_model_dirs if model_dir not in assigned_model_dirs]
 
@@ -1233,7 +1233,7 @@ def _print_gateway_daemon_setup_result(result: GatewayDaemonSetupResult, *, dry_
         typer.echo(f"Error: {error}", err=True)
 
 
-def _node_names_with_role(config: ClusterConfig, role: NodeRole) -> list[str]:
+def _node_ids_with_role(config: ClusterConfig, role: NodeRole) -> list[str]:
     return [name for name, node in config.nodes.items() if node.has_role(role)]
 
 
@@ -1251,8 +1251,8 @@ def _resolve_prepare_targets(config: ClusterConfig, target: str | None) -> tuple
             raise typer.Exit(1)
         return gateway_names, cache_names, inference_names
 
-    gateway_names = _node_names_with_role(config, NodeRole.GATEWAY)[:1]
-    cache_names = _node_names_with_role(config, NodeRole.CACHE)
+    gateway_names = _node_ids_with_role(config, NodeRole.GATEWAY)[:1]
+    cache_names = _node_ids_with_role(config, NodeRole.CACHE)
     inference_names = list(config.compute_nodes.keys())
     return gateway_names, cache_names, inference_names
 
@@ -1716,14 +1716,14 @@ def cluster_prepare(
         _prepare_cache_role_node(cache_name=cache_name, cache_node=cache_node, timeout=timeout)
         typer.echo("  status: cache hub ready")
 
-    for node_name in inference_names:
-        runtime_node = _get_runtime_node(config, node_name)
+    for node_id in inference_names:
+        runtime_node = _get_runtime_node(config, node_id)
         if runtime_node.home_dir is None:
             runtime_node.home_dir = f"/Users/{runtime_node.user}"
         resolved_admin_user = admin_user or runtime_node.admin_user
         via_su = bool(resolved_admin_user)
         typer.echo("")
-        typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
+        typer.echo(f"== Inference: {node_id} ({runtime_node.host}) ==")
         if via_su:
             typer.echo(
                 "  auth: "
@@ -1840,23 +1840,23 @@ def cluster_restart(
     if inference_names:
         inference_jobs: list[tuple[str, object]] = []
 
-        def restart_inference(node_name: str):
-            runtime_node = _get_runtime_node(config, node_name)
+        def restart_inference(node_id: str):
+            runtime_node = _get_runtime_node(config, node_id)
             if runtime_node.home_dir is None:
                 runtime_node.home_dir = f"/Users/{runtime_node.user}"
-            return node_name, runtime_node, run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+            return node_id, runtime_node, run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
 
         max_workers = min(len(inference_names), 8)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(restart_inference, node_name) for node_name in inference_names]
+            futures = [executor.submit(restart_inference, node_id) for node_id in inference_names]
             for future in as_completed(futures):
                 inference_jobs.append(future.result())
 
-        jobs_by_name = {node_name: (runtime_node, result) for node_name, runtime_node, result in inference_jobs}
-        for node_name in inference_names:
-            runtime_node, result = jobs_by_name[node_name]
+        jobs_by_name = {node_id: (runtime_node, result) for node_id, runtime_node, result in inference_jobs}
+        for node_id in inference_names:
+            runtime_node, result = jobs_by_name[node_id]
             typer.echo("")
-            typer.echo(f"== Inference: {node_name} ({runtime_node.host}) ==")
+            typer.echo(f"== Inference: {node_id} ({runtime_node.host}) ==")
             typer.echo(f"  omlx: {result.label}")
             if not dry_run and _service_result_failed(result):
                 _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
@@ -1944,7 +1944,7 @@ def cluster_sync(
     if prune:
         _prune_node_cache_models(
             config=config,
-            node_name=target,
+            node_id=target,
             runtime_node=runtime_node,
             dry_run=dry_run,
             timeout=resolved_timeout,
@@ -1994,19 +1994,19 @@ def cluster_smoke(
     typer.echo(f"target: {target or 'all'}")
 
     failed = False
-    for node_name in inference_names:
-        runtime_node = _get_runtime_node(config, node_name)
+    for node_id in inference_names:
+        runtime_node = _get_runtime_node(config, node_id)
         base_url = f"http://{runtime_node.host}:{_runtime(runtime_node).port}"
         health = check_omlx_health(base_url)
         health_status = "ok" if health.health_ok else "fail"
         model_visible = model in health.models
         models_status = "ok" if health.models_ok and model_visible else "fail"
         typer.echo(
-            f"runtime {node_name}: health={health_status} "
+            f"runtime {node_id}: health={health_status} "
             f"models={models_status} model_visible={'yes' if model_visible else 'no'}"
         )
         if health.models_ok and not model_visible:
-            typer.echo(f"Error: {node_name}: model '{model}' is not visible", err=True)
+            typer.echo(f"Error: {node_id}: model '{model}' is not visible", err=True)
         failed = failed or not (health.health_ok and health.models_ok and model_visible)
 
     expected_endpoint = f"{inference_names[0]}-omlx-live" if target and len(inference_names) == 1 else None
@@ -2485,16 +2485,16 @@ def usage_report(
     _print_mapping("requests_by_node", summary.requests_by_node)
     if summary.requests_by_node_user:
         typer.echo("requests_by_node_user:")
-        for node_name, users in summary.requests_by_node_user.items():
-            typer.echo(f"  - {node_name}:")
+        for node_id, users in summary.requests_by_node_user.items():
+            typer.echo(f"  - {node_id}:")
             for user, count in users.items():
                 typer.echo(f"      {user}: {_fmt_number(count)}")
     _print_mapping("requests_by_model", summary.requests_by_model)
     _print_mapping("requests_by_hour", summary.requests_by_hour)
     if summary.requests_by_node_model:
         typer.echo("requests_by_node_model:")
-        for node_name, models in summary.requests_by_node_model.items():
-            typer.echo(f"  - {node_name}:")
+        for node_id, models in summary.requests_by_node_model.items():
+            typer.echo(f"  - {node_id}:")
             for model, count in models.items():
                 typer.echo(f"      {model}: {_fmt_number(count)}")
 @usage_app.command("collect-node-metrics")
@@ -3098,7 +3098,7 @@ def _run_remote_artifact_download(
         timeout=max(timeout + 120, 300),
         stream=True,
         shell=cache_node.shell,
-        node_name=cache_name,
+        node_id=cache_name,
     )
     if result.returncode != 0:
         typer.echo(f"Error: download failed with exit code {result.returncode}", err=True)
@@ -3318,7 +3318,7 @@ def _run_artifact_sync_execution(
             timeout=timeout,
             stream=True,
             shell=cache_node.shell,
-            node_name=cache_name,
+            node_id=cache_name,
         )
     if result.returncode != 0:
         typer.echo(f"Error: sync failed with exit code {result.returncode}", err=True)

@@ -28,7 +28,7 @@ def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path
                         "client_id": "alice",
                         "model": "coder",
                         "latency_ms": 200,
-                        "node_name": "msm1",
+                        "olla_endpoint": "msm1-omlx-live",
                     }
                 ),
                 json.dumps(
@@ -50,8 +50,8 @@ def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path
     node_metrics.write_text(
         "\n".join(
             [
-                json.dumps({"timestamp": "2026-06-02T08:00:00+00:00", "node_name": "msm1", "hot_loaded_count": 2}),
-                json.dumps({"timestamp": "2026-06-02T08:05:00+00:00", "node_name": "msm1", "hot_loaded_count": 1}),
+                json.dumps({"timestamp": "2026-06-02T08:00:00+00:00", "node_id": "msm1", "hot_loaded_count": 2}),
+                json.dumps({"timestamp": "2026-06-02T08:05:00+00:00", "node_id": "msm1", "hot_loaded_count": 1}),
             ]
         )
         + "\n"
@@ -92,7 +92,7 @@ def test_summarize_daily_usage_excludes_tool_models_from_model_metrics(tmp_path:
                         "client_id": "alice",
                         "model": "MarkItDown",
                         "latency_ms": 100,
-                        "node_name": "msm1",
+                        "olla_endpoint": "msm1-omlx-live",
                     }
                 ),
                 json.dumps(
@@ -101,7 +101,7 @@ def test_summarize_daily_usage_excludes_tool_models_from_model_metrics(tmp_path:
                         "client_id": "alice",
                         "model": "coder",
                         "latency_ms": 120,
-                        "node_name": "msm1",
+                        "olla_endpoint": "msm1-omlx-live",
                     }
                 ),
             ]
@@ -114,7 +114,7 @@ def test_summarize_daily_usage_excludes_tool_models_from_model_metrics(tmp_path:
         json.dumps(
             {
                 "timestamp": "2026-06-02T08:17:00+00:00",
-                "node_name": "msm1",
+                "node_id": "msm1",
                 "hot_loaded_models": ["coder", "MarkItDown"],
                 "hot_loaded_count": 2,
             }
@@ -142,7 +142,7 @@ def test_summarize_daily_usage_include_tool_models_when_exclusion_is_empty(tmp_p
                 "client_id": "alice",
                 "model": "MarkItDown",
                 "latency_ms": 100,
-                "node_name": "msm1",
+                "olla_endpoint": "msm1-omlx-live",
             }
         )
         + "\n"

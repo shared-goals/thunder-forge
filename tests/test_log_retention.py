@@ -71,7 +71,7 @@ def test_trim_local_logs_covers_jsonl_and_service_logs(tmp_path: Path) -> None:
     )
 
     node_metrics = logs / "tf-node-metrics.jsonl"
-    node_metrics.write_text(json.dumps({"timestamp": "2026-06-05T00:00:00+00:00", "node_name": "msm1"}) + "\n")
+    node_metrics.write_text(json.dumps({"timestamp": "2026-06-05T00:00:00+00:00", "node_id": "msm1"}) + "\n")
 
     old_service_log = logs / "edge-40116.stderr.log"
     old_service_log.write_text("traceback\n")

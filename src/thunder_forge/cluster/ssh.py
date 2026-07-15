@@ -99,7 +99,7 @@ def ssh_run(
     timeout: int = 30,
     stream: bool = False,
     shell: str | None = None,
-    node_name: str | None = None,
+    node_id: str | None = None,
     tty: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command on a remote node via SSH, or locally if the target is this machine."""

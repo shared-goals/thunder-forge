@@ -233,14 +233,13 @@ class EdgeAccessLog:
     sticky_id: str = ""
     client_ip: str = ""
     olla_endpoint: str = ""
-    node_name: str = ""
 
     def to_json_dict(self) -> dict[str, str | int]:
         payload: dict[str, str | int] = {
             "timestamp": self.timestamp,
             "client_id": self.client_id,
             "sticky_id": self.sticky_id,
-            "node_name": self.node_name,
+            "olla_endpoint": self.olla_endpoint,
             "model": self.model,
             "latency_ms": self.latency_ms,
             "status_code": self.status_code,
@@ -613,12 +612,11 @@ def build_edge_access_log(
         status_code=status_code,
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
-        node_name=derive_olla_node_name(olla_endpoint),
     )
 
 
-def derive_olla_node_name(olla_endpoint: str) -> str:
-    """Derive the TF node name from a routed Olla endpoint label when possible."""
+def derive_node_id_from_olla_endpoint(olla_endpoint: str) -> str:
+    """Derive the TF node id from a routed Olla endpoint label when possible."""
     endpoint = olla_endpoint.strip()
     if not endpoint:
         return ""
@@ -841,13 +839,13 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
     inference_payloads: list[dict[str, object]] = []
     failed = False
     omlx_versions: list[str] = []
-    for node_name in inference_names:
-        runtime_node = cluster_config.nodes[node_name]
+    for node_id in inference_names:
+        runtime_node = cluster_config.nodes[node_id]
         runtime = runtime_node.runtime
         if runtime is None:
             inference_payloads.append(
                 {
-                    "name": node_name,
+                    "name": node_id,
                     "host": runtime_node.host,
                     "health": "fail",
                     "models": "fail",
@@ -881,7 +879,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         admin_url = f"http://{admin_host}:{runtime.port}/admin"
         inference_payloads.append(
             {
-                "name": node_name,
+                "name": node_id,
                 "host": runtime_node.host,
                 "public_host": runtime_node.public_host,
                 "admin_url": admin_url,

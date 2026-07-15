@@ -556,12 +556,12 @@ def _parse_operations(raw: object) -> OperationConfig:
 def _parse_node_runtime(
     raw: object,
     *,
-    node_name: str,
+    node_id: str,
     default_port: int = DEFAULT_OMLX_PORT,
 ) -> NodeRuntime | None:
     if raw is None:
         return None
-    path = f"nodes.{node_name}.runtime"
+    path = f"nodes.{node_id}.runtime"
     if not isinstance(raw, dict):
         msg = f"{path} must be a mapping"
         raise ValueError(msg)
@@ -610,22 +610,22 @@ def _parse_node_runtime(
     )
 
 
-def _parse_fabric_host(raw: object, *, node_name: str) -> bool:
+def _parse_fabric_host(raw: object, *, node_id: str) -> bool:
     if raw is None:
         return False
     if isinstance(raw, bool):
         return raw
-    msg = f"Node '{node_name}': fabric_host must be boolean true/false"
+    msg = f"Node '{node_id}': fabric_host must be boolean true/false"
     raise ValueError(msg)
 
 
-def _parse_node_roles(raw: dict, *, node_name: str) -> list[NodeRole]:
+def _parse_node_roles(raw: dict, *, node_id: str) -> list[NodeRole]:
     if "role" in raw:
-        msg = f"Node '{node_name}': 'role' is not supported; use 'roles: [...]'"
+        msg = f"Node '{node_id}': 'role' is not supported; use 'roles: [...]'"
         raise ValueError(msg)
     roles_raw: object = raw.get("roles", [NodeRole.INFERENCE])
     if not isinstance(roles_raw, list) or not roles_raw:
-        msg = f"Node '{node_name}': roles must be a non-empty list"
+        msg = f"Node '{node_id}': roles must be a non-empty list"
         raise ValueError(msg)
     roles: list[NodeRole] = []
     for item in roles_raw:
@@ -676,7 +676,7 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
 
     nodes = {}
     for k, v in raw.get("nodes", {}).items():
-        roles = _parse_node_roles(v, node_name=k)
+        roles = _parse_node_roles(v, node_id=k)
         user = v.get("user", "")
         host = v.get("host")
         if not host:
@@ -688,8 +688,8 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             user=user,
             admin_user=str(v.get("admin_user", "")).strip(),
             roles=roles,
-            fabric_host=_parse_fabric_host(v.get("fabric_host"), node_name=k),
-            runtime=_parse_node_runtime(v.get("runtime"), node_name=k, default_port=services.omlx_port),
+            fabric_host=_parse_fabric_host(v.get("fabric_host"), node_id=k),
+            runtime=_parse_node_runtime(v.get("runtime"), node_id=k, default_port=services.omlx_port),
             models=list(v.get("models", [])),
             platform=v.get("platform"),
             shell=v.get("shell"),
@@ -740,31 +740,31 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
     aliases: dict[str, list[str]] = {}
     seen_nodes: set[str] = set()
 
-    for node_name, node in config.nodes.items():
+    for node_id, node in config.nodes.items():
         if not node.models:
             continue
         if not node.has_role(NodeRole.INFERENCE):
-            msg = f"Node '{node_name}' declares models but is not an inference node"
+            msg = f"Node '{node_id}' declares models but is not an inference node"
             raise ValueError(msg)
         runtime = node.runtime
         if runtime is None:
-            msg = f"Node '{node_name}' declares models but has no runtime"
+            msg = f"Node '{node_id}' declares models but has no runtime"
             raise ValueError(msg)
         if runtime.type != RuntimeType.OMLX:
             continue
         endpoint_runtime_ids: list[str] = []
         for model_id in node.models:
             if model_id not in config.models:
-                msg = f"Node '{node_name}' references unknown model '{model_id}'"
+                msg = f"Node '{node_id}' references unknown model '{model_id}'"
                 raise ValueError(msg)
             runtime_model_id = config.models[model_id].runtime_model_id
             if runtime_model_id not in endpoint_runtime_ids:
                 endpoint_runtime_ids.append(runtime_model_id)
-        if node_name not in seen_nodes:
+        if node_id not in seen_nodes:
             endpoints.append(
                 {
                     "url": f"http://{node.host}:{runtime.port}",
-                    "name": f"{node_name}-omlx-live",
+                    "name": f"{node_id}-omlx-live",
                     "type": "omlx",
                     "priority": 100,
                     "model_url": "/v1/models",
@@ -776,10 +776,10 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
                     "model_filter": {"include": endpoint_runtime_ids},
                 }
             )
-            seen_nodes.add(node_name)
+            seen_nodes.add(node_id)
         for model_id in node.models:
             if model_id not in config.models:
-                msg = f"Node '{node_name}' references unknown model '{model_id}'"
+                msg = f"Node '{node_id}' references unknown model '{model_id}'"
                 raise ValueError(msg)
             runtime_model_id = config.models[model_id].runtime_model_id
             aliases.setdefault(model_id, [])
@@ -908,12 +908,12 @@ def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
             )
         )
 
-    for node_name, node in config.nodes.items():
+    for node_id, node in config.nodes.items():
         if node.models and node.runtime is None:
             issues.append(
                 ConfigLintIssue(
                     severity="error",
-                    path=f"nodes.{node_name}.runtime",
+                    path=f"nodes.{node_id}.runtime",
                     message="node declares models but has no runtime",
                 )
             )
@@ -922,7 +922,7 @@ def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
                 issues.append(
                     ConfigLintIssue(
                         severity="error",
-                        path=f"nodes.{node_name}.runtime.port",
+                        path=f"nodes.{node_id}.runtime.port",
                         message="runtime port must be between 1 and 65535",
                     )
                 )
@@ -930,7 +930,7 @@ def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
                 issues.append(
                     ConfigLintIssue(
                         severity="warning",
-                        path=f"nodes.{node_name}.runtime",
+                        path=f"nodes.{node_id}.runtime",
                         message="oMLX runtime binds 0.0.0.0 without trusted_network: true",
                     )
                 )
@@ -939,7 +939,7 @@ def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
                 issues.append(
                     ConfigLintIssue(
                         severity="error",
-                        path=f"nodes.{node_name}.models",
+                        path=f"nodes.{node_id}.models",
                         message=f"unknown model '{model_id}'",
                     )
                 )
@@ -948,7 +948,7 @@ def lint_cluster_config(config: ClusterConfig) -> list[ConfigLintIssue]:
                 issues.append(
                     ConfigLintIssue(
                         severity="warning",
-                        path=f"nodes.{node_name}.models",
+                        path=f"nodes.{node_id}.models",
                         message=f"benchmark-only model '{model_id}' is assigned to node",
                     )
                 )

@@ -55,7 +55,7 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
         json.dumps(
             {
                 "timestamp": "2026-06-02T08:16:00+00:00",
-                "node_name": "msm1",
+                "node_id": "msm1",
                 "health_ok": True,
                 "models_ok": True,
                 "hot_loaded_models": ["coder", "agent"],
@@ -152,7 +152,7 @@ def test_usage_report_cli_text_formats_numbers_and_omits_consumed_breakdowns(tmp
                         "client_id": "alice",
                         "model": "coder",
                         "latency_ms": 1234,
-                        "node_name": "msm1",
+                        "olla_endpoint": "msm1-omlx-live",
                     }
                 ),
                 json.dumps(
@@ -161,7 +161,7 @@ def test_usage_report_cli_text_formats_numbers_and_omits_consumed_breakdowns(tmp
                         "client_id": "alice",
                         "model": "coder",
                         "latency_ms": 2000,
-                        "node_name": "msm1",
+                        "olla_endpoint": "msm1-omlx-live",
                     }
                 ),
             ]
@@ -234,7 +234,7 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
     lines = output_path.read_text().splitlines()
     assert len(lines) == 1
     payload = json.loads(lines[0])
-    assert payload["node_name"] == "msm1"
+    assert payload["node_id"] == "msm1"
     assert "host" not in payload
     assert "base_url" not in payload
     assert "gpu_utilization" not in payload
