@@ -555,6 +555,10 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
             health_ok=True,
         )
 
+    def fake_run_omlx_daemon_restart(runtime_node, **kwargs):
+        calls.append("restart")
+        return SimpleNamespace(label="com.thunder-forge.omlx-8018", errors=[], applied=True, ok=True)
+
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
     monkeypatch.setattr(cli_module, "ensure_olla_binary", fake_ensure_olla_binary)
     monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
@@ -563,6 +567,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     monkeypatch.setattr(cli_module, "ensure_cache_hub_dir", fake_ensure_cache_hub_dir)
     monkeypatch.setattr(cli_module, "ensure_omlx_tooling", fake_ensure_omlx_tooling)
     monkeypatch.setattr(cli_module, "run_omlx_daemon_setup", fake_run_omlx_daemon_setup)
+    monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_run_omlx_daemon_restart)
 
     result = runner.invoke(app, ["cluster", "prepare", "--apply"])
 
@@ -575,6 +580,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
         "cache",
         "tooling:infer-03.lan",
         "inference",
+        "restart",
     ]
     assert gateway_calls[0]["edge_host"] == "0.0.0.0"
     assert "== Gateway: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
@@ -589,6 +595,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     assert "== Inference: infer-03 (infer-03.lan) ==" in result.stdout
     assert "auth: ssh=shag@infer-03.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
     assert "tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx" in result.stdout
+    assert "omlx: restarted com.thunder-forge.omlx-8018" in result.stdout
     assert "status: cluster prepare complete" in result.stdout
 
 

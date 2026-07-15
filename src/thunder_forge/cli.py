@@ -1765,6 +1765,10 @@ def cluster_prepare(
         if not result.ok:
             typer.echo("Error: inference setup did not verify cleanly", err=True)
             raise typer.Exit(1)
+        restart_result = run_omlx_daemon_restart(runtime_node, apply=True, timeout=timeout)
+        typer.echo(f"  omlx: restarted {restart_result.label}")
+        if _service_result_failed(restart_result):
+            _fail_on_setup_errors(restart_result.errors or ["oMLX restart did not verify cleanly"])
         typer.echo("  status: inference ready")
 
     typer.echo("")

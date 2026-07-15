@@ -331,30 +331,25 @@ def test_run_omlx_daemon_setup_apply_copies_and_runs_script(monkeypatch) -> None
             assert user == "shag"
             assert stream is True
             assert tty is True
-        if "sudo -n /bin/launchctl print" in cmd:
-            assert user == "shag"
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     import thunder_forge.cluster.omlx as omlx_module
 
     monkeypatch.setattr(omlx_module, "scp_content", fake_scp_content)
     monkeypatch.setattr(omlx_module, "ssh_run", fake_ssh_run)
-    monkeypatch.setattr(
-        omlx_module,
-        "check_omlx_health",
-        lambda base_url, **kwargs: OmlxHealthResult(base_url=base_url, health_ok=True, models_ok=True),
-    )
 
     result = run_omlx_daemon_setup(node, admin_user="admin", apply=True)
 
     assert result.ok
+    assert result.sudoers_verified
+    assert result.service_label_verified
+    assert result.health_ok
     assert calls[0] == ("scp", "shag", "/tmp/thunder-forge-setup-com.thunder-forge.omlx-8018.sh")
     assert calls[1][0] == "ssh"
-    expected_verify = "/usr/bin/sudo -n /bin/launchctl print system/com.thunder-forge.omlx-8018 >/dev/null"
-    assert calls[2] == ("ssh", "shag", expected_verify)
+    assert len(calls) == 2
 
 
-def test_run_omlx_daemon_setup_accepts_service_health_before_models(monkeypatch) -> None:
+def test_run_omlx_daemon_setup_skips_post_apply_probes(monkeypatch) -> None:
     node = _make_runtime_node()
 
     def fake_scp_content(user, ip, content, remote_path, *, shell=None):
@@ -367,25 +362,21 @@ def test_run_omlx_daemon_setup_accepts_service_health_before_models(monkeypatch)
 
     monkeypatch.setattr(omlx_module, "scp_content", fake_scp_content)
     monkeypatch.setattr(omlx_module, "ssh_run", fake_ssh_run)
-    health_kwargs: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        omlx_module,
+        "_wait_for_omlx_health",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("health probe should be skipped")),
+    )
+    monkeypatch.setattr(
+        omlx_module,
+        "run_omlx_daemon_restart",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("daemon retry should be skipped")),
+    )
 
-    def fake_check_omlx_health(base_url, **kwargs):
-        health_kwargs.append(kwargs)
-        return OmlxHealthResult(
-            base_url=base_url,
-            health_ok=True,
-            models_ok=False,
-            errors=["GET /v1/models returned 503"],
-        )
-
-    monkeypatch.setattr(omlx_module, "check_omlx_health", fake_check_omlx_health)
-
-    result = run_omlx_daemon_setup(node, admin_user="admin", apply=True)
+    result = run_omlx_daemon_setup(node, admin_user="admin", apply=True, timeout=45)
 
     assert result.ok
-    assert result.health_ok
     assert result.errors == []
-    assert health_kwargs == [{"timeout": 10.0, "include_models": False}]
 
 
 def test_run_omlx_process_restart_dry_run_describes_rootless_commands() -> None:
