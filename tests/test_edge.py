@@ -4,6 +4,7 @@ import json
 
 import httpx
 import pytest
+from pathlib import Path
 
 from thunder_forge.cluster.config import (
     ClusterConfig,
@@ -18,6 +19,7 @@ from thunder_forge.cluster.config import (
 from thunder_forge.cluster.edge import (
     EdgeAccessLog,
     EdgeClient,
+    EdgeInspectorConfig,
     EdgeModelCatalogEntry,
     EdgeProxyConfig,
     authenticate_edge_request,
@@ -753,6 +755,91 @@ def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
     assert logged["model"] == "memory"
     assert logged["status_code"] == 502
     assert "dev-secret" not in logs[0]
+
+
+def test_proxy_edge_request_writes_inspector_request_response_entries(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json", "X-Olla-Endpoint": "infer-03-omlx-live"},
+            json={"ok": True, "echo": "pong"},
+        )
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        inspector=EdgeInspectorConfig(
+            enabled=True,
+            output_dir=tmp_path / "inspector",
+        ),
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer dev-secret",
+            "X-Olla-Session-ID": "sess-123",
+            "Content-Type": "application/json",
+        },
+        body=json.dumps({"model": "memory", "messages": [{"role": "user", "content": "hello"}]}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 200
+
+    inspector_files = list((tmp_path / "inspector").glob("*/requests.jsonl"))
+    assert len(inspector_files) == 1
+    entries = [json.loads(line) for line in inspector_files[0].read_text().splitlines()]
+    assert [entry["type"] for entry in entries] == ["request", "response"]
+    assert entries[0]["headers"]["Authorization"] == "[REDACTED]"
+    assert entries[0]["body"]["model"] == "memory"
+    assert entries[1]["status_code"] == 200
+    assert entries[1]["body"]["ok"] is True
+
+
+def test_proxy_edge_request_inspector_writes_full_streaming_response_body(tmp_path: Path) -> None:
+    stream_bytes = b"data: " + b"x" * 128 + b"\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream", "X-Olla-Endpoint": "infer-03-omlx-live"},
+            content=stream_bytes,
+        )
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        inspector=EdgeInspectorConfig(
+            enabled=True,
+            output_dir=tmp_path / "inspector",
+        ),
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer dev-secret",
+            "X-Olla-Session-ID": "sess-stream",
+            "Content-Type": "application/json",
+        },
+        body=json.dumps({"model": "memory", "messages": [], "stream": True}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 200
+
+    inspector_files = list((tmp_path / "inspector").glob("*/requests.jsonl"))
+    assert len(inspector_files) == 1
+    entries = [json.loads(line) for line in inspector_files[0].read_text().splitlines()]
+    response_entries = [entry for entry in entries if entry["type"] == "response"]
+    assert len(response_entries) == 1
+    body_payload = response_entries[0]["body"]
+    assert body_payload == stream_bytes.decode("utf-8")
 
 
 def test_smoke_edge_contract_fails_when_same_session_routes_to_different_endpoints() -> None:

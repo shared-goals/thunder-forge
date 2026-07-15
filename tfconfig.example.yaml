@@ -21,6 +21,9 @@ services:
     host: "0.0.0.0"
     port: 40116
     access_log: logs/tf-edge-access.jsonl
+    inspector:
+      enabled: false
+      output_dir: logs/inspector
   omlx:
     port: 8018
 

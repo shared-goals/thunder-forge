@@ -31,6 +31,8 @@ DEFAULT_OLLA_OS = "macos"
 DEFAULT_OLLA_ARCH = "arm64"
 DEFAULT_OLLA_BIN_DIR = "olla-bin"
 DEFAULT_OLLA_LOG_LEVEL = "debug"
+DEFAULT_EDGE_INSPECTOR_ENABLED = False
+DEFAULT_EDGE_INSPECTOR_OUTPUT_DIR = "logs/inspector/edge"
 DEFAULT_SYNC_TRANSPORT = "auto"
 DEFAULT_SYNC_TIMEOUT = 7200
 DEFAULT_SYNC_RESTART_RUNTIME = True
@@ -162,6 +164,8 @@ class ServiceConfig:
     olla_log_level: str = DEFAULT_OLLA_LOG_LEVEL
     omlx_port: int = DEFAULT_OMLX_PORT
     edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
+    edge_inspector_enabled: bool = DEFAULT_EDGE_INSPECTOR_ENABLED
+    edge_inspector_output_dir: str = DEFAULT_EDGE_INSPECTOR_OUTPUT_DIR
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     frontend_admin_user: str = ""
 
@@ -425,6 +429,10 @@ def _parse_services(raw: object) -> ServiceConfig:
     if not isinstance(edge_raw, dict):
         msg = "services.edge must be a mapping"
         raise ValueError(msg)
+    edge_inspector_raw = edge_raw.get("inspector", {}) or {}
+    if not isinstance(edge_inspector_raw, dict):
+        msg = "services.edge.inspector must be a mapping"
+        raise ValueError(msg)
     edge_access_log = str(edge_raw.get("access_log", DEFAULT_EDGE_ACCESS_LOG)).strip()
     if not edge_access_log:
         msg = "services.edge.access_log must not be empty"
@@ -473,6 +481,17 @@ def _parse_services(raw: object) -> ServiceConfig:
         ) or DEFAULT_OLLA_LOG_LEVEL,
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
         edge_access_log=edge_access_log,
+        edge_inspector_enabled=_parse_bool(
+            edge_inspector_raw.get("enabled"),
+            name="services.edge.inspector.enabled",
+            default=DEFAULT_EDGE_INSPECTOR_ENABLED,
+        ),
+        edge_inspector_output_dir=_parse_optional_non_empty_string(
+            edge_inspector_raw.get("output_dir"),
+            name="services.edge.inspector.output_dir",
+            default=DEFAULT_EDGE_INSPECTOR_OUTPUT_DIR,
+        )
+        or DEFAULT_EDGE_INSPECTOR_OUTPUT_DIR,
         log_retention_days=log_retention_days,
         frontend_admin_user=frontend_admin_user,
     )

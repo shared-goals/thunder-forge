@@ -74,6 +74,12 @@ def test_parse_config_admin_users() -> None:
                     "local_binary": "olla/bin/olla",
                     "log_level": "info",
                 },
+                "edge": {
+                    "inspector": {
+                        "enabled": True,
+                        "output_dir": "logs/inspector/custom-edge",
+                    }
+                },
             },
             "operations": {
                 "smoke": {"alias": "memory", "client_id": "admin", "timeout": 12},
@@ -106,6 +112,8 @@ def test_parse_config_admin_users() -> None:
     assert config.services.olla_bin_dir == ".tmp/custom-olla"
     assert config.services.olla_local_binary == "olla/bin/olla"
     assert config.services.olla_log_level == "info"
+    assert config.services.edge_inspector_enabled is True
+    assert config.services.edge_inspector_output_dir == "logs/inspector/custom-edge"
     assert config.operations.smoke.alias == "memory"
     assert config.operations.smoke.client_id == "admin"
     assert config.operations.smoke.timeout == 12
@@ -136,6 +144,8 @@ def test_parse_config_olla_version_is_unpinned_when_olla_block_omits_version() -
     assert config.services.olla_version == "v0.0.27"
     assert config.services.olla_version_pinned is False
     assert config.services.olla_log_level == "debug"
+    assert config.services.edge_inspector_enabled is False
+    assert config.services.edge_inspector_output_dir == "logs/inspector/edge"
 
 
 def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing() -> None:
@@ -149,6 +159,8 @@ def test_parse_config_olla_version_default_is_pinned_when_olla_block_is_missing(
     assert config.services.olla_version == "v0.0.27"
     assert config.services.olla_version_pinned is True
     assert config.services.olla_log_level == "debug"
+    assert config.services.edge_inspector_enabled is False
+    assert config.services.edge_inspector_output_dir == "logs/inspector/edge"
 
 
 def test_parse_config_rejects_empty_olla_local_binary() -> None:

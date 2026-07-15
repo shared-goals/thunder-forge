@@ -44,6 +44,7 @@ from thunder_forge.cluster.bootstrap import (
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig
 from thunder_forge.cluster.edge import (
     EDGE_USER_PREFIX,
+    EdgeInspectorConfig,
     EdgeModelCatalogEntry,
     EdgeProxyConfig,
     build_edge_clients_from_env,
@@ -2771,12 +2772,24 @@ def edge_serve(
         repo_root=repo_root,
         access_log_sink=log_sink,
         model_catalog=_edge_model_catalog_from_config(cluster_config),
+        inspector=EdgeInspectorConfig(
+            enabled=cluster_config.services.edge_inspector_enabled,
+            output_dir=(
+                repo_root / cluster_config.services.edge_inspector_output_dir
+                if not Path(cluster_config.services.edge_inspector_output_dir).is_absolute()
+                else Path(cluster_config.services.edge_inspector_output_dir)
+            ),
+        ),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")
     typer.echo(f"api_key_count: {len(clients_by_key)}")
     typer.echo(f"access_log: {access_log_path}")
+    if edge_proxy_config.inspector is not None and edge_proxy_config.inspector.enabled:
+        typer.echo(f"edge_inspector: enabled output_dir={edge_proxy_config.inspector.output_dir}")
+    else:
+        typer.echo("edge_inspector: disabled")
     typer.echo(f"retention_days: {days}")
     typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
     typer.echo(f"pruned_log_files: {file_removed}")

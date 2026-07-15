@@ -7,6 +7,7 @@ makes the edge behavior testable before wiring an ASGI/proxy process.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import math
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import threading
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -102,6 +104,16 @@ class EdgeProxyConfig:
     timeout: float = 60.0
     status_timeout: float = 8.0
     max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
+    inspector: EdgeInspectorConfig | None = None
+
+
+@dataclass
+class EdgeInspectorConfig:
+    """Debug inspector settings for request/response dumps."""
+
+    enabled: bool = False
+    output_dir: Path = Path("logs/inspector/edge")
+    write_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1006,6 +1018,83 @@ def _proxy_response_headers(headers: httpx.Headers) -> dict[str, str]:
     return proxy_headers
 
 
+def _redact_sensitive_header_value(header_name: str, value: str) -> str:
+    lowered = header_name.lower()
+    if lowered in {"authorization", "proxy-authorization", "x-api-key", "api-key"}:
+        return "[REDACTED]"
+    return value
+
+
+def _normalize_headers_for_dump(headers: dict[str, str] | httpx.Headers) -> dict[str, str]:
+    if isinstance(headers, httpx.Headers):
+        items = headers.multi_items()
+    else:
+        items = headers.items()
+    normalized: dict[str, str] = {}
+    for header_name, value in items:
+        normalized[header_name] = _redact_sensitive_header_value(header_name, value)
+    return normalized
+
+
+def _body_dump_payload(body: bytes) -> object:
+    if not body:
+        return None
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return {
+            "encoding": "base64",
+            "size_bytes": len(body),
+            "body": base64.b64encode(body).decode("ascii"),
+        }
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _write_edge_inspector_entry(
+    config: EdgeProxyConfig,
+    *,
+    event_type: str,
+    request_id: str,
+    method: str,
+    path: str,
+    status_code: int | None = None,
+    headers: dict[str, str] | httpx.Headers | None = None,
+    body: bytes | None = None,
+    error: str | None = None,
+) -> None:
+    inspector = config.inspector
+    if inspector is None or not inspector.enabled:
+        return
+
+    output_dir = inspector.output_dir
+    dated_dir = output_dir / datetime.now().strftime("%Y-%m-%d")
+    day_file = dated_dir / "requests.jsonl"
+    payload: dict[str, object] = {
+        "type": event_type,
+        "ts": datetime.now().astimezone().isoformat(),
+        "request_id": request_id,
+        "method": method,
+        "path": path,
+    }
+    if status_code is not None:
+        payload["status_code"] = status_code
+    if headers is not None:
+        payload["headers"] = _normalize_headers_for_dump(headers)
+    if body is not None:
+        payload["body"] = _body_dump_payload(body)
+    if error:
+        payload["error"] = error
+
+    serialized = json.dumps(payload, separators=(",", ":"))
+    with inspector.write_lock:
+        dated_dir.mkdir(parents=True, exist_ok=True)
+        with day_file.open("a") as handle:
+            handle.write(f"{serialized}\n")
+
+
 def _prepare_edge_upstream_request(
     *,
     method: str,
@@ -1184,6 +1273,18 @@ def proxy_edge_request(
     if isinstance(upstream, EdgeProxyResponse):
         return upstream
 
+    inspector = config.inspector
+    if inspector is not None and inspector.enabled:
+        _write_edge_inspector_entry(
+            config,
+            event_type="request",
+            request_id=upstream.request_id,
+            method=method,
+            path=path,
+            headers=headers,
+            body=body,
+        )
+
     normalized_base_url = config.olla_base_url.rstrip("/")
     with httpx.Client(
         base_url=normalized_base_url,
@@ -1194,6 +1295,15 @@ def proxy_edge_request(
         try:
             response = client.request(method, upstream.olla_path, headers=upstream.forwarded_headers, content=body)
         except httpx.HTTPError as exc:
+            if inspector is not None and inspector.enabled:
+                _write_edge_inspector_entry(
+                    config,
+                    event_type="error",
+                    request_id=upstream.request_id,
+                    method=method,
+                    path=path,
+                    error=str(exc),
+                )
             _record_edge_access(
                 config,
                 upstream=upstream,
@@ -1201,6 +1311,18 @@ def proxy_edge_request(
                 status_code=502,
             )
             return _json_response(502, {"error": f"upstream_failed: {exc}"})
+
+    if inspector is not None and inspector.enabled:
+        _write_edge_inspector_entry(
+            config,
+            event_type="response",
+            request_id=upstream.request_id,
+            method=method,
+            path=path,
+            status_code=response.status_code,
+            headers=response.headers,
+            body=response.content,
+        )
 
     _record_edge_access(
         config,
@@ -1317,6 +1439,18 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 self._send_edge_response(upstream)
                 return
 
+            inspector = config.inspector
+            if inspector is not None and inspector.enabled:
+                _write_edge_inspector_entry(
+                    config,
+                    event_type="request",
+                    request_id=upstream.request_id,
+                    method=self.command,
+                    path=self.path,
+                    headers=dict(self.headers.items()),
+                    body=body,
+                )
+
             logged = False
 
             def record_stream(status_code: int, *, olla_endpoint: str = "") -> None:
@@ -1341,6 +1475,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         headers=upstream.forwarded_headers,
                         content=body,
                     ) as response:
+                        captured_body = bytearray()
                         olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
                         self.send_response(response.status_code)
                         response_headers = _proxy_response_headers(response.headers)
@@ -1356,16 +1491,48 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                             raise
                         for chunk in response.iter_bytes():
                             if chunk:
+                                captured_body.extend(chunk)
                                 try:
                                     self.wfile.write(chunk)
                                     self.wfile.flush()
                                 except OSError as exc:
                                     if self._is_client_disconnect(exc):
                                         record_stream(response.status_code, olla_endpoint=olla_endpoint)
+                                        if inspector is not None and inspector.enabled:
+                                            _write_edge_inspector_entry(
+                                                config,
+                                                event_type="response",
+                                                request_id=upstream.request_id,
+                                                method=self.command,
+                                                path=self.path,
+                                                status_code=response.status_code,
+                                                headers=response.headers,
+                                                body=bytes(captured_body),
+                                            )
                                         return
                                     raise
+                        if inspector is not None and inspector.enabled:
+                            _write_edge_inspector_entry(
+                                config,
+                                event_type="response",
+                                request_id=upstream.request_id,
+                                method=self.command,
+                                path=self.path,
+                                status_code=response.status_code,
+                                headers=response.headers,
+                                body=bytes(captured_body),
+                            )
                         record_stream(response.status_code, olla_endpoint=olla_endpoint)
             except httpx.HTTPError as exc:
+                if inspector is not None and inspector.enabled:
+                    _write_edge_inspector_entry(
+                        config,
+                        event_type="error",
+                        request_id=upstream.request_id,
+                        method=self.command,
+                        path=self.path,
+                        error=str(exc),
+                    )
                 record_stream(502)
                 self._send_edge_response(_json_response(502, {"error": f"upstream_failed: {exc}"}))
 
