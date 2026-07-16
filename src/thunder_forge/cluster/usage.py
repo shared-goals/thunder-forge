@@ -183,6 +183,7 @@ def summarize_daily_usage(
     period: str | None = None,
     node_metrics_path: Path | None = None,
     excluded_models: list[str] | set[str] | None = None,
+    exclude_unauthenticated: bool = False,
 ) -> DailyUsageSummary:
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
     if period == "all":
@@ -216,6 +217,8 @@ def summarize_daily_usage(
             invalid_lines += 1
             continue
         client_id = client_id.strip()
+        if exclude_unauthenticated and client_id == "unauthenticated":
+            continue
 
         latency_ms = payload.get("latency_ms")
         if not isinstance(latency_ms, int):

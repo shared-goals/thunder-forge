@@ -153,3 +153,38 @@ def test_summarize_daily_usage_include_tool_models_when_exclusion_is_empty(tmp_p
     assert summary.requests_by_model == {"MarkItDown": 1}
     assert summary.consumed_ms_by_model == {"MarkItDown": 100}
     assert summary.requests_by_user_model == {"alice": {"MarkItDown": 1}}
+
+
+def test_summarize_daily_usage_excludes_unauthenticated_when_configured(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-02T08:15:00+00:00",
+                        "client_id": "unauthenticated",
+                        "model": "agent",
+                        "latency_ms": 100,
+                        "olla_endpoint": "msm1-omlx-live",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-02T08:16:00+00:00",
+                        "client_id": "alice",
+                        "model": "coder",
+                        "latency_ms": 120,
+                        "olla_endpoint": "msm1-omlx-live",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", exclude_unauthenticated=True)
+
+    assert summary.requests_total == 1
+    assert summary.requests_by_user == {"alice": 1}
+    assert summary.consumed_ms_total == 120

@@ -205,6 +205,37 @@ def test_parse_config_usage_exclude_models_override() -> None:
     assert config.operations.usage.exclude_models == ["MarkItDown", "ToolX"]
 
 
+def test_parse_config_usage_exclude_unauthenticated_override() -> None:
+    config = parse_cluster_config(
+        {
+            "operations": {
+                "usage": {
+                    "exclude_unauthenticated": True,
+                }
+            },
+            "models": {},
+            "nodes": {},
+        }
+    )
+
+    assert config.operations.usage.exclude_unauthenticated is True
+
+
+def test_parse_config_rejects_invalid_usage_exclude_unauthenticated() -> None:
+    with pytest.raises(ValueError, match="operations.usage.exclude_unauthenticated"):
+        parse_cluster_config(
+            {
+                "operations": {
+                    "usage": {
+                        "exclude_unauthenticated": "yes",
+                    }
+                },
+                "models": {},
+                "nodes": {},
+            }
+        )
+
+
 def test_parse_config_rejects_invalid_usage_exclude_models() -> None:
     with pytest.raises(ValueError, match="operations.usage.exclude_models"):
         parse_cluster_config(

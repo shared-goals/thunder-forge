@@ -42,6 +42,8 @@ operations:
     # Exclude non-LLM tool models from usage model breakdowns.
     exclude_models:
       - MarkItDown
+    # Hide unauthenticated probe/noise traffic from make usage reports.
+    exclude_unauthenticated: true
 
 # ── Model registry ──────────────────────────────────
 # Add new models here. Model ids are public aliases by default.

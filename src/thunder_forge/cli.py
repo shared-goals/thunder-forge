@@ -2471,6 +2471,7 @@ def usage_report(
         period=period,
         node_metrics_path=node_metrics_path,
         excluded_models=config.operations.usage.exclude_models,
+        exclude_unauthenticated=config.operations.usage.exclude_unauthenticated,
     )
 
     if json_output:

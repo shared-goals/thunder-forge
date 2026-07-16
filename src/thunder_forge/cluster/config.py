@@ -38,6 +38,7 @@ DEFAULT_SYNC_TIMEOUT = 7200
 DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
+DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
 
 
 class RuntimeType(StrEnum):
@@ -188,6 +189,7 @@ class OperationSyncConfig:
 @dataclass
 class OperationUsageConfig:
     exclude_models: list[str] = field(default_factory=lambda: list(DEFAULT_USAGE_EXCLUDE_MODELS))
+    exclude_unauthenticated: bool = DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED
 
 
 @dataclass
@@ -548,7 +550,12 @@ def _parse_operations(raw: object) -> OperationConfig:
                 usage_raw.get("exclude_models"),
                 name="operations.usage.exclude_models",
                 default=DEFAULT_USAGE_EXCLUDE_MODELS,
-            )
+            ),
+            exclude_unauthenticated=_parse_bool(
+                usage_raw.get("exclude_unauthenticated"),
+                name="operations.usage.exclude_unauthenticated",
+                default=DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED,
+            ),
         ),
     )
 

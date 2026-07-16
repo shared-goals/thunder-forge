@@ -127,6 +127,64 @@ def test_usage_report_cli_accepts_all_period(tmp_path: Path, monkeypatch) -> Non
     assert payload["requests"]["total"] == 1
 
 
+def test_usage_report_cli_excludes_unauthenticated_from_tfconfig(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent(
+            """\
+            services:
+              edge:
+                access_log: logs/tf-edge-access.jsonl
+            operations:
+              usage:
+                exclude_unauthenticated: true
+            models: {}
+            nodes: {}
+        """
+        )
+    )
+    (repo / "logs").mkdir()
+    (repo / "logs" / "tf-edge-access.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-02T08:15:00+00:00",
+                        "client_id": "unauthenticated",
+                        "model": "agent",
+                        "latency_ms": 100,
+                        "olla_endpoint": "msm1-omlx-live",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-02T08:16:00+00:00",
+                        "client_id": "alice",
+                        "model": "coder",
+                        "latency_ms": 120,
+                        "olla_endpoint": "msm1-omlx-live",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_usage_report_default_period", lambda: "2026-06-02")
+
+    result = runner.invoke(app, ["usage", "report", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["requests"]["total"] == 1
+    assert payload["requests"]["by_user"] == {"alice": 1}
+
+
 def test_usage_report_cli_text_formats_numbers_and_omits_consumed_breakdowns(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
