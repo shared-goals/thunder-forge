@@ -996,6 +996,61 @@ def test_cluster_restart_apply_restarts_inference_nodes_in_parallel(tmp_path: Pa
         assert "== Inference: infer-04" in result.stdout
         assert "status: cluster restart complete" in result.stdout
 
+
+def test_cluster_restart_apply_retries_inference_restart_once(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent(
+            """\
+            models: {}
+            nodes:
+              infer-03:
+                host: infer-03.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                runtime:
+                  type: omlx
+            """
+        )
+    )
+
+    restart_calls: list[str] = []
+
+    def flaky_restart(runtime_node, *, apply, timeout):
+        restart_calls.append(runtime_node.host)
+        if len(restart_calls) == 1:
+            return LaunchdServiceResult(
+                service="omlx",
+                label="com.thunder-forge.omlx-8018",
+                plist_path="/Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist",
+                applied=True,
+                service_label_verified=False,
+                health_ok=False,
+                errors=["Service label not found after daemon restart: com.thunder-forge.omlx-8018"],
+            )
+        return LaunchdServiceResult(
+            service="omlx",
+            label="com.thunder-forge.omlx-8018",
+            plist_path="/Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist",
+            applied=True,
+            service_label_verified=True,
+            health_ok=True,
+        )
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", flaky_restart)
+
+    result = runner.invoke(app, ["cluster", "restart", "--apply"])
+
+    assert result.exit_code == 0
+    assert restart_calls == ["infer-03.lan", "infer-03.lan"]
+    assert "omlx: recovered after restart retry" in result.stdout
+    assert "status: cluster restart complete" in result.stdout
+
 def test_cluster_restart_apply_uses_configured_local_olla_binary(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
     import thunder_forge.cluster.config as config_module

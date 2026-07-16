@@ -1842,13 +1842,26 @@ def cluster_restart(
             _fail_on_setup_errors(edge_result.errors or ["TF edge restart did not verify cleanly"])
 
     if inference_names:
-        inference_jobs: list[tuple[str, object]] = []
+        inference_jobs: list[tuple[str, object, object, bool]] = []
 
         def restart_inference(node_id: str):
             runtime_node = _get_runtime_node(config, node_id)
             if runtime_node.home_dir is None:
                 runtime_node.home_dir = f"/Users/{runtime_node.user}"
-            return node_id, runtime_node, run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+            first_result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+            if dry_run or not _service_result_failed(first_result):
+                return node_id, runtime_node, first_result, False
+
+            retry_result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
+            if _service_result_failed(retry_result):
+                merged_errors: list[str] = []
+                if first_result.errors:
+                    merged_errors.extend([f"attempt1: {error}" for error in first_result.errors])
+                if retry_result.errors:
+                    merged_errors.extend([f"attempt2: {error}" for error in retry_result.errors])
+                if merged_errors:
+                    retry_result.errors = merged_errors
+            return node_id, runtime_node, retry_result, True
 
         max_workers = min(len(inference_names), 8)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1856,12 +1869,17 @@ def cluster_restart(
             for future in as_completed(futures):
                 inference_jobs.append(future.result())
 
-        jobs_by_name = {node_id: (runtime_node, result) for node_id, runtime_node, result in inference_jobs}
+        jobs_by_name = {
+            node_id: (runtime_node, result, retried)
+            for node_id, runtime_node, result, retried in inference_jobs
+        }
         for node_id in inference_names:
-            runtime_node, result = jobs_by_name[node_id]
+            runtime_node, result, retried = jobs_by_name[node_id]
             typer.echo("")
             typer.echo(f"== Inference: {node_id} ({runtime_node.host}) ==")
             typer.echo(f"  omlx: {result.label}")
+            if retried and not _service_result_failed(result):
+                typer.echo("  omlx: recovered after restart retry")
             if not dry_run and _service_result_failed(result):
                 _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
 
