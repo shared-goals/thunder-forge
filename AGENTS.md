@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> **For session-level guidance:** See [`.github/copilot-instructions.md`](.github/copilot-instructions.md) for Copilot agent and skill setup, common workflows, and quick references.
+
 ## Pre-MVP Principles
 
 - Follow DRY, KISS, and YAGNI by default.
