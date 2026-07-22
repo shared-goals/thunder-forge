@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -24,7 +25,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import threading
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4

@@ -730,7 +730,11 @@ def test_edge_client_config_vscode_prints_model_config_with_token_budget_and_sec
     assert len(payload) == 1
     provider = payload[0]
     api_key_prefix = "TF_USER_SHAG="
-    api_key = next(line.removeprefix(api_key_prefix) for line in env_file.read_text().splitlines() if line.startswith(api_key_prefix))
+    api_key = next(
+        line.removeprefix(api_key_prefix)
+        for line in env_file.read_text().splitlines()
+        if line.startswith(api_key_prefix)
+    )
     assert provider["name"] == "Thunder Forge"
     assert provider["vendor"] == "customendpoint"
     assert provider["apiType"] == "chat-completions"

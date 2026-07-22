@@ -1,10 +1,10 @@
 """Tests for the minimal Thunder Forge edge contract."""
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
-from pathlib import Path
 
 from thunder_forge.cluster.config import (
     ClusterConfig,

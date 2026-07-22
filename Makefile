@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev-sync dev-test dev-lint dev-check sync-env test lint check bootstrap restart smoke status sync prune config usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes vscode
+_TARGETS := help cli-help dev dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config model usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes vscode
 ARG ?= $(word 2,$(MAKECMDGOALS))
 EDGE_CLIENTS ?=
 
@@ -21,6 +21,7 @@ help:
 	@printf "  %-24s %s\n" "smoke [node]" "smoke runtime, Olla, and edge"
 	@printf "  %-24s %s\n" "status [node]" "check oMLX health on inference nodes"
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
+	@printf "  %-24s %s\n" "model <hf-repo>" "verify HF source, download to cache hub, add unassigned tfconfig model entry"
 	@printf "  %-24s %s\n" "prune [node]" "sync, prune unassigned node cache models, and restart runtime"
 	@printf "  %-24s %s\n" "config" "generate config/olla-config.yaml"
 	@printf "  %-24s %s\n" "usage [day]" "print usage summary (day: YYYY-MM-DD)"
@@ -38,10 +39,7 @@ help:
 	@printf "  %-24s %s\n" "dev-test" "run pytest"
 	@printf "  %-24s %s\n" "dev-lint" "run ruff"
 	@printf "  %-24s %s\n" "dev-check" "run tests and lint"
-	@printf "  %-24s %s\n" "sync-env" "alias of dev-sync"
-	@printf "  %-24s %s\n" "test" "alias of dev-test"
-	@printf "  %-24s %s\n" "lint" "alias of dev-lint"
-	@printf "  %-24s %s\n" "check" "alias of dev-check"
+	@printf "  %-24s %s\n" "dev" "run dev-sync then dev-check"
 	@echo ""
 	@echo "Reference:"
 	@printf "  %-24s %s\n" "cli-help" "show thunder-forge CLI help"
@@ -65,13 +63,7 @@ dev-lint:
 
 dev-check: dev-test dev-lint
 
-sync-env: dev-sync
-
-test: dev-test
-
-lint: dev-lint
-
-check: dev-check
+dev: dev-sync dev-check
 
 bootstrap:
 	$(UV) thunder-forge cluster prepare $(ARG) --apply
@@ -86,8 +78,23 @@ status:
 	$(UV) thunder-forge cluster status $(ARG)
 
 sync:
-	@if [ -z "$(ARG)" ]; then echo 'usage: make sync <node>'; exit 2; fi
-	$(UV) thunder-forge cluster sync "$(ARG)" --apply
+	@if [ -n "$(ARG)" ]; then \
+		$(UV) thunder-forge cluster sync "$(ARG)" --apply; \
+	else \
+		nodes="$$($(UV) python -c 'from thunder_forge.cluster.config import NodeRole, load_config; config, _ = load_config(); print(" ".join(node_id for node_id, node in config.nodes.items() if node.has_role(NodeRole.INFERENCE)))')"; \
+		if [ -z "$$nodes" ]; then echo 'no inference nodes configured in tfconfig.yaml'; exit 2; fi; \
+		echo "sync scope: all inference nodes"; \
+		for node in $$nodes; do \
+			echo "== sync $$node =="; \
+			$(UV) thunder-forge cluster sync "$$node" --apply || exit $$?; \
+		done; \
+	fi
+
+model:
+	@if [ -z "$(ARG)" ]; then echo 'usage: make model <huggingface-repo-id>'; exit 2; fi
+	$(UV) thunder-forge config add-model --repo "$(ARG)"
+	$(UV) thunder-forge artifact download --model "$(ARG)" --apply
+	$(UV) thunder-forge config add-model --repo "$(ARG)" --apply
 
 prune:
 	@if [ -z "$(ARG)" ]; then echo 'usage: make prune <node>'; exit 2; fi

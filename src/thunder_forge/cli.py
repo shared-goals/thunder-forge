@@ -20,6 +20,7 @@ from typing import cast
 
 import httpx
 import typer
+import yaml
 
 from thunder_forge.cluster.artifacts import (
     ArtifactDownloadPlan,
@@ -1126,6 +1127,215 @@ def _print_runtime_node_header(node: str, runtime_node: Node) -> None:
         typer.echo("fabric_host: true")
 
 
+def _sanitize_model_alias(candidate: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", candidate.strip().lower()).strip("-")
+    return normalized or "model"
+
+
+def _unique_model_alias(base_alias: str, existing: set[str]) -> str:
+    if base_alias not in existing:
+        return base_alias
+    suffix = 2
+    while f"{base_alias}-{suffix}" in existing:
+        suffix += 1
+    return f"{base_alias}-{suffix}"
+
+
+def _derive_model_alias(repo_id: str, existing: set[str]) -> str:
+    identity = build_artifact_identity(repo_id)
+    base_alias = _sanitize_model_alias(identity.repo_name)
+    return _unique_model_alias(base_alias, existing)
+
+
+def _fetch_hf_model_metadata(repo_id: str, *, timeout: float) -> dict:
+    response = httpx.get(f"https://huggingface.co/api/models/{repo_id}", timeout=timeout)
+    if response.status_code == 404:
+        msg = f"Hugging Face model not found: {repo_id}"
+        raise ValueError(msg)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        msg = f"Unexpected Hugging Face API payload for: {repo_id}"
+        raise ValueError(msg)
+    return payload
+
+
+def _extract_hf_model_hints(metadata: dict) -> tuple[float | None, int | None, int | None, str]:
+    used_storage = metadata.get("usedStorage")
+    disk_gb: float | None = None
+    if isinstance(used_storage, int) and used_storage > 0:
+        disk_gb = round(used_storage / (1024**3), 1)
+
+    config = metadata.get("config") if isinstance(metadata.get("config"), dict) else {}
+    quantization = config.get("quantization_config") if isinstance(config.get("quantization_config"), dict) else {}
+    quant_bits = quantization.get("bits") if isinstance(quantization.get("bits"), int) else None
+
+    max_context: int | None = None
+    for value in (
+        config.get("max_position_embeddings"),
+        config.get("text_config", {}).get("max_position_embeddings")
+        if isinstance(config.get("text_config"), dict)
+        else None,
+    ):
+        if isinstance(value, int) and value > 0:
+            max_context = value
+            break
+
+    pipeline_tag = str(metadata.get("pipeline_tag", "")).strip()
+    return disk_gb, quant_bits, max_context, pipeline_tag
+
+
+def _model_notes_text(*, pipeline_tag: str, quant_bits: int | None) -> str:
+    hints: list[str] = []
+    if pipeline_tag:
+        hints.append(f"pipeline={pipeline_tag}")
+    if quant_bits is not None:
+        hints.append(f"quant_bits={quant_bits}")
+    suffix = f" ({', '.join(hints)})" if hints else ""
+    return f"Auto-added from Hugging Face metadata{suffix}. Review before node assignment."
+
+
+def _model_yaml_block(
+    *,
+    alias: str,
+    repo_id: str,
+    runtime_model_id: str,
+    disk_gb: float | None,
+    max_context: int | None,
+    notes: str,
+) -> list[str]:
+    lines = [
+        f"  {alias}:",
+        "    source:",
+        f'      repo: "{repo_id}"',
+        f"    runtime_model_id: {runtime_model_id}",
+    ]
+    if disk_gb is not None:
+        lines.append(f"    disk_gb: {disk_gb:.1f}")
+    if max_context is not None:
+        lines.append(f"    max_context: {max_context}")
+    escaped_notes = notes.replace("'", "''")
+    lines.append(f"    notes: '{escaped_notes}'")
+    return lines
+
+
+def _insert_model_yaml_block(tfconfig_path: Path, block_lines: list[str], *, alias: str) -> None:
+    text = tfconfig_path.read_text()
+    raw = yaml.safe_load(text)
+    if not isinstance(raw, dict):
+        msg = "tfconfig.yaml must contain a top-level mapping"
+        raise ValueError(msg)
+    models = raw.get("models")
+    if not isinstance(models, dict):
+        msg = "tfconfig.yaml must contain a top-level 'models' mapping"
+        raise ValueError(msg)
+    if alias in models:
+        msg = f"models.{alias} already exists"
+        raise ValueError(msg)
+
+    lines = text.splitlines()
+    models_start: int | None = None
+    insert_index: int | None = None
+    for idx, line in enumerate(lines):
+        if models_start is None:
+            if re.match(r"^models:\s*$", line):
+                models_start = idx
+            continue
+
+        if re.match(r"^[A-Za-z0-9_-]+:\s*$", line):
+            insert_index = idx
+            break
+
+    if models_start is None:
+        msg = "Could not find top-level 'models:' section in tfconfig.yaml"
+        raise ValueError(msg)
+    if insert_index is None:
+        insert_index = len(lines)
+
+    while insert_index > models_start + 1 and lines[insert_index - 1].strip() == "":
+        insert_index -= 1
+
+    insertion = [""] + block_lines + [""]
+    updated_lines = [*lines[:insert_index], *insertion, *lines[insert_index:]]
+    tfconfig_path.write_text("\n".join(updated_lines) + "\n")
+
+
+@config_app.command("add-model")
+def config_add_model(
+    repo: str = typer.Option(..., "--repo", help="Hugging Face repo id, for example mlx-community/Qwen3.6-27B-mxfp8."),
+    alias: str | None = typer.Option(None, "--alias", help="Optional TF alias. Defaults to a slug from the repo name."),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Print the model entry without writing by default.",
+    ),
+    timeout: float = typer.Option(
+        15.0,
+        "--timeout",
+        help="HTTP timeout in seconds for Hugging Face source verification.",
+    ),
+) -> None:
+    """Verify a Hugging Face model and append an unassigned models.<alias> entry to tfconfig.yaml."""
+    config, repo_root = _load_config()
+    config_path = repo_root / "tfconfig.yaml"
+
+    try:
+        identity = build_artifact_identity(repo)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    existing_aliases = set(config.models.keys())
+    resolved_alias = alias.strip() if alias is not None else _derive_model_alias(repo, existing_aliases)
+    if not resolved_alias:
+        typer.echo("Error: --alias cannot be empty", err=True)
+        raise typer.Exit(1)
+
+    if alias is not None:
+        resolved_alias = _sanitize_model_alias(resolved_alias)
+    if resolved_alias in existing_aliases:
+        typer.echo(f"Error: models.{resolved_alias} already exists", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"hf_source: checking {repo}")
+    try:
+        metadata = _fetch_hf_model_metadata(repo, timeout=timeout)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    except httpx.HTTPError as exc:
+        typer.echo(f"Error: Hugging Face source check failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    disk_gb, quant_bits, max_context, pipeline_tag = _extract_hf_model_hints(metadata)
+    notes = _model_notes_text(pipeline_tag=pipeline_tag, quant_bits=quant_bits)
+    block_lines = _model_yaml_block(
+        alias=resolved_alias,
+        repo_id=repo,
+        runtime_model_id=identity.runtime_model_id,
+        disk_gb=disk_gb,
+        max_context=max_context,
+        notes=notes,
+    )
+
+    typer.echo("tfconfig_entry:")
+    for line in block_lines:
+        typer.echo(line)
+
+    if dry_run:
+        typer.echo("mode: dry-run")
+        return
+
+    try:
+        _insert_model_yaml_block(config_path, block_lines, alias=resolved_alias)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"status: added models.{resolved_alias} to {config_path}")
+    typer.echo("status: no node assignments were changed")
+
+
 @config_app.command("lint")
 def config_lint() -> None:
     """Validate Thunder Forge desired state before generating runtime/router config."""
@@ -1176,6 +1386,32 @@ def _print_launchd_service_result(result, *, manager: str, dry_run: bool) -> Non
 
 def _service_result_failed(result) -> bool:
     return bool(result.errors) or (result.applied and not result.ok)
+
+
+def _restart_omlx_runtime_strict(
+    *,
+    runtime_node: Node,
+    apply: bool,
+    timeout: int,
+) -> tuple[object, bool]:
+    """Restart oMLX and retry once on transient failure.
+
+    Returns (result, retried) where retried indicates whether a second attempt was made.
+    """
+    first_result = run_omlx_daemon_restart(runtime_node, apply=apply, timeout=timeout)
+    if not apply or not _service_result_failed(first_result):
+        return first_result, False
+
+    retry_result = run_omlx_daemon_restart(runtime_node, apply=apply, timeout=timeout)
+    if _service_result_failed(retry_result):
+        merged_errors: list[str] = []
+        if first_result.errors:
+            merged_errors.extend([f"attempt1: {error}" for error in first_result.errors])
+        if retry_result.errors:
+            merged_errors.extend([f"attempt2: {error}" for error in retry_result.errors])
+        if merged_errors:
+            retry_result.errors = merged_errors
+    return retry_result, True
 
 
 def _gateway_operator_user(config: ClusterConfig, user: str) -> str:
@@ -1765,8 +2001,14 @@ def cluster_prepare(
         if not result.ok:
             typer.echo("Error: inference setup did not verify cleanly", err=True)
             raise typer.Exit(1)
-        restart_result = run_omlx_daemon_restart(runtime_node, apply=True, timeout=timeout)
+        restart_result, retried = _restart_omlx_runtime_strict(
+            runtime_node=runtime_node,
+            apply=True,
+            timeout=timeout,
+        )
         typer.echo(f"  omlx: restarted {restart_result.label}")
+        if retried and not _service_result_failed(restart_result):
+            typer.echo("  omlx: recovered after restart retry")
         if _service_result_failed(restart_result):
             _fail_on_setup_errors(restart_result.errors or ["oMLX restart did not verify cleanly"])
         typer.echo("  status: inference ready")
@@ -1848,20 +2090,12 @@ def cluster_restart(
             runtime_node = _get_runtime_node(config, node_id)
             if runtime_node.home_dir is None:
                 runtime_node.home_dir = f"/Users/{runtime_node.user}"
-            first_result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
-            if dry_run or not _service_result_failed(first_result):
-                return node_id, runtime_node, first_result, False
-
-            retry_result = run_omlx_daemon_restart(runtime_node, apply=not dry_run, timeout=timeout)
-            if _service_result_failed(retry_result):
-                merged_errors: list[str] = []
-                if first_result.errors:
-                    merged_errors.extend([f"attempt1: {error}" for error in first_result.errors])
-                if retry_result.errors:
-                    merged_errors.extend([f"attempt2: {error}" for error in retry_result.errors])
-                if merged_errors:
-                    retry_result.errors = merged_errors
-            return node_id, runtime_node, retry_result, True
+            result, retried = _restart_omlx_runtime_strict(
+                runtime_node=runtime_node,
+                apply=not dry_run,
+                timeout=timeout,
+            )
+            return node_id, runtime_node, result, retried
 
         max_workers = min(len(inference_names), 8)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1980,8 +2214,14 @@ def cluster_sync(
                 runtime_node.home_dir = f"/Users/{runtime_node.user}"
             typer.echo("")
             typer.echo("== Runtime Restart ==")
-            result = run_omlx_daemon_restart(runtime_node, apply=True, timeout=300)
+            result, retried = _restart_omlx_runtime_strict(
+                runtime_node=runtime_node,
+                apply=True,
+                timeout=resolved_timeout,
+            )
             typer.echo(f"  omlx: restarted {result.label}")
+            if retried and not _service_result_failed(result):
+                typer.echo("  omlx: recovered after restart retry")
             if _service_result_failed(result):
                 _fail_on_setup_errors(result.errors or ["oMLX restart did not verify cleanly"])
     else:

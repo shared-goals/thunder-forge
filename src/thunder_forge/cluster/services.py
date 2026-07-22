@@ -156,7 +156,10 @@ def _system_launchd_bootstrap_commands(*, label_ref: str, plist_ref: str, run_ro
         f"    _tf_print_output=$({root} /bin/launchctl print \"system/{label_ref}\" 2>&1)",
         "    _tf_print_exit=$?",
         "    set -e",
-        "    if [[ $_tf_print_exit -eq 0 ]] && printf '%s\\n' \"$_tf_print_output\" | /usr/bin/grep -q \"job state = running\"; then",
+        (
+            "    if [[ $_tf_print_exit -eq 0 ]] && "
+            "printf '%s\\n' \"$_tf_print_output\" | /usr/bin/grep -q \"job state = running\"; then"
+        ),
         "        echo \"launchd bootstrap returned 5; continuing because service is running\" >&2",
         "        _tf_bootstrap_exit=0",
         "    fi",
@@ -178,7 +181,10 @@ def _system_launchd_bootstrap_commands(*, label_ref: str, plist_ref: str, run_ro
         "    printf '%s\\n' \"$_tf_final_print_output\" >&2",
         "    exit $_tf_final_print_exit",
         "fi",
-        "if [[ $_tf_final_kickstart_exit -ne 0 ]] && ! printf '%s\\n' \"$_tf_final_print_output\" | /usr/bin/grep -q \"job state = running\"; then",
+        (
+            "if [[ $_tf_final_kickstart_exit -ne 0 ]] && ! "
+            "printf '%s\\n' \"$_tf_final_print_output\" | /usr/bin/grep -q \"job state = running\"; then"
+        ),
         f"    echo \"launchd kickstart failed after bootstrap: label={label_ref} exit=$_tf_final_kickstart_exit\" >&2",
         "    printf '%s\\n' \"$_tf_final_print_output\" >&2",
         "    exit $_tf_final_kickstart_exit",
@@ -288,7 +294,11 @@ def generate_systemd_unit(spec: LaunchdServiceSpec) -> str:
     )
     exec_start = " ".join(shlex.quote(argument) for argument in spec.program_arguments)
     user_line = f"User={spec.user}\n" if spec.user else ""
-    stdout_line = "StandardOutput=null" if spec.stdout_log == "/dev/null" else f"StandardOutput=append:{spec.stdout_log}"
+    stdout_line = (
+        "StandardOutput=null"
+        if spec.stdout_log == "/dev/null"
+        else f"StandardOutput=append:{spec.stdout_log}"
+    )
     stderr_line = f"StandardError=append:{spec.stderr_log}"
 
     return (

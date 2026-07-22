@@ -929,7 +929,7 @@ def test_cluster_sync_uses_config_defaults_and_restarts_runtime(tmp_path: Path, 
         ("mlx-community/gpt-oss-20b-MXFP4-Q8", 123),
         ("mlx-community/Qwen3-Coder-Next-4bit", 123),
     ]
-    assert restarts == [("infer-01.lan", "/Users/shag", True, 300)]
+    assert restarts == [("infer-01.lan", "/Users/shag", True, 123)]
     assert "Thunder Forge cluster sync" in result.stdout
     assert "transport_host: infer-01.lan" in result.stdout
     assert "== Runtime Restart ==" in result.stdout
@@ -1009,7 +1009,7 @@ def test_cluster_sync_with_prune_removes_unassigned_node_cache_models(tmp_path: 
     ]
     assert len(removed) == 1
     assert "old-unused-model" in removed[0]
-    assert restarts == [("infer-01.lan", "/Users/shag", True, 300)]
+    assert restarts == [("infer-01.lan", "/Users/shag", True, 7200)]
     assert "== Cache Prune ==" in result.stdout
     assert "status: pruned 1 model_dir(s)" in result.stdout
     assert "== Runtime Restart ==" in result.stdout

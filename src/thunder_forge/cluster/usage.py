@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-
 _DEFAULT_MODELS_EXCLUDED_FROM_USAGE = {"markitdown"}
 
 
