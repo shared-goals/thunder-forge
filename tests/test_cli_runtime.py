@@ -1128,6 +1128,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
                 "health": "ok",
                 "models": "ok",
                 "omlx_version": "0.4.2.dev2",
+                "macos_version": "15.6.1",
                 "served_models": ["memory"],
                 "hot_loaded_models": ["memory"],
                 "errors": [],
@@ -1145,6 +1146,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     assert result.exit_code == 0
     assert "Thunder Forge cluster status" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
+    assert "macos_version: 15.6.1" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
     assert "served_models (13G): memory" in result.stdout
     assert "hot_loaded_models (13G): memory" in result.stdout

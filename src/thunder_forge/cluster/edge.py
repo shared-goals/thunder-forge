@@ -785,26 +785,42 @@ def _omlx_version(node: Node, *, timeout: float) -> str:
     return "unknown"
 
 
-def _resolve_status_targets(cluster_config: ClusterConfig, target: str | None) -> tuple[list[str], list[str]]:
+def _macos_version(node: Node, *, timeout: float) -> str:
+    result = ssh_run(node.user, node.host, "sw_vers -productVersion", timeout=int(max(timeout, 2.0)), shell=node.shell)
+    if result.returncode != 0:
+        return "unknown"
+    version = result.stdout.strip()
+    return version or "unknown"
+
+
+def _resolve_status_targets(
+    cluster_config: ClusterConfig, target: str | None
+) -> tuple[list[str], list[str], list[str]]:
     if target:
+        if target == NodeRole.CACHE.value:
+            return [], [node_id for node_id, node in cluster_config.nodes.items() if node.has_role(NodeRole.CACHE)], []
+        if target == NodeRole.INFERENCE.value:
+            return [], [], list(cluster_config.compute_nodes.keys())
         if target not in cluster_config.nodes:
             msg = f"node '{target}' not found"
             raise ValueError(msg)
         node = cluster_config.nodes[target]
         gateway_names = [target] if node.has_role(NodeRole.GATEWAY) else []
+        cache_names = [target] if node.has_role(NodeRole.CACHE) else []
         inference_names = [target] if node.has_role(NodeRole.INFERENCE) else []
-        if not gateway_names and not inference_names:
+        if not gateway_names and not cache_names and not inference_names:
             msg = f"node '{target}' has no status role"
             raise ValueError(msg)
-        return gateway_names, inference_names
+        return gateway_names, cache_names, inference_names
 
     gateway_names = []
     try:
         gateway_names = [cluster_config.gateway_name]
     except ValueError:
         gateway_names = []
+    cache_names = [node_id for node_id, node in cluster_config.nodes.items() if node.has_role(NodeRole.CACHE)]
     inference_names = list(cluster_config.compute_nodes.keys())
-    return gateway_names, inference_names
+    return gateway_names, cache_names, inference_names
 
 
 def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = None) -> dict[str, object]:
@@ -812,7 +828,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         raise ValueError("edge status requires cluster_config")
 
     cluster_config = config.cluster_config
-    gateway_names, inference_names = _resolve_status_targets(cluster_config, target)
+    gateway_names, cache_names, inference_names = _resolve_status_targets(cluster_config, target)
     latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
     latest_omlx = _latest_omlx_release_version(timeout=min(config.status_timeout, 5.0))
 
@@ -835,6 +851,15 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
             "latest_olla_version": latest_label,
             "upgrade": upgrade_label,
         }
+
+    cache_payloads = [
+        {
+            "name": node_id,
+            "host": cluster_config.nodes[node_id].host,
+            "macos_version": _macos_version(cluster_config.nodes[node_id], timeout=config.status_timeout),
+        }
+        for node_id in cache_names
+    ]
 
     inference_payloads: list[dict[str, object]] = []
     failed = False
@@ -886,6 +911,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
                 "health": "ok" if result.health_ok else "fail",
                 "models": "ok" if result.models_ok else "fail",
                 "omlx_version": omlx_version,
+                "macos_version": _macos_version(runtime_node, timeout=config.status_timeout),
                 "served_models": served_models,
                 "hot_loaded_models": hot_loaded_models,
                 "errors": result.errors,
@@ -918,6 +944,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         "target": target or "all",
         "health": {"ok": ok},
         "gateway": gateway_payload,
+        "cache": cache_payloads,
         "inference": inference_payloads,
         "summary": {
             "inference_total": len(inference_payloads),

@@ -239,6 +239,7 @@ def test_build_edge_status_payload_reports_cluster_snapshot(monkeypatch, tmp_pat
     monkeypatch.setattr(edge_module, "_latest_olla_release_version", lambda *, timeout=5.0: "v0.0.28")
     monkeypatch.setattr(edge_module, "_latest_omlx_release_version", lambda *, timeout=5.0: "v0.4.2")
     monkeypatch.setattr(edge_module, "_gateway_olla_version", lambda _config: "v0.0.27")
+    monkeypatch.setattr(edge_module, "_macos_version", lambda _node, *, timeout: "15.6.1")
     monkeypatch.setattr(edge_module, "_omlx_version", lambda _node, *, timeout: "0.4.2.dev2")
     monkeypatch.setattr(
         edge_module,
@@ -257,7 +258,9 @@ def test_build_edge_status_payload_reports_cluster_snapshot(monkeypatch, tmp_pat
     assert payload["ok"] is True
     assert payload["gateway"]["olla_version"] == "v0.0.27"
     assert payload["gateway"]["latest_olla_version"] == "v0.0.28"
+    assert "macos_version" not in payload["gateway"]
     assert payload["inference"][0]["omlx_version"] == "0.4.2.dev2"
+    assert payload["inference"][0]["macos_version"] == "15.6.1"
     assert payload["inference"][0]["served_models"] == ["memory"]
     assert payload["summary"]["latest_omlx_version"] == "v0.4.2"
     assert payload["summary"]["omlx_upgrade_hint"] == "yes (latest=v0.4.2, installed=0.4.2.dev2)"
@@ -296,6 +299,7 @@ def test_build_edge_status_payload_hides_unmanaged_runtime_ids(monkeypatch, tmp_
     monkeypatch.setattr(edge_module, "_latest_olla_release_version", lambda *, timeout=5.0: "v0.0.28")
     monkeypatch.setattr(edge_module, "_latest_omlx_release_version", lambda *, timeout=5.0: "")
     monkeypatch.setattr(edge_module, "_gateway_olla_version", lambda _config: "v0.0.27")
+    monkeypatch.setattr(edge_module, "_macos_version", lambda _node, *, timeout: "15.6.1")
     monkeypatch.setattr(edge_module, "_omlx_version", lambda _node, *, timeout: "0.4.2.dev2")
     monkeypatch.setattr(
         edge_module,
@@ -317,6 +321,26 @@ def test_build_edge_status_payload_hides_unmanaged_runtime_ids(monkeypatch, tmp_
     assert payload["ok"] is True
     assert payload["inference"][0]["served_models"] == ["memory"]
     assert payload["inference"][0]["hot_loaded_models"] == ["memory"]
+
+
+def test_status_role_selectors_choose_only_matching_nodes() -> None:
+    import thunder_forge.cluster.edge as edge_module
+
+    cluster_config = ClusterConfig(
+        nodes={
+            "rock": Node(host="rock.lan", ram_gb=32, roles=[NodeRole.GATEWAY, NodeRole.CACHE], user="shag"),
+            "msm1": Node(
+                host="msm1.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+            ),
+        }
+    )
+
+    assert edge_module._resolve_status_targets(cluster_config, "cache") == ([], ["rock"], [])
+    assert edge_module._resolve_status_targets(cluster_config, "inference") == ([], [], ["msm1"])
 
 
 def test_session_id_is_preserved_or_empty_without_using_api_key() -> None:

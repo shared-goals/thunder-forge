@@ -287,6 +287,28 @@ def remote_cache_sync_command(
             remote_model_parent_dir,
         ]
     )
+    remote_model_dir = f"{remote_omlx_models_dir}/{identity.model_dir_name}"
+    destination_ready_command = " && ".join(
+        [
+            f"test -d {shlex.quote(remote_model_dir)}",
+            f"test -f {shlex.quote(f'{remote_model_dir}/config.json')}",
+            f"test -z \"$(find {shlex.quote(remote_model_dir)} -name '*.incomplete' -print -quit)\"",
+            f"test ! -e {shlex.quote(f'{remote_model_dir}/.rsync-partial')}",
+            (
+                f"test -n \"$(find {shlex.quote(remote_model_dir)} "
+                "\\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""
+            ),
+        ]
+    )
+    destination_readiness_cmd = " ".join(
+        shlex.quote(arg)
+        for arg in [
+            "ssh",
+            *ssh_options,
+            f"{runtime_node.user}@{transport_host}",
+            destination_ready_command,
+        ]
+    )
     rsync_cmd = " ".join(
         shlex.quote(arg)
         for arg in [
@@ -308,6 +330,10 @@ def remote_cache_sync_command(
         'CACHE_ROOT="${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"; '
         f'SOURCE_PATH="$CACHE_ROOT/{identity.model_dir_name}/"; '
         'if [[ ! -d "$SOURCE_PATH" ]]; then '
+        f'if {destination_readiness_cmd}; then '
+        f'echo "destination already has complete oMLX model: {identity.model_dir_name}"; '
+        "exit 0; "
+        "fi; "
         'echo "missing cache oMLX model dir: $SOURCE_PATH" >&2; '
         "exit 2; "
         "fi; "

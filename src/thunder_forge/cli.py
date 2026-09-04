@@ -1631,6 +1631,14 @@ def _print_cluster_status_payload(payload: dict[str, object], *, config: Cluster
             f"latest={gateway.get('latest_olla_version', 'unknown')} upgrade={gateway.get('upgrade', 'unknown')}"
         )
 
+    cache = payload.get("cache")
+    if isinstance(cache, list):
+        for node in cache:
+            if isinstance(node, dict):
+                typer.echo(
+                    f"{node.get('name', 'cache')}: cache macos_version={node.get('macos_version', 'unknown')}"
+                )
+
     inference = payload.get("inference")
     if isinstance(inference, list):
         for node in inference:
@@ -1644,6 +1652,7 @@ def _print_cluster_status_payload(payload: dict[str, object], *, config: Cluster
             admin_url = node.get("admin_url")
             if admin_url:
                 typer.echo(f"  {admin_url}")
+            typer.echo(f"  macos_version: {node.get('macos_version', 'unknown')}")
             typer.echo(f"  omlx_version: {node.get('omlx_version', 'unknown')}")
             served_models = node.get("served_models")
             if isinstance(served_models, list) and served_models:
@@ -2128,7 +2137,7 @@ def cluster_restart(
 def cluster_status(
     target: str | None = typer.Argument(
         None,
-        help="Optional inference node name. Omit for all inference nodes.",
+        help="Optional node name, or 'inference' or 'cache'. Omit for all status roles.",
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON output."),
 ) -> None:

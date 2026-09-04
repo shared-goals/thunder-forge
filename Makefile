@@ -19,7 +19,7 @@ help:
 	@printf "  %-24s %s\n" "bootstrap [node]" "setup gateway/cache/inference daemons"
 	@printf "  %-24s %s\n" "restart [node]" "restart gateway and inference daemons"
 	@printf "  %-24s %s\n" "smoke [node]" "smoke runtime, Olla, and edge"
-	@printf "  %-24s %s\n" "status [node]" "check oMLX health on inference nodes"
+	@printf "  %-24s %s\n" "status [node|inference|cache]" "check status by node or role"
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
 	@printf "  %-24s %s\n" "model <hf-repo>" "verify HF source, download to cache hub, add unassigned tfconfig model entry"
 	@printf "  %-24s %s\n" "prune [node]" "sync, prune unassigned node cache models, and restart runtime"
