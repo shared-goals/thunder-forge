@@ -3,11 +3,13 @@
 import json
 import platform
 import threading
+from io import StringIO
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
 
 import yaml as yaml_lib
+from rich.console import Console
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
@@ -576,7 +578,6 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
         "olla",
         "config",
         "gateway",
-        "tooling:gateway-cache-01.lan",
         "cache",
         "tooling:infer-03.lan",
         "inference",
@@ -591,7 +592,6 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     )
     assert f"auth: operator=shag admin=serpo reason={frontend_reason}" in result.stdout
     assert "== Cache Hub: gateway-cache-01 (gateway-cache-01.lan) ==" in result.stdout
-    assert "tooling_path: /Users/shag/.local/bin/omlx" in result.stdout
     assert "== Inference: infer-03 (infer-03.lan) ==" in result.stdout
     assert "auth: ssh=shag@infer-03.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
     assert "tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx" in result.stdout
@@ -834,12 +834,15 @@ def test_cluster_prepare_apply_prepares_remote_cache_hub(tmp_path: Path, monkeyp
     result = runner.invoke(app, ["cluster", "prepare", "--apply"])
 
     assert result.exit_code == 0
-    assert calls == ["olla", "config", "gateway", "tooling:studio.lan"]
+    assert calls == ["olla", "config", "gateway"]
     assert ssh_calls[0][0] == "shag"
     assert ssh_calls[0][1] == "studio.lan"
-    assert "TF_CACHE_OMLX_MODELS_DIR" in ssh_calls[0][2]
-    assert "/bin/mkdir -p" in ssh_calls[0][2]
-    assert "tooling_path: /Users/shag/.local/bin/omlx" in result.stdout
+    assert "huggingface_hub" in ssh_calls[0][2]
+    assert "pkill -x omlx-server" in ssh_calls[0][2]
+    assert ssh_calls[1][0] == "shag"
+    assert ssh_calls[1][1] == "studio.lan"
+    assert "TF_CACHE_OMLX_MODELS_DIR" in ssh_calls[1][2]
+    assert "/bin/mkdir -p" in ssh_calls[1][2]
     assert "cache_exec: ensuring cache hub on studio (studio.lan)" in result.stdout
     assert "status: cluster prepare complete" in result.stdout
 
@@ -1127,10 +1130,19 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
                 "host": "infer-03.lan",
                 "health": "ok",
                 "models": "ok",
+                "active_requests": 1,
                 "omlx_version": "0.4.2.dev2",
                 "macos_version": "15.6.1",
                 "served_models": ["memory"],
                 "hot_loaded_models": ["memory"],
+                "model_statuses": [
+                    {
+                        "id": "memory",
+                        "state": "loaded",
+                        "idle_seconds": 12.0,
+                        "actual_size": 13 * 1024**3,
+                    }
+                ],
                 "errors": [],
             }
         ],
@@ -1138,6 +1150,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
             "latest_omlx_version": "v0.4.2",
             "omlx_upgrade_hint": "no (versions aligned)",
         },
+        "active_edge_requests": [{"client_id": "shag", "model": "memory"}],
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -1150,8 +1163,173 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     assert "omlx_version: 0.4.2.dev2" in result.stdout
     assert "served_models (13G): memory" in result.stdout
     assert "hot_loaded_models (13G): memory" in result.stdout
+    assert "model: memory tf_user=shag state=active idle=12s ram=13.0G" in result.stdout
     assert "latest_omlx_version: v0.4.2" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
+
+
+def test_cluster_status_replaces_unknown_upstream_versions(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    payload = {
+        "gateway": {
+            "olla_version": "v0.0.29",
+            "latest_olla_version": "unknown",
+            "upgrade": "unknown",
+        },
+        "inference": [
+            {"omlx_version": "0.6.4"},
+        ],
+        "summary": {
+            "latest_omlx_version": "unknown",
+            "omlx_upgrade_hint": "unknown",
+        },
+    }
+    monkeypatch.setattr(cli_module, "_latest_olla_release_version", lambda *, timeout: "v0.0.29")
+    monkeypatch.setattr(cli_module, "_latest_omlx_release_version", lambda *, timeout: "v0.6.4")
+
+    cli_module._enrich_cluster_status_payload_with_olla_version(payload)
+    cli_module._enrich_cluster_status_payload_with_omlx_version(payload)
+
+    assert payload["gateway"]["latest_olla_version"] == "v0.0.29"
+    assert payload["gateway"]["upgrade"] == "no"
+    assert payload["summary"]["latest_omlx_version"] == "v0.6.4"
+    assert payload["summary"]["omlx_upgrade_hint"] == "no (versions aligned)"
+
+
+def test_cluster_status_enriches_active_connections_from_olla(monkeypatch) -> None:
+    import httpx
+
+    import thunder_forge.cli as cli_module
+
+    class Gateway:
+        host = "rock.lan"
+
+    class Services:
+        olla_port = 40115
+
+    class Config:
+        gateway = Gateway()
+        services = Services()
+
+    payload = {
+        "summary": {},
+        "inference": [
+            {"name": "msm3", "host": "msm3-wifi.lan"},
+            {"name": "msm4", "host": "msm4-wifi.lan"},
+        ],
+    }
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, path):
+            assert path == "/internal/status"
+            return httpx.Response(
+                200,
+                json={
+                    "system": {"active_connections": 1},
+                    "endpoints": [
+                        {"name": "msm3-omlx-8018", "connections": 1},
+                        {"name": "msm4-omlx-8018", "connections": 0},
+                    ],
+                },
+            )
+
+    monkeypatch.setattr(cli_module.httpx, "Client", Client)
+    cli_module._enrich_cluster_status_payload_with_olla_activity(Config(), payload)
+
+    assert payload["summary"]["active_connections"] == 1
+    assert payload["summary"]["traffic_state"] == "ACTIVE"
+    assert payload["inference"][0]["active_connections"] == 1
+    assert payload["inference"][0]["traffic_state"] == "ACTIVE"
+    assert payload["inference"][1]["active_connections"] == 0
+    assert payload["inference"][1]["traffic_state"] == "IDLE"
+
+
+def test_status_idle_uses_active_node_and_least_idle_model() -> None:
+    import thunder_forge.cli as cli_module
+
+    active_node = {
+        "active_requests": 1,
+        "model_statuses": [
+            {"id": "agent", "state": "loaded", "idle_seconds": 3600},
+            {"id": "memory", "state": "loaded", "idle_seconds": 10},
+        ],
+    }
+    idle_node = {
+        "model_statuses": [
+            {"id": "agent", "state": "loaded", "idle_seconds": 3600},
+            {"id": "memory", "state": "loaded", "idle_seconds": 25},
+        ],
+    }
+
+    assert cli_module._node_idle_seconds(active_node) == 0
+    assert cli_module._node_idle_seconds(idle_node) == 25
+
+
+def test_active_model_status_is_scoped_to_active_node() -> None:
+    import thunder_forge.cli as cli_module
+
+    payload = {
+        "active_edge_requests": [{"client_id": "shag", "model": "memory"}],
+        "inference": [
+            {"name": "msm3", "active_requests": 0},
+            {"name": "msm4", "active_requests": 1},
+        ],
+    }
+
+    assert cli_module._active_model_users(payload) == {("msm4", "memory"): {"shag"}}
+
+
+def test_cluster_status_probes_activity_when_model_statuses_exist(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    from thunder_forge.cluster.omlx import OmlxHealthResult
+
+    class Runtime:
+        port = 8018
+
+    class Node:
+        host = "msm4.lan"
+        runtime = Runtime()
+
+    class Config:
+        nodes = {"msm4": Node()}
+
+    payload = {
+        "summary": {},
+        "inference": [
+            {
+                "name": "msm4",
+                "host": "msm4.lan",
+                "model_statuses": [{"id": "memory", "state": "loaded", "idle_seconds": 10}],
+            }
+        ],
+    }
+    calls: list[bool] = []
+
+    def fake_health(base_url, *, timeout, include_models):
+        calls.append(include_models)
+        return OmlxHealthResult(
+            base_url=base_url,
+            status_ok=False,
+            active_requests=1,
+            waiting_requests=0,
+        )
+
+    monkeypatch.setattr(cli_module, "check_omlx_health", fake_health)
+    cli_module._enrich_cluster_status_payload_with_direct_model_status(Config(), payload)
+
+    assert calls == [False]
+    assert payload["inference"][0]["active_requests"] == 1
+    assert payload["summary"]["traffic_state"] == "ACTIVE"
 
 
 def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, monkeypatch) -> None:
@@ -1173,7 +1351,9 @@ def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, mon
                 "host": "infer-03.lan",
                 "health": "ok",
                 "models": "ok",
+                "admin_url": "http://infer-03.lan:8018/admin",
                 "omlx_version": "0.4.2.dev2",
+                "macos_version": "15.6.1",
                 "served_models": ["memory"],
                 "hot_loaded_models": ["memory"],
                 "errors": [],
@@ -1194,6 +1374,15 @@ def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, mon
     assert "omlx_version: 0.4.2.dev2" in result.stdout
     assert "latest_omlx_version: v0.4.2" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
+
+    output = StringIO()
+    cli_module._print_cluster_status_rich(payload, console=Console(file=output, force_terminal=False))
+    rich_output = output.getvalue()
+    assert "Gateway: rock Olla v0.0.27 (latest v0.0.27, upgrade no)" in rich_output
+    assert "http://infer-03.lan:8018/admin" in rich_output
+    assert "15.6.1" in rich_output
+    assert "0.4.2.dev2" in rich_output
+    assert "Upgrades: Olla no, oMLX no (versions aligned) (latest v0.4.2)" in rich_output
 
 
 def test_cluster_status_json_output_emits_payload(monkeypatch) -> None:

@@ -21,6 +21,8 @@ from typing import cast
 import httpx
 import typer
 import yaml
+from rich.console import Console
+from rich.table import Table
 
 from thunder_forge.cluster.artifacts import (
     ArtifactDownloadPlan,
@@ -49,6 +51,7 @@ from thunder_forge.cluster.edge import (
     EdgeModelCatalogEntry,
     EdgeProxyConfig,
     build_edge_clients_from_env,
+    derive_node_id_from_olla_endpoint,
     edge_api_key_from_env,
     ensure_edge_api_keys,
     run_edge_service_restart,
@@ -79,6 +82,9 @@ from thunder_forge.cluster.ports import (
     resolve_port,
 )
 from thunder_forge.cluster.remote_cache import (
+    cache_hf_tooling_setup_command as _cache_hf_tooling_setup_command,
+)
+from thunder_forge.cluster.remote_cache import (
     cache_hub_setup_command as _cache_hub_setup_command,
 )
 from thunder_forge.cluster.remote_cache import (
@@ -91,7 +97,8 @@ from thunder_forge.cluster.remote_cache import (
     remote_transport_plan_probe_command as _remote_transport_plan_probe_command,
 )
 from thunder_forge.cluster.ssh import ssh_run
-from thunder_forge.cluster.usage import extract_hot_loaded_models, summarize_daily_usage
+from thunder_forge.cluster.status import normalize_model_statuses
+from thunder_forge.cluster.usage import _parse_timestamp, extract_hot_loaded_models, summarize_daily_usage
 
 app = typer.Typer(
     name="thunder-forge",
@@ -210,6 +217,58 @@ def _resolve_olla_binary_and_workdir(
 def _edge_access_log_path(repo_root: Path, config: ClusterConfig, access_log: Path | None) -> Path:
     configured = str(access_log) if access_log is not None else config.services.edge_access_log
     return _repo_relative_path(repo_root, Path(configured))
+
+
+def _latest_tf_users_by_node_model(repo_root: Path, config: ClusterConfig) -> dict[tuple[str, str], str]:
+    """Return the last recorded TF client for each node/model pair."""
+    latest: dict[tuple[str, str], tuple[datetime, str]] = {}
+    path = _edge_access_log_path(repo_root, config, None)
+    if not path.exists():
+        return {}
+    for line in path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        client_id = record.get("client_id")
+        model = record.get("model")
+        endpoint = record.get("olla_endpoint")
+        timestamp = record.get("timestamp")
+        if not all(isinstance(value, str) and value.strip() for value in (client_id, model, endpoint, timestamp)):
+            continue
+        parsed_timestamp = _parse_timestamp(timestamp)
+        if parsed_timestamp is None:
+            continue
+        node_id = derive_node_id_from_olla_endpoint(endpoint)
+        key = (node_id, model)
+        previous = latest.get(key)
+        if previous is None or parsed_timestamp > previous[0]:
+            latest[key] = (parsed_timestamp, client_id)
+    return {key: value[1] for key, value in latest.items()}
+
+
+def _enrich_status_with_tf_users(
+    payload: dict[str, object], *, repo_root: Path, config: ClusterConfig
+) -> None:
+    users = _latest_tf_users_by_node_model(repo_root, config)
+    inference = payload.get("inference")
+    if not isinstance(inference, list):
+        return
+    for node in inference:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("name")
+        model_statuses = node.get("model_statuses")
+        if not isinstance(node_id, str) or not isinstance(model_statuses, list):
+            continue
+        for status in model_statuses:
+            if not isinstance(status, dict):
+                continue
+            model_id = status.get("id")
+            if isinstance(model_id, str):
+                status["tf_user"] = users.get((node_id, model_id), "-")
 
 
 def _usage_metrics_log_path(repo_root: Path, metrics_log: Path | None) -> Path:
@@ -440,26 +499,32 @@ def _resolve_transport_plan_for_sync(
     )
 
 
-def _prepare_cache_role_node(*, cache_name: str, cache_node: Node, timeout: int) -> None:
+def _prepare_cache_role_node(
+    *,
+    cache_name: str,
+    cache_node: Node,
+    timeout: int,
+) -> None:
     if cache_node.home_dir is None:
         cache_node.home_dir = f"/Users/{cache_node.user}"
-
-    tooling_result = ensure_omlx_tooling(
-        cache_node,
-        apply=True,
-        timeout=timeout,
-        upgrade=True,
-        progress=_progress,
-    )
-    _fail_on_setup_errors(tooling_result.errors)
-    if not tooling_result.ok:
-        typer.echo(f"Error: cache setup did not verify cleanly on {cache_name}", err=True)
-        raise typer.Exit(1)
-    typer.echo(f"  tooling_path: {tooling_result.resolved_omlx_path or tooling_result.omlx_path}")
 
     if _is_local_host(cache_node.host):
         ensure_cache_hub_dir(progress=_progress)
         return
+
+    _progress(f"tooling: ensuring Hugging Face downloader on {cache_name} ({cache_node.host})")
+    tooling_result = ssh_run(
+        cache_node.user,
+        cache_node.host,
+        _cache_hf_tooling_setup_command(),
+        timeout=max(timeout, 900),
+        stream=True,
+        shell=cache_node.shell,
+        node_id=cache_name,
+    )
+    if tooling_result.returncode != 0:
+        typer.echo(f"Error: cache tooling setup failed on {cache_name}", err=True)
+        raise typer.Exit(tooling_result.returncode)
 
     _progress(f"cache_exec: ensuring cache hub on {cache_name} ({cache_node.host})")
     setup_result = ssh_run(
@@ -1552,8 +1617,67 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
     if payload.get("error"):
         typer.echo(f"Error: edge status endpoint error: {payload['error']}", err=True)
         raise typer.Exit(1)
+    _enrich_cluster_status_payload_with_olla_version(payload)
     _enrich_cluster_status_payload_with_omlx_version(payload)
+    _normalize_cluster_status_payload(payload)
     return payload
+
+
+def _enrich_cluster_status_payload_with_olla_activity(
+    config: ClusterConfig, payload: dict[str, object]
+) -> None:
+    try:
+        gateway_host = config.gateway.host
+    except ValueError:
+        return
+    try:
+        with httpx.Client(
+            base_url=f"http://{gateway_host}:{config.services.olla_port}",
+            timeout=5.0,
+            trust_env=False,
+        ) as client:
+            response = client.get("/internal/status")
+        if not response.is_success:
+            return
+        status_payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return
+    if not isinstance(status_payload, dict):
+        return
+
+    system = status_payload.get("system")
+    active_connections = system.get("active_connections") if isinstance(system, dict) else None
+    if isinstance(active_connections, int) and not isinstance(active_connections, bool):
+        summary = payload.setdefault("summary", {})
+        if isinstance(summary, dict):
+            summary["active_connections"] = active_connections
+            summary["traffic_state"] = "ACTIVE" if active_connections > 0 else "IDLE"
+            summary["traffic_source"] = "olla /internal/status"
+
+    endpoint_connections: list[dict[str, object]] = []
+    endpoints = status_payload.get("endpoints")
+    if isinstance(endpoints, list):
+        endpoint_connections = [item for item in endpoints if isinstance(item, dict)]
+    inference = payload.get("inference")
+    if not isinstance(inference, list):
+        return
+    for node in inference:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("name", "")).lower()
+        node_host = str(node.get("host", "")).lower()
+        matched_connections = 0
+        matched = False
+        for endpoint in endpoint_connections:
+            endpoint_name = str(endpoint.get("name", "")).lower()
+            if node_id and (node_id in endpoint_name or node_host in endpoint_name):
+                connections = endpoint.get("connections")
+                if isinstance(connections, int) and not isinstance(connections, bool):
+                    matched_connections += connections
+                    matched = True
+        if matched:
+            node["active_connections"] = matched_connections
+            node["traffic_state"] = "ACTIVE" if matched_connections > 0 else "IDLE"
 
 
 def _normalize_version_token(value: str) -> str:
@@ -1579,7 +1703,7 @@ def _enrich_cluster_status_payload_with_omlx_version(payload: dict[str, object])
         summary = {}
         payload["summary"] = summary
 
-    if summary.get("latest_omlx_version"):
+    if summary.get("latest_omlx_version") not in {None, "", "unknown"}:
         return
 
     inference_raw = payload.get("inference")
@@ -1620,11 +1744,427 @@ def _enrich_cluster_status_payload_with_omlx_version(payload: dict[str, object])
         summary["omlx_upgrade_hint"] = "no (versions aligned)"
 
 
-def _print_cluster_status_payload(payload: dict[str, object], *, config: ClusterConfig) -> None:
+def _enrich_cluster_status_payload_with_olla_version(payload: dict[str, object]) -> None:
+    gateway_raw = payload.get("gateway")
+    if not isinstance(gateway_raw, dict):
+        return
+    installed = str(gateway_raw.get("olla_version", "")).strip()
+    latest = str(gateway_raw.get("latest_olla_version", "")).strip()
+    if latest in {"", "unknown"}:
+        latest = _latest_olla_release_version(timeout=5)
+    gateway_raw["latest_olla_version"] = latest or "unknown"
+    if latest and installed and installed != "unknown":
+        gateway_raw["upgrade"] = (
+            "no" if _normalize_version_token(installed) == _normalize_version_token(latest) else "yes"
+        )
+    else:
+        gateway_raw["upgrade"] = "unknown"
+
+
+def _normalize_cluster_status_payload(payload: dict[str, object]) -> None:
+    inference = payload.get("inference")
+    inference_nodes = [item for item in inference if isinstance(item, dict)] if isinstance(inference, list) else []
+    for node in inference_nodes:
+        model_statuses = node.get("model_statuses")
+        if isinstance(model_statuses, list) and model_statuses:
+            continue
+        hot_loaded_models = node.get("hot_loaded_models")
+        if not isinstance(hot_loaded_models, list):
+            continue
+        node["model_statuses"] = [
+            {"id": str(model), "state": "loaded"}
+            for model in hot_loaded_models
+            if isinstance(model, str) and model.strip()
+        ]
+
+    model_statuses = [
+        status
+        for node in inference_nodes
+        for status in node.get("model_statuses", [])
+        if isinstance(status, dict)
+    ]
+    loaded_count = sum(1 for status in model_statuses if status.get("state") == "loaded")
+    loading_count = sum(1 for status in model_statuses if status.get("state") == "loading")
+    recent_count = sum(
+        1
+        for status in model_statuses
+        if status.get("state") == "loaded"
+        and isinstance(status.get("idle_seconds"), (int, float))
+        and status["idle_seconds"] < 60
+    )
+    stale_count = sum(
+        1
+        for status in model_statuses
+        if status.get("state") == "loaded"
+        and isinstance(status.get("idle_seconds"), (int, float))
+        and status["idle_seconds"] >= 60
+    )
+    idle_data_count = sum(
+        1
+        for status in model_statuses
+        if status.get("state") == "loaded" and isinstance(status.get("idle_seconds"), (int, float))
+    )
+    healthy = bool(inference_nodes) and all(
+        node.get("health") == "ok" and node.get("models") == "ok" for node in inference_nodes
+    )
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+        payload["summary"] = summary
+    summary.update(
+        {
+            "inference_total": len(inference_nodes),
+            "inference_healthy": sum(
+                1 for node in inference_nodes if node.get("health") == "ok" and node.get("models") == "ok"
+            ),
+            "loaded_models": loaded_count,
+            "loading_models": loading_count,
+            "recently_used_models": recent_count,
+            "stale_loaded_models": stale_count,
+            "idle_data_available": idle_data_count > 0,
+            "recent_idle_threshold_seconds": 60,
+            "readiness": "warm" if healthy and loaded_count else "cold" if healthy and not loading_count else "partial",
+            "utilization": "unknown",
+        }
+    )
+
+
+def _enrich_cluster_status_payload_with_direct_model_status(
+    config: ClusterConfig, payload: dict[str, object]
+) -> None:
+    inference = payload.get("inference")
+    if not isinstance(inference, list):
+        return
+    active_total = 0
+    waiting_total = 0
+    activity_nodes = 0
+    for node_payload in inference:
+        if not isinstance(node_payload, dict):
+            continue
+        node_id = node_payload.get("name")
+        if not isinstance(node_id, str):
+            continue
+        runtime_node = config.nodes.get(node_id)
+        if runtime_node is None or runtime_node.runtime is None:
+            continue
+        base_url = f"http://{runtime_node.host}:{runtime_node.runtime.port}"
+        needs_models = not isinstance(node_payload.get("model_statuses"), list)
+        health = check_omlx_health(base_url, timeout=5.0, include_models=needs_models)
+        if needs_models and not health.status_ok:
+            continue
+        if health.active_requests is not None:
+            node_payload["active_requests"] = health.active_requests
+            node_payload["traffic_state"] = "ACTIVE" if health.active_requests > 0 else "IDLE"
+            active_total += health.active_requests
+            waiting_total += health.waiting_requests or 0
+            activity_nodes += 1
+        if needs_models:
+            node_payload["model_statuses"] = normalize_model_statuses(
+                health.model_statuses,
+                map_aliases=lambda model_ids: map_runtime_models_to_aliases(
+                    config, runtime_node, model_ids, include_unmanaged=False
+                ),
+            )
+    if activity_nodes:
+        summary = payload.setdefault("summary", {})
+        if isinstance(summary, dict):
+            summary["active_connections"] = active_total
+            summary["waiting_requests"] = waiting_total
+            summary["traffic_state"] = "ACTIVE" if active_total > 0 else "IDLE"
+            summary["traffic_source"] = "oMLX /api/status"
+
+
+def _format_model_idle(seconds: object) -> str:
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds < 0:
+        return "-"
+    total_seconds = int(seconds)
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{remaining_seconds:02d}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}h{remaining_minutes:02d}m"
+
+
+def _format_model_size(size: object) -> str:
+    if not isinstance(size, (int, float)) or isinstance(size, bool) or size < 0:
+        return "-"
+    size_gb = float(size) / (1024**3)
+    return f"{size_gb:.1f}G"
+
+
+def _status_view(payload: dict[str, object]) -> dict[str, object]:
+    inference = payload.get("inference")
+    inference_nodes = [item for item in inference if isinstance(item, dict)] if isinstance(inference, list) else []
+    model_statuses = [
+        (str(node.get("name", "node")), status)
+        for node in inference_nodes
+        for status in node.get("model_statuses", [])
+        if isinstance(status, dict)
+    ]
+    loaded_count = sum(1 for _, status in model_statuses if status.get("state") == "loaded")
+    recent_count = sum(
+        1
+        for _, status in model_statuses
+        if status.get("state") == "loaded"
+        and isinstance(status.get("idle_seconds"), (int, float))
+        and status["idle_seconds"] < 60
+    )
+    stale_count = sum(
+        1
+        for _, status in model_statuses
+        if status.get("state") == "loaded"
+        and isinstance(status.get("idle_seconds"), (int, float))
+        and status["idle_seconds"] >= 60
+    )
+    idle_data_count = sum(
+        1
+        for _, status in model_statuses
+        if status.get("state") == "loaded" and isinstance(status.get("idle_seconds"), (int, float))
+    )
+    healthy_count = sum(1 for node in inference_nodes if node.get("health") == "ok" and node.get("models") == "ok")
+    summary = payload.get("summary")
+    active_requests = summary.get("active_requests") if isinstance(summary, dict) else None
+    if not isinstance(active_requests, int):
+        active_requests = summary.get("active_connections") if isinstance(summary, dict) else None
+    return {
+        "inference_nodes": inference_nodes,
+        "model_statuses": model_statuses,
+        "healthy_count": healthy_count,
+        "loaded_count": loaded_count,
+        "recent_count": recent_count,
+        "stale_count": stale_count,
+        "idle_data_count": idle_data_count,
+        "distinct_count": len({status.get("id") for _, status in model_statuses}),
+        "active_requests": active_requests,
+    }
+
+
+def _status_node_view(node: dict[str, object]) -> dict[str, object]:
+    statuses = [status for status in node.get("model_statuses", []) if isinstance(status, dict)]
+    loaded_count = sum(1 for status in statuses if status.get("state") == "loaded")
+    recent_count = sum(
+        1
+        for status in statuses
+        if status.get("state") == "loaded"
+        and isinstance(status.get("idle_seconds"), (int, float))
+        and status["idle_seconds"] < 60
+    )
+    idle_data_count = sum(
+        1
+        for status in statuses
+        if status.get("state") == "loaded" and isinstance(status.get("idle_seconds"), (int, float))
+    )
+    return {
+        "statuses": statuses,
+        "loaded_count": loaded_count,
+        "recent_count": recent_count,
+        "idle_data_count": idle_data_count,
+    }
+
+
+def _active_model_users(payload: dict[str, object]) -> dict[tuple[str, str], set[str]]:
+    requests = payload.get("active_edge_requests")
+    if not isinstance(requests, list):
+        return {}
+    inference = payload.get("inference")
+    active_nodes = {
+        str(node.get("name"))
+        for node in inference
+        if isinstance(node, dict)
+        and isinstance(node.get("name"), str)
+        and isinstance(node.get("active_requests"), int)
+        and not isinstance(node.get("active_requests"), bool)
+        and node["active_requests"] > 0
+    } if isinstance(inference, list) else set()
+    active_users: dict[tuple[str, str], set[str]] = {}
+    for request in requests:
+        if not isinstance(request, dict):
+            continue
+        model = request.get("model")
+        client_id = request.get("client_id")
+        if isinstance(model, str) and model and isinstance(client_id, str) and client_id:
+            request_node = request.get("node")
+            node_names = {request_node} if isinstance(request_node, str) and request_node else active_nodes
+            if len(node_names) == 1:
+                node_name = next(iter(node_names))
+                active_users.setdefault((node_name, model), set()).add(client_id)
+    return active_users
+
+
+def _node_idle_seconds(node: dict[str, object]) -> float | None:
+    active_requests = node.get("active_requests")
+    if isinstance(active_requests, int) and active_requests > 0:
+        return 0.0
+    statuses = [status for status in node.get("model_statuses", []) if isinstance(status, dict)]
+    idle_values = [
+        float(status["idle_seconds"])
+        for status in statuses
+        if status.get("state") == "loaded" and isinstance(status.get("idle_seconds"), (int, float))
+    ]
+    return min(idle_values) if idle_values else None
+
+
+def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) -> None:
+    view = _status_view(payload)
+    inference_nodes = cast(list[dict[str, object]], view["inference_nodes"])
+    model_statuses = cast(list[tuple[str, dict[str, object]]], view["model_statuses"])
+    healthy_count = int(view["healthy_count"])
+    loaded_count = int(view["loaded_count"])
+
+    console.print("[bold]Thunder Forge cluster status[/bold]")
+    console.print(f"Target: {payload.get('target', 'all')}")
+    console.print()
+    gateway = payload.get("gateway")
+    if isinstance(gateway, dict):
+        console.print(
+            f"Gateway: {gateway.get('name', 'gateway')} Olla {gateway.get('olla_version', 'unknown')} "
+            f"(latest {gateway.get('latest_olla_version', 'unknown')}, upgrade {gateway.get('upgrade', 'unknown')})"
+        )
+    cache = payload.get("cache")
+    if isinstance(cache, list):
+        for node in cache:
+            if isinstance(node, dict):
+                console.print(
+                    f"Cache: {node.get('name', 'cache')} macOS {node.get('macos_version', 'unknown')}"
+                )
+    summary_payload = payload.get("summary")
+    if isinstance(summary_payload, dict):
+        console.print(
+            f"Upgrades: Olla {gateway.get('upgrade', 'unknown') if isinstance(gateway, dict) else 'unknown'}, "
+            f"oMLX {summary_payload.get('omlx_upgrade_hint', 'unknown')} "
+            f"(latest {summary_payload.get('latest_omlx_version', 'unknown')})"
+        )
+    console.print()
+    summary = Table(show_header=False, box=None, padding=(0, 2))
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Nodes", f"{healthy_count}/{len(inference_nodes)} healthy")
+    summary.add_row("Loaded models", str(loaded_count))
+    summary.add_row("Distinct models", str(len({status.get('id') for _, status in model_statuses})))
+    summary_payload = payload.get("summary")
+    if isinstance(view["active_requests"], int):
+        summary.add_row(
+            "Traffic",
+            f"{summary_payload.get('traffic_state', 'UNKNOWN') if isinstance(summary_payload, dict) else 'UNKNOWN'} "
+            f"({view['active_requests']} active requests, "
+            f"{summary_payload.get('waiting_requests', 0)} waiting)",
+        )
+    active_edge_requests = payload.get("active_edge_requests")
+    if isinstance(active_edge_requests, list) and active_edge_requests:
+        summary.add_row(
+            "Current requests",
+            ", ".join(
+                f"{item.get('model', 'unknown')} ({item.get('client_id', 'unknown')})"
+                for item in active_edge_requests
+                if isinstance(item, dict)
+            ),
+        )
+    console.print(summary)
+    console.print()
+
+    node_table = Table(title="Nodes")
+    node_table.add_column("Node", style="bold")
+    node_table.add_column("Health")
+    node_table.add_column("macOS")
+    node_table.add_column("oMLX")
+    node_table.add_column("Loaded", justify="right")
+    node_table.add_column("Idle", justify="right")
+    for node in inference_nodes:
+        node_view = _status_node_view(node)
+        node_loaded = int(node_view["loaded_count"])
+        node_idle = _format_model_idle(_node_idle_seconds(node))
+        health = "[green]OK[/green]" if node.get("health") == "ok" and node.get("models") == "ok" else "[red]FAIL[/red]"
+        node_table.add_row(
+            str(node.get("name", "node")),
+            health,
+            str(node.get("macos_version", "unknown")),
+            str(node.get("omlx_version", "unknown")),
+            str(node_loaded),
+            node_idle,
+        )
+    console.print(node_table)
+    console.print()
+
+    admin_urls = [
+        (str(node.get("name", "node")), str(node["admin_url"]))
+        for node in inference_nodes
+        if node.get("admin_url")
+    ]
+    if admin_urls:
+        console.print("Admin URLs:")
+        for node_name, admin_url in admin_urls:
+            console.print(f"  {node_name}: [link={admin_url}]{admin_url}[/link]")
+        console.print()
+
+    if model_statuses:
+        active_users = _active_model_users(payload)
+        model_table = Table(title="Models")
+        model_table.add_column("Node", style="bold")
+        model_table.add_column("Model")
+        model_table.add_column("TF User")
+        model_table.add_column("State")
+        model_table.add_column("Idle", justify="right")
+        model_table.add_column("RAM", justify="right")
+        for node_name, status in model_statuses:
+            model_id = str(status.get("id", status.get("runtime_id", "model")))
+            active_key = (node_name, model_id)
+            state = "active" if active_key in active_users else str(status.get("state", "unknown"))
+            tf_user = (
+                ", ".join(sorted(active_users[active_key]))
+                if active_key in active_users
+                else str(status.get("tf_user", "-"))
+            )
+            state_style = {"loaded": "green", "loading": "yellow", "cold": "dim"}.get(
+                state, "bold green" if state == "active" else "red"
+            )
+            model_table.add_row(
+                node_name,
+                model_id,
+                tf_user,
+                f"[{state_style}]{state}[/{state_style}]",
+                _format_model_idle(status.get("idle_seconds")),
+                _format_model_size(status.get("actual_size")),
+            )
+        console.print(model_table)
+        console.print()
+
+def _print_cluster_status_payload(
+    payload: dict[str, object], *, config: ClusterConfig, plain: bool = False
+) -> None:
+    if not plain and sys.stdout.isatty():
+        _print_cluster_status_rich(payload, console=Console())
+        return
+    view = _status_view(payload)
+    summary = payload.get("summary")
+    gateway = payload.get("gateway")
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {payload.get('target', 'all')}")
+    typer.echo("")
+    typer.echo("summary:")
+    typer.echo(f"  nodes: {view['healthy_count']}/{len(view['inference_nodes'])} healthy")
+    typer.echo(f"  loaded_models: {view['loaded_count']}")
+    typer.echo(f"  distinct_models: {view['distinct_count']}")
+    active_requests = view["active_requests"]
+    if isinstance(active_requests, int):
+        typer.echo(
+            f"  traffic: {summary.get('traffic_state', 'UNKNOWN') if isinstance(summary, dict) else 'UNKNOWN'} "
+            f"({active_requests} active requests, "
+            f"{summary.get('waiting_requests', 0)} waiting)"
+        )
+    active_edge_requests = payload.get("active_edge_requests")
+    if isinstance(active_edge_requests, list) and active_edge_requests:
+        typer.echo(
+            "  current_requests: "
+            + ", ".join(
+                f"{item.get('model', 'unknown')} ({item.get('client_id', 'unknown')})"
+                for item in active_edge_requests
+                if isinstance(item, dict)
+            )
+        )
+    typer.echo("")
 
-    gateway = payload.get("gateway")
     if isinstance(gateway, dict):
         typer.echo(
             f"{gateway.get('name', 'gateway')}: olla_version={gateway.get('olla_version', 'unknown')} "
@@ -1638,16 +2178,28 @@ def _print_cluster_status_payload(payload: dict[str, object], *, config: Cluster
                 typer.echo(
                     f"{node.get('name', 'cache')}: cache macos_version={node.get('macos_version', 'unknown')}"
                 )
+    if isinstance(summary, dict):
+        if isinstance(gateway, dict):
+            typer.echo(f"olla_upgrade: {gateway.get('upgrade', 'unknown')}")
+        if summary.get("latest_omlx_version"):
+            typer.echo(f"latest_omlx_version: {summary['latest_omlx_version']}")
+        if summary.get("omlx_upgrade_hint"):
+            typer.echo(f"omlx_upgrade_hint: {summary['omlx_upgrade_hint']}")
+    typer.echo("")
 
     inference = payload.get("inference")
+    active_users = _active_model_users(payload)
     if isinstance(inference, list):
         for node in inference:
             if not isinstance(node, dict):
                 continue
+            if node is not inference[0]:
+                typer.echo("")
             typer.echo(
                 f"{node.get('name', 'node')}: health={node.get('health', 'fail')} "
                 f"models={node.get('models', 'fail')}"
             )
+            typer.echo(f"  idle: {_format_model_idle(_node_idle_seconds(node))}")
             # Show admin URL if available
             admin_url = node.get("admin_url")
             if admin_url:
@@ -1664,18 +2216,31 @@ def _print_cluster_status_payload(payload: dict[str, object], *, config: Cluster
                 hot_loaded_aliases = [str(item) for item in hot_loaded_models]
                 hot_loaded_disk = _format_disk_gb(_sum_aliases_disk_gb(config, hot_loaded_aliases))
                 typer.echo(f"  hot_loaded_models ({hot_loaded_disk}): {', '.join(hot_loaded_aliases)}")
+            model_statuses = node.get("model_statuses")
+            if isinstance(model_statuses, list):
+                for model_status in model_statuses:
+                    if not isinstance(model_status, dict):
+                        continue
+                    model_idle = _format_model_idle(model_status.get("idle_seconds"))
+                    model_id = str(model_status.get("id", model_status.get("runtime_id", "model")))
+                    active_key = (str(node.get("name", "node")), model_id)
+                    state = "active" if active_key in active_users else str(model_status.get("state", "unknown"))
+                    tf_user = (
+                        ", ".join(sorted(active_users[active_key]))
+                        if active_key in active_users
+                        else str(model_status.get("tf_user", "-"))
+                    )
+                    typer.echo(
+                        f"  model: {model_id} "
+                        f"tf_user={tf_user} "
+                        f"state={state} "
+                        f"idle={model_idle} "
+                        f"ram={_format_model_size(model_status.get('actual_size'))}"
+                    )
             errors = node.get("errors")
             if isinstance(errors, list):
                 for error in errors:
                     typer.echo(f"Error: {node.get('name', 'node')}: {error}", err=True)
-
-    summary = payload.get("summary")
-    if isinstance(summary, dict):
-        if summary.get("latest_omlx_version"):
-            typer.echo(f"latest_omlx_version: {summary['latest_omlx_version']}")
-        if summary.get("omlx_upgrade_hint"):
-            typer.echo(f"omlx_upgrade_hint: {summary['omlx_upgrade_hint']}")
-
 
 def _usage_report_default_period() -> str:
     return datetime.now().date().isoformat()
@@ -1958,7 +2523,11 @@ def cluster_prepare(
         cache_node = config.nodes[cache_name]
         typer.echo("")
         typer.echo(f"== Cache Hub: {cache_name} ({cache_node.host}) ==")
-        _prepare_cache_role_node(cache_name=cache_name, cache_node=cache_node, timeout=timeout)
+        _prepare_cache_role_node(
+            cache_name=cache_name,
+            cache_node=cache_node,
+            timeout=timeout,
+        )
         typer.echo("  status: cache hub ready")
 
     for node_id in inference_names:
@@ -2140,14 +2709,16 @@ def cluster_status(
         help="Optional node name, or 'inference' or 'cache'. Omit for all status roles.",
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON output."),
+    plain: bool = typer.Option(False, "--plain", help="Use stable plain text instead of Rich output."),
 ) -> None:
     """Check cluster status through the edge /status JSON endpoint."""
-    config, _ = _load_config()
+    config, repo_root = _load_config()
     payload = _fetch_cluster_status_payload(config, target=target)
+    _enrich_status_with_tf_users(payload, repo_root=repo_root, config=config)
     if json_output:
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        _print_cluster_status_payload(payload, config=config)
+        _print_cluster_status_payload(payload, config=config, plain=plain)
 
 
 @cluster_app.command("sync")

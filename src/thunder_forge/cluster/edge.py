@@ -51,7 +51,10 @@ from thunder_forge.cluster.services import (
     write_local_file,
 )
 from thunder_forge.cluster.ssh import ssh_run
+from thunder_forge.cluster.status import normalize_model_statuses
 from thunder_forge.cluster.usage import extract_hot_loaded_models
+
+STATUS_RECENT_IDLE_SECONDS = 60
 
 OLLA_OMLX_PREFIX = "/olla/omlx/v1"
 EDGE_USER_PREFIX = "TF_USER_"
@@ -100,6 +103,8 @@ class EdgeProxyConfig:
     cluster_config: ClusterConfig | None = None
     repo_root: Path | None = None
     access_log_sink: Callable[[str], None] | None = None
+    active_requests: dict[str, tuple[str, str]] = field(default_factory=dict)
+    active_requests_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     model_catalog: list[EdgeModelCatalogEntry] = field(default_factory=list)
     timeout: float = 60.0
     status_timeout: float = 8.0
@@ -466,6 +471,22 @@ def authenticate_edge_request(
         if hmac.compare_digest(token, configured_key):
             return EdgeAuthResult(allowed=True, status_code=200, client_id=client.client_id)
     return EdgeAuthResult(allowed=False, status_code=401)
+
+
+def _register_active_request(config: EdgeProxyConfig, request: EdgeProxyUpstreamRequest) -> None:
+    with config.active_requests_lock:
+        config.active_requests[request.request_id] = (request.client_id, request.model)
+
+
+def _unregister_active_request(config: EdgeProxyConfig, request_id: str) -> None:
+    with config.active_requests_lock:
+        config.active_requests.pop(request_id, None)
+
+
+def _active_request_payload(config: EdgeProxyConfig) -> list[dict[str, str]]:
+    with config.active_requests_lock:
+        requests = list(config.active_requests.values())
+    return [{"client_id": client_id, "model": model} for client_id, model in requests if model]
 
 
 def _nearest_rank_percentile(values: list[int], percentile: float) -> int:
@@ -899,6 +920,12 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
             extract_hot_loaded_models(result.model_statuses),
             include_unmanaged=False,
         )
+        model_statuses = normalize_model_statuses(
+            result.model_statuses,
+            map_aliases=lambda model_ids: map_runtime_models_to_aliases(
+                cluster_config, runtime_node, model_ids, include_unmanaged=False
+            ),
+        )
         # Build admin URL using public_host if available, otherwise use host
         admin_host = runtime_node.public_host or runtime_node.host
         admin_url = f"http://{admin_host}:{runtime.port}/admin"
@@ -914,6 +941,9 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
                 "macos_version": _macos_version(runtime_node, timeout=config.status_timeout),
                 "served_models": served_models,
                 "hot_loaded_models": hot_loaded_models,
+                "model_statuses": model_statuses,
+                "active_requests": result.active_requests,
+                "waiting_requests": result.waiting_requests,
                 "errors": result.errors,
             }
         )
@@ -921,6 +951,22 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
 
     known_versions = sorted({version for version in omlx_versions if version != "unknown"})
     unknown_count = sum(1 for version in omlx_versions if version == "unknown")
+    all_model_statuses = [
+        status
+        for node in inference_payloads
+        for status in node.get("model_statuses", [])
+        if isinstance(status, dict)
+    ]
+    loaded_model_count = sum(1 for status in all_model_statuses if status.get("state") == "loaded")
+    loading_model_count = sum(1 for status in all_model_statuses if status.get("state") == "loading")
+    recently_used_model_count = sum(
+        1
+        for status in all_model_statuses
+        if status.get("state") == "loaded"
+        and isinstance(status.get("idle_seconds"), (int, float))
+        and status["idle_seconds"] < STATUS_RECENT_IDLE_SECONDS
+    )
+    stale_loaded_model_count = loaded_model_count - recently_used_model_count
     normalized_latest_omlx = _normalize_version_token(latest_omlx)
     normalized_known_versions = sorted({_normalize_version_token(version) for version in known_versions})
     if len(known_versions) > 1:
@@ -939,6 +985,10 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         omlx_upgrade_hint = "no (versions aligned)"
 
     ok = not failed
+    active_values = [item.get("active_requests") for item in inference_payloads]
+    waiting_values = [item.get("waiting_requests") for item in inference_payloads]
+    known_active = [value for value in active_values if isinstance(value, int) and not isinstance(value, bool)]
+    known_waiting = [value for value in waiting_values if isinstance(value, int) and not isinstance(value, bool)]
     return {
         "ok": ok,
         "target": target or "all",
@@ -951,9 +1001,37 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
             "inference_healthy": sum(
                 1 for item in inference_payloads if item["health"] == "ok" and item["models"] == "ok"
             ),
+            "loaded_models": loaded_model_count,
+            "loading_models": loading_model_count,
+            "recently_used_models": recently_used_model_count,
+            "stale_loaded_models": stale_loaded_model_count,
+            "recent_idle_threshold_seconds": STATUS_RECENT_IDLE_SECONDS,
+            "readiness": (
+                "warm"
+                if inference_payloads
+                and all(item["health"] == "ok" and item["models"] == "ok" for item in inference_payloads)
+                and loading_model_count == 0
+                and loaded_model_count > 0
+                else "cold"
+                if inference_payloads
+                and all(item["health"] == "ok" and item["models"] == "ok" for item in inference_payloads)
+                and loading_model_count == 0
+                else "partial"
+            ),
+            "utilization": "unknown",
+            "active_requests": sum(known_active) if len(known_active) == len(inference_payloads) else None,
+            "waiting_requests": sum(known_waiting) if len(known_waiting) == len(inference_payloads) else None,
+            "traffic_state": (
+                "ACTIVE"
+                if len(known_active) == len(inference_payloads) and sum(known_active) > 0
+                else "IDLE"
+                if len(known_active) == len(inference_payloads)
+                else "UNKNOWN"
+            ),
             "latest_omlx_version": latest_omlx or "unknown",
             "omlx_upgrade_hint": omlx_upgrade_hint,
         },
+        "active_edge_requests": _active_request_payload(config),
     }
 
 
@@ -1298,6 +1376,8 @@ def proxy_edge_request(
     if isinstance(upstream, EdgeProxyResponse):
         return upstream
 
+    _register_active_request(config, upstream)
+
     inspector = config.inspector
     if inspector is not None and inspector.enabled:
         _write_edge_inspector_entry(
@@ -1335,6 +1415,7 @@ def proxy_edge_request(
                 path=path,
                 status_code=502,
             )
+            _unregister_active_request(config, upstream.request_id)
             return _json_response(502, {"error": f"upstream_failed: {exc}"})
 
     if inspector is not None and inspector.enabled:
@@ -1356,6 +1437,7 @@ def proxy_edge_request(
         status_code=response.status_code,
         olla_endpoint=response.headers.get("X-Olla-Endpoint", ""),
     )
+    _unregister_active_request(config, upstream.request_id)
 
     return EdgeProxyResponse(
         status_code=response.status_code,
@@ -1464,6 +1546,8 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 self._send_edge_response(upstream)
                 return
 
+            _register_active_request(config, upstream)
+
             inspector = config.inspector
             if inspector is not None and inspector.enabled:
                 _write_edge_inspector_entry(
@@ -1490,6 +1574,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     olla_endpoint=olla_endpoint,
                 )
                 logged = True
+                _unregister_active_request(config, upstream.request_id)
 
             normalized_base_url = config.olla_base_url.rstrip("/")
             try:

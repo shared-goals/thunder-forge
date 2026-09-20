@@ -10,6 +10,24 @@ from thunder_forge.cluster.artifacts import build_artifact_identity
 from thunder_forge.cluster.config import Node
 
 
+def cache_hf_tooling_setup_command() -> str:
+    return (
+        "set -euo pipefail; "
+        'export HOME="${HOME:-$USER_HOME}"; '
+        'UV_BINARY="$HOME/.local/bin/uv"; '
+        'if [ ! -x "$UV_BINARY" ]; then '
+        'echo "uv: installing user-local uv"; '
+        '/usr/bin/curl -LsSf https://astral.sh/uv/install.sh | /bin/sh; '
+        'fi; '
+        '"$UV_BINARY" tool install --python 3.13 --with hf_xet --with "httpx[socks]" '
+        '--upgrade huggingface_hub; '
+        'if command -v pkill >/dev/null 2>&1; then /usr/bin/pkill -x omlx-server || true; fi; '
+        'rm -f "$HOME/.local/bin/omlx"; '
+        'rm -rf "$HOME/.local/share/uv/tools/omlx"; '
+        'echo "cache: Hugging Face tooling ready; oMLX cache tooling removed"'
+    )
+
+
 def cache_hub_setup_command() -> str:
     return (
         "set -euo pipefail; "
@@ -33,6 +51,7 @@ def remote_artifact_download_command(*, repo_id: str, model_dir_name: str, timeo
 import base64
 import json
 import os
+import re
 import shutil
 import secrets
 import subprocess
@@ -49,8 +68,32 @@ cache_root = os.environ.get('TF_CACHE_OMLX_MODELS_DIR') or os.path.expanduser('~
 model_dir = os.path.join(cache_root, model_dir_name)
 base_url = 'http://127.0.0.1:8020'
 env = dict(os.environ)
-env.pop('ALL_PROXY', None)
-env.pop('all_proxy', None)
+shell = env.get('SHELL') or '/bin/zsh'
+try:
+    shell_env = subprocess.run(
+        [shell, '-ic', 'env -0'],
+        check=False,
+        capture_output=True,
+        env=env,
+        timeout=8,
+    )
+    for entry in shell_env.stdout.split(b'\\0'):
+        if b'=' not in entry:
+            continue
+        key, value = entry.split(b'=', 1)
+        key = key.decode('utf-8', errors='ignore')
+        if key.lower() in {
+            'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+            'hf_home', 'hf_hub_cache', 'hf_xet_high_performance',
+            'tf_omlx_downloader_api_key', 'omlx_api_key',
+        }:
+            env[key] = value.decode('utf-8', errors='ignore')
+except (OSError, subprocess.SubprocessError):
+    pass
+for proxy_name in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'):
+    env.setdefault(proxy_name, env.get(proxy_name.lower(), ''))
+    env.setdefault(proxy_name.lower(), env.get(proxy_name, ''))
+env.setdefault('HF_XET_HIGH_PERFORMANCE', '1')
 def _model_complete(path):
     if not os.path.isdir(path):
         return False
@@ -58,22 +101,36 @@ def _model_complete(path):
         return False
     if os.path.exists(os.path.join(path, '.rsync-partial')):
         return False
-    has_weights = False
+    weight_files = []
     for root, _, files in os.walk(path):
         for name in files:
             if name.endswith('.incomplete'):
                 return False
             if name.endswith('.safetensors') or name.endswith('.bin'):
-                has_weights = True
-    return has_weights
-def _request(method, path, payload=None, opener=None):
+                weight_files.append(os.path.join(root, name))
+    if not weight_files:
+        return False
+    index_path = os.path.join(path, 'model.safetensors.index.json')
+    if len(weight_files) > 1:
+        if not os.path.isfile(index_path):
+            return False
+        try:
+            with open(index_path, encoding='utf-8') as index_file:
+                weight_map = json.load(index_file).get('weight_map', {})
+        except (OSError, ValueError, AttributeError):
+            return False
+        expected_files = set(weight_map.values())
+        actual_files = {os.path.relpath(filename, path) for filename in weight_files}
+        return expected_files.issubset(actual_files)
+    return True
+def _request(method, path, payload=None, opener=None, timeout=30):
     req = urllib.request.Request(base_url + path, method=method)
     req.add_header('Content-Type', 'application/json')
     data = None
     if payload is not None:
         data = json.dumps(payload).encode('utf-8')
     client = opener if opener is not None else urllib.request
-    return client.open(req, data=data, timeout=30)
+    return client.open(req, data=data, timeout=timeout)
 def _health_ready():
     try:
         with urllib.request.urlopen(base_url + '/health', timeout=2) as response:
@@ -116,11 +173,51 @@ def _resolve_omlx_bin():
 if _model_complete(model_dir):
     print('download_status: already_ready')
     raise SystemExit(0)
+print('download_backend: huggingface_hub')
+hf_python_candidates = [
+    os.path.expanduser('~/.local/share/uv/tools/huggingface-hub/bin/python3'),
+    os.path.expanduser('~/.local/share/uv/tools/huggingface_hub/bin/python3'),
+]
+hf_python = next((candidate for candidate in hf_python_candidates if os.path.isfile(candidate)), None)
+if hf_python is None:
+    hf_python = shutil.which('python3', path=env.get('PATH')) or sys.executable
+hf_script = '''
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id=os.environ['TF_DOWNLOAD_REPO_ID'],
+    local_dir=os.environ['TF_DOWNLOAD_MODEL_DIR'],
+    token=os.environ.get('HF_TOKEN') or None,
+)
+'''
+hf_env = dict(env)
+hf_env['TF_DOWNLOAD_REPO_ID'] = repo_id
+hf_env['TF_DOWNLOAD_MODEL_DIR'] = model_dir
+result = subprocess.run([hf_python, '-u', '-c', hf_script], env=hf_env)
+if result.returncode != 0:
+    raise SystemExit(result.returncode)
+print('download_status: completed_with_huggingface_hub')
+raise SystemExit(0)
 downloader_api_key = env.get('TF_OMLX_DOWNLOADER_API_KEY') or env.get('OMLX_API_KEY')
 server_proc = None
 server_started = False
 server_stderr = ''
 try:
+    if not downloader_api_key and _health_ready():
+        try:
+            process_list = subprocess.check_output(
+                ['ps', '-axo', 'command='],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            match = re.search(
+                r'(?m)^.*\\bomlx\\s+serve\\b.*(?:^|\\s)--api-key\\s+(\\S+)',
+                process_list,
+            )
+            if match:
+                downloader_api_key = match.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
     if not _health_ready():
         downloader_api_key = secrets.token_urlsafe(24)
         omlx_bin = _resolve_omlx_bin()
@@ -196,6 +293,7 @@ try:
             '/admin/api/hf/download',
             {'repo_id': repo_id, 'hf_token': hf_token},
             opener=opener,
+            timeout=300,
         ) as response:
             task = json.loads(response.read().decode('utf-8')).get('task')
     except urllib.error.HTTPError as exc:

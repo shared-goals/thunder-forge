@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from thunder_forge.cluster.config import Node
 from thunder_forge.cluster.remote_cache import (
+    cache_hf_tooling_setup_command,
     cache_hub_setup_command,
     remote_artifact_download_command,
     remote_cache_sync_command,
@@ -16,6 +17,17 @@ def test_cache_hub_setup_command_uses_omlx_models_dir_env_fallback() -> None:
 
     assert 'CACHE_DIR="${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"' in command
     assert "mkdir -p" in command
+
+
+def test_cache_hf_tooling_setup_removes_omlx() -> None:
+    command = cache_hf_tooling_setup_command()
+
+    assert "huggingface_hub" in command
+    assert "hf_xet" in command
+    assert 'httpx[socks]' in command
+    assert "pkill -x omlx-server" in command
+    assert 'rm -f "$HOME/.local/bin/omlx"' in command
+    assert 'rm -rf "$HOME/.local/share/uv/tools/omlx"' in command
 
 
 def test_remote_artifact_download_command_runs_downloader_helper() -> None:
@@ -43,6 +55,32 @@ def test_remote_artifact_download_command_keeps_progress_bucket_update_inside_pr
         "            last_bucket = bucket\n"
         "        if status == 'completed':"
     ) in command
+
+
+def test_remote_artifact_download_command_requires_complete_shard_index() -> None:
+    command = remote_artifact_download_command(
+        repo_id="sh0wie/Qwen3.8-Flash-Next-REAP-288-MLX-4bit",
+        model_dir_name="sh0wie/Qwen3.8-Flash-Next-REAP-288-MLX-4bit",
+        timeout=7200,
+    )
+
+    assert "model.safetensors.index.json" in command
+    assert "expected_files.issubset(actual_files)" in command
+
+
+def test_remote_artifact_download_command_uses_omlx_backend_with_proxy_environment() -> None:
+    command = remote_artifact_download_command(
+        repo_id="mlx-community/Qwen3-1.7B-4bit",
+        model_dir_name="mlx-community/Qwen3-1.7B-4bit",
+        timeout=7200,
+    )
+
+    assert "download_backend: huggingface_hub" in command
+    assert "HTTP_PROXY" in command
+    assert "HTTPS_PROXY" in command
+    assert "ALL_PROXY" in command
+    assert "snapshot_download" in command
+    assert "local_dir=os.environ['TF_DOWNLOAD_MODEL_DIR']" in command
 
 
 def test_remote_cache_sync_command_builds_batchmode_rsync_plan() -> None:

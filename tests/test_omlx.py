@@ -123,6 +123,8 @@ def test_check_omlx_health_parses_model_statuses() -> None:
                     ]
                 },
             )
+        if request.url.path == "/api/status":
+            return httpx.Response(200, json={"active_requests": 1, "waiting_requests": 0})
         return httpx.Response(404)
 
     result = check_omlx_health("http://infer-03.lan:8018", transport=httpx.MockTransport(handler))
@@ -130,6 +132,8 @@ def test_check_omlx_health_parses_model_statuses() -> None:
     assert result.status_ok is True
     assert result.model_statuses["Qwen3-1.7B-4bit"]["loaded"] is True
     assert result.model_statuses["Qwen3-1.7B-4bit"]["is_loading"] is False
+    assert result.active_requests == 1
+    assert result.waiting_requests == 0
 
 
 def test_check_omlx_health_keeps_health_when_optional_status_fails() -> None:

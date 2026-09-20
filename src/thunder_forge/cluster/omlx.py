@@ -61,6 +61,8 @@ class OmlxHealthResult:
     status_ok: bool | None = None
     models: list[str] = field(default_factory=list)
     model_statuses: dict[str, dict[str, object]] = field(default_factory=dict)
+    active_requests: int | None = None
+    waiting_requests: int | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -231,6 +233,20 @@ def check_omlx_health(
             result.status_ok = False
         except ValueError:
             result.status_ok = False
+
+        try:
+            response = client.get("/api/status")
+            if response.is_success:
+                status_payload = response.json()
+                if isinstance(status_payload, dict):
+                    active_requests = status_payload.get("active_requests")
+                    waiting_requests = status_payload.get("waiting_requests")
+                    if isinstance(active_requests, int) and not isinstance(active_requests, bool):
+                        result.active_requests = active_requests
+                    if isinstance(waiting_requests, int) and not isinstance(waiting_requests, bool):
+                        result.waiting_requests = waiting_requests
+        except (httpx.HTTPError, ValueError):
+            pass
 
     return result
 

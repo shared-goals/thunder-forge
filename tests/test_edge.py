@@ -249,7 +249,14 @@ def test_build_edge_status_payload_reports_cluster_snapshot(monkeypatch, tmp_pat
             health_ok=True,
             models_ok=True,
             models=["gpt-oss-20b-mxfp4-bf16"],
-            model_statuses={"gpt-oss-20b-mxfp4-bf16": {"id": "gpt-oss-20b-mxfp4-bf16", "loaded": True}},
+                model_statuses={
+                    "gpt-oss-20b-mxfp4-bf16": {
+                        "id": "gpt-oss-20b-mxfp4-bf16",
+                        "loaded": True,
+                        "last_access": 200.0,
+                        "actual_size": 13 * 1024**3,
+                    }
+                },
         ),
     )
 
@@ -262,8 +269,33 @@ def test_build_edge_status_payload_reports_cluster_snapshot(monkeypatch, tmp_pat
     assert payload["inference"][0]["omlx_version"] == "0.4.2.dev2"
     assert payload["inference"][0]["macos_version"] == "15.6.1"
     assert payload["inference"][0]["served_models"] == ["memory"]
+    model_status = payload["inference"][0]["model_statuses"][0]
+    assert model_status["id"] == "memory"
+    assert model_status["runtime_id"] == "gpt-oss-20b-mxfp4-bf16"
+    assert model_status["state"] == "loaded"
+    assert model_status["idle_seconds"] >= 0
+    assert model_status["actual_size"] == 13 * 1024**3
+    assert payload["summary"]["loaded_models"] == 1
+    assert payload["summary"]["loading_models"] == 0
+    assert payload["summary"]["utilization"] == "unknown"
     assert payload["summary"]["latest_omlx_version"] == "v0.4.2"
     assert payload["summary"]["omlx_upgrade_hint"] == "yes (latest=v0.4.2, installed=0.4.2.dev2)"
+
+    from io import StringIO
+
+    from rich.console import Console
+
+    from thunder_forge.cli import _format_model_idle, _print_cluster_status_payload, _print_cluster_status_rich
+
+    idle = _format_model_idle(model_status["idle_seconds"])
+    rich_output = StringIO()
+    _print_cluster_status_rich(payload, console=Console(file=rich_output, width=160, color_system=None))
+    assert idle in rich_output.getvalue()
+    assert "13.0G" in rich_output.getvalue()
+    plain_output = []
+    monkeypatch.setattr("typer.echo", lambda message="", **kwargs: plain_output.append(str(message)))
+    _print_cluster_status_payload(payload, config=cluster_config, plain=True)
+    assert any(f"idle={idle} ram=13.0G" in line for line in plain_output)
 
 
 def test_build_edge_status_payload_hides_unmanaged_runtime_ids(monkeypatch, tmp_path) -> None:

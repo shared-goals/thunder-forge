@@ -285,6 +285,7 @@ dependencies = [
     { name = "httpx", extra = ["socks"] },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -299,6 +300,7 @@ requires-dist = [
     { name = "httpx", extras = ["socks"], specifier = ">=0.28" },
     { name = "python-dotenv", specifier = ">=1.2" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=15.0" },
     { name = "typer", specifier = ">=0.26" },
 ]
 
