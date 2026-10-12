@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import time
@@ -29,8 +30,39 @@ from thunder_forge.cluster.services import (
 from thunder_forge.cluster.ssh import scp_content, ssh_run
 
 LAUNCHD_LABEL_PREFIX = "com.thunder-forge.omlx"
-DEFAULT_OMLX_TOOL_SPEC = "git+https://github.com/jundot/omlx.git"
+OMLX_TOOL_REPO_SPEC = "git+https://github.com/jundot/omlx.git"
+OMLX_RELEASES_API_URL = "https://api.github.com/repos/jundot/omlx/releases/latest"
 DEFAULT_OMLX_TOOL_PYTHON = "3.13"
+OMLX_API_KEY_ENV = "OMLX_API_KEY"
+
+
+def resolve_latest_omlx_release(
+    *,
+    transport: httpx.BaseTransport | None = None,
+    timeout: float = 15.0,
+) -> str:
+    """Resolve the latest published oMLX release tag from the GitHub releases API.
+
+    Bootstrap installs `git+...@<tag>` so nodes track releases, not git main.
+    """
+    with httpx.Client(timeout=timeout, transport=transport, trust_env=False) as client:
+        response = client.get(
+            OMLX_RELEASES_API_URL,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "thunder-forge"},
+        )
+        response.raise_for_status()
+        tag = str(response.json().get("tag_name") or "").strip()
+    if not tag:
+        msg = f"GitHub releases API returned no tag_name ({OMLX_RELEASES_API_URL})"
+        raise ValueError(msg)
+    return tag
+
+
+def _resolve_omlx_api_key(api_key: str | None) -> str:
+    """Resolve an explicit API key or fall back to the OMLX_API_KEY env var."""
+    if api_key is not None and api_key.strip():
+        return api_key.strip()
+    return (os.environ.get(OMLX_API_KEY_ENV) or "").strip()
 
 
 def _omlx_process_pattern(*, bind_host: str, port: int) -> str:
@@ -197,12 +229,22 @@ def check_omlx_health(
     timeout: float = 5.0,
     include_models: bool = True,
     transport: httpx.BaseTransport | None = None,
+    api_key: str | None = None,
 ) -> OmlxHealthResult:
-    """Probe an oMLX server directly."""
+    """Probe an oMLX server directly.
+
+    The API key authenticates management-tier probes (`/v1/models/status`,
+    `/api/status`) on oMLX 0.7 non-loopback binds; `/health` and inference
+    endpoints stay open when the node opts in to unauthenticated inference.
+    """
     normalized_base_url = base_url.rstrip("/")
     result = OmlxHealthResult(base_url=normalized_base_url)
+    resolved_api_key = _resolve_omlx_api_key(api_key)
+    headers = {"Authorization": f"Bearer {resolved_api_key}"} if resolved_api_key else {}
 
-    with httpx.Client(base_url=normalized_base_url, timeout=timeout, transport=transport, trust_env=False) as client:
+    with httpx.Client(
+        base_url=normalized_base_url, timeout=timeout, transport=transport, trust_env=False, headers=headers
+    ) as client:
         try:
             response = client.get("/health")
             result.health_ok = response.is_success
@@ -258,12 +300,17 @@ def smoke_omlx_chat(
     prompt: str = "Reply with one short word: pong.",
     timeout: float = 30.0,
     transport: httpx.BaseTransport | None = None,
+    api_key: str | None = None,
 ) -> OmlxSmokeResult:
     """Run a minimal direct oMLX chat smoke test."""
     normalized_base_url = base_url.rstrip("/")
     result = OmlxSmokeResult(base_url=normalized_base_url, model=model)
+    resolved_api_key = _resolve_omlx_api_key(api_key)
+    headers = {"Authorization": f"Bearer {resolved_api_key}"} if resolved_api_key else {}
 
-    with httpx.Client(base_url=normalized_base_url, timeout=timeout, transport=transport, trust_env=False) as client:
+    with httpx.Client(
+        base_url=normalized_base_url, timeout=timeout, transport=transport, trust_env=False, headers=headers
+    ) as client:
         try:
             response = client.get("/health")
             result.health_ok = response.is_success
@@ -428,6 +475,135 @@ class OmlxToolingResult:
         return self.applied and self.verified and not self.errors
 
 
+@dataclass
+class OmlxAuthSettingsResult:
+    node: str
+    settings_path: str
+    command: str = ""
+    applied: bool = False
+    verified: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.applied and self.verified and not self.errors
+
+
+def omlx_auth_settings_path(node: Node) -> str:
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+    return f"{node.home_dir}/.omlx/settings.json"
+
+
+def build_omlx_auth_settings_command(node: Node, *, api_key: str) -> str:
+    """Remote script that merge-writes oMLX 0.7 auth settings for the node daemon.
+
+    oMLX 0.7 requires an API key for management endpoints on non-loopback binds
+    and supports opt-in unauthenticated inference (`auth.allow_unauthenticated_
+    inference`). TF authenticates clients at the edge layer, so the node opt-in
+    keeps inference open while the management surface stays keyed. The startup
+    guard rejects the 0.6.x-era `auth.skip_api_key_verification: true` on
+    non-loopback binds (checked before the API key), so it is forced off. The
+    write is a JSON merge (preserves all other keys), atomic (temp file +
+    rename), and 0600.
+    """
+    if node.home_dir is None:
+        msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
+        raise ValueError(msg)
+    settings_path = omlx_auth_settings_path(node)
+    return f"""set -euo pipefail
+
+NODE_HOME={shlex.quote(node.home_dir)}
+SETTINGS_PATH={shlex.quote(settings_path)}
+export HOME="$NODE_HOME"
+export OMLX_API_KEY={shlex.quote(api_key)}
+
+/bin/mkdir -p "$NODE_HOME/.omlx"
+
+/usr/bin/python3 - "$SETTINGS_PATH" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+data = {{}}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+if not isinstance(data, dict):
+    raise SystemExit("settings.json root must be a JSON object")
+
+auth = data.get("auth")
+if not isinstance(auth, dict):
+    auth = {{}}
+    data["auth"] = auth
+auth["api_key"] = os.environ["OMLX_API_KEY"]
+auth["allow_unauthenticated_inference"] = True
+auth["skip_api_key_verification"] = False
+
+fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".omlx-settings-", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\\n")
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, path)
+finally:
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+print("omlx-auth: settings updated")
+PY
+
+/usr/bin/python3 - "$SETTINGS_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    auth = json.load(handle).get("auth", {{}})
+if not auth.get("api_key") or auth.get("allow_unauthenticated_inference") is not True:
+    raise SystemExit("auth settings verification failed")
+if auth.get("skip_api_key_verification") is not False:
+    raise SystemExit("auth settings verification failed")
+print("omlx-auth: verified")
+PY
+"""
+
+
+def ensure_omlx_auth_settings(
+    node: Node,
+    *,
+    api_key: str,
+    apply: bool = True,
+    timeout: int = 60,
+    progress: Callable[[str], None] | None = None,
+) -> OmlxAuthSettingsResult:
+    """Write the oMLX 0.7 auth settings block on a node ahead of daemon setup."""
+    result = OmlxAuthSettingsResult(
+        node=node.host,
+        settings_path=omlx_auth_settings_path(node),
+        command=build_omlx_auth_settings_command(node, api_key=api_key),
+    )
+    if not apply:
+        return result
+
+    if progress:
+        progress(f"auth: writing oMLX 0.7 auth settings for {node.user}@{node.host}")
+    run_res = ssh_run(node.user, node.host, result.command, timeout=timeout, shell=node.shell)
+    result.applied = True
+    if run_res.returncode != 0:
+        err_output = ((run_res.stdout or "") + (run_res.stderr or "")).strip()
+        result.errors.append(
+            f"oMLX auth settings update failed with exit code {run_res.returncode}: {err_output}"
+        )
+        return result
+    result.verified = True
+    if progress:
+        progress(f"auth: oMLX settings ready at {result.settings_path}")
+    return result
+
+
 def _omlx_binary_path(node: Node) -> str:
     if node.home_dir is None:
         msg = "node.home_dir is None — run pre-flight first or provide resolved home_dir"
@@ -465,7 +641,7 @@ def _extract_omlx_version(raw_output: str) -> str:
 def _omlx_tooling_command(
     node: Node,
     *,
-    tool_spec: str = DEFAULT_OMLX_TOOL_SPEC,
+    tool_spec: str,
     tool_python: str = DEFAULT_OMLX_TOOL_PYTHON,
     upgrade: bool = False,
 ) -> str:
@@ -551,7 +727,7 @@ def ensure_omlx_tooling(
     *,
     apply: bool = True,
     timeout: int = 300,
-    tool_spec: str = DEFAULT_OMLX_TOOL_SPEC,
+    tool_spec: str,
     tool_python: str = DEFAULT_OMLX_TOOL_PYTHON,
     upgrade: bool = False,
     progress: Callable[[str], None] | None = None,
@@ -750,6 +926,7 @@ def _wait_for_omlx_health(
     *,
     wait_seconds: int,
     require_models: bool = True,
+    api_key: str | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> OmlxHealthResult:
     def ready(result: OmlxHealthResult) -> bool:
@@ -760,13 +937,13 @@ def _wait_for_omlx_health(
     health_label = "oMLX" if require_models else "oMLX service"
     if progress:
         progress(f"health: waiting for {health_label} at {base_url}")
-    last_result = check_omlx_health(base_url, timeout=10.0, include_models=require_models)
+    last_result = check_omlx_health(base_url, timeout=10.0, include_models=require_models, api_key=api_key)
     while not ready(last_result) and time.monotonic() < deadline:
         if progress and attempt % 5 == 0:
             progress(f"health: still waiting for {health_label} at {base_url} ({attempt}s)")
         time.sleep(1)
         attempt += 1
-        last_result = check_omlx_health(base_url, timeout=10.0, include_models=require_models)
+        last_result = check_omlx_health(base_url, timeout=10.0, include_models=require_models, api_key=api_key)
     if progress and ready(last_result):
         progress(f"health: {health_label} ok ({base_url})")
     return last_result
@@ -1011,6 +1188,7 @@ def _apply_omlx_launchd_update(
     *,
     timeout: int,
     operation: str,
+    api_key: str | None = None,
 ) -> OmlxInstallResult:
     if not result.commands:
         result.errors.append(f"No launchd commands generated for {operation}")
@@ -1051,6 +1229,7 @@ def _apply_omlx_launchd_update(
                 f"http://{node.host}:{node.runtime.port}",
                 wait_seconds=min(max(timeout, 10), 60),
                 require_models=False,
+                api_key=api_key,
             )
             result.health_ok = health.health_ok
             if not result.health_ok:
@@ -1067,6 +1246,7 @@ def _apply_omlx_daemon_update(
     result: OmlxInstallResult,
     *,
     timeout: int,
+    api_key: str | None = None,
 ) -> OmlxInstallResult:
     if not result.commands:
         result.errors.append("No daemon commands generated for restart")
@@ -1101,6 +1281,7 @@ def _apply_omlx_daemon_update(
                 f"http://{node.host}:{node.runtime.port}",
                 wait_seconds=min(max(timeout, 10), 60),
                 require_models=False,
+                api_key=api_key,
             )
             result.health_ok = health.health_ok
             if not result.health_ok:
@@ -1112,28 +1293,34 @@ def _apply_omlx_daemon_update(
     return result
 
 
-def run_omlx_install(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
+def run_omlx_install(
+    node: Node, *, apply: bool = True, timeout: int = 60, api_key: str | None = None
+) -> OmlxInstallResult:
     """Generate plist and, if apply, install/update the launchd daemon on the node."""
     result, _ = _build_omlx_launchd_result(node)
     if not apply:
         return result
-    return _apply_omlx_launchd_update(node, result, timeout=timeout, operation="install")
+    return _apply_omlx_launchd_update(node, result, timeout=timeout, operation="install", api_key=api_key)
 
 
-def run_omlx_runtime_restart(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
+def run_omlx_runtime_restart(
+    node: Node, *, apply: bool = True, timeout: int = 60, api_key: str | None = None
+) -> OmlxInstallResult:
     """Restart/update the node-level oMLX launchd daemon on the node."""
     result, _ = _build_omlx_launchd_result(node)
     if not apply:
         return result
-    return _apply_omlx_launchd_update(node, result, timeout=timeout, operation="restart")
+    return _apply_omlx_launchd_update(node, result, timeout=timeout, operation="restart", api_key=api_key)
 
 
-def run_omlx_daemon_restart(node: Node, *, apply: bool = True, timeout: int = 60) -> OmlxInstallResult:
+def run_omlx_daemon_restart(
+    node: Node, *, apply: bool = True, timeout: int = 60, api_key: str | None = None
+) -> OmlxInstallResult:
     """Install/update and restart oMLX as a sudo-backed system LaunchDaemon."""
     result, _ = _build_omlx_daemon_result(node)
     if not apply:
         return result
-    return _apply_omlx_daemon_update(node, result, timeout=timeout)
+    return _apply_omlx_daemon_update(node, result, timeout=timeout, api_key=api_key)
 
 
 def run_omlx_daemon_setup(

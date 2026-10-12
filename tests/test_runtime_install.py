@@ -213,11 +213,11 @@ def test_generate_daemon_setup_script_installs_sudoers_and_daemon() -> None:
 
 
 def test_ensure_omlx_tooling_dry_run_installs_user_local_uv_and_omlx() -> None:
-    result = ensure_omlx_tooling(_make_runtime_node(), apply=False)
+    result = ensure_omlx_tooling(_make_runtime_node(), apply=False, tool_spec="git+https://github.com/jundot/omlx.git@v0.7.1.dev1")
 
     assert result.uv_path == "/Users/shag/.local/bin/uv"
     assert result.omlx_path == "/Users/shag/.local/bin/omlx"
-    assert result.tool_spec == "git+https://github.com/jundot/omlx.git"
+    assert result.tool_spec == "git+https://github.com/jundot/omlx.git@v0.7.1.dev1"
     assert "OMLX_UPGRADE=0" in result.command
     assert 'OMLX_TOOL_PYTHON=3.13' in result.command
     assert "https://astral.sh/uv/install.sh" in result.command
@@ -229,7 +229,7 @@ def test_ensure_omlx_tooling_dry_run_installs_user_local_uv_and_omlx() -> None:
 
 
 def test_ensure_omlx_tooling_dry_run_upgrade_mode_requests_tool_upgrade() -> None:
-    result = ensure_omlx_tooling(_make_runtime_node(), apply=False, upgrade=True)
+    result = ensure_omlx_tooling(_make_runtime_node(), apply=False, upgrade=True, tool_spec="git+https://github.com/jundot/omlx.git@v0.7.1.dev1")
 
     assert "OMLX_UPGRADE=1" in result.command
     assert '"$UV_BINARY" tool install --python "$OMLX_TOOL_PYTHON" --upgrade "$OMLX_TOOL_SPEC"' in result.command
@@ -258,7 +258,7 @@ def test_ensure_omlx_tooling_apply_runs_as_node_user(monkeypatch) -> None:
 
     monkeypatch.setattr(omlx_module, "ssh_run", fake_ssh_run)
 
-    result = ensure_omlx_tooling(node, apply=True, timeout=120)
+    result = ensure_omlx_tooling(node, apply=True, timeout=120, tool_spec="git+https://github.com/jundot/omlx.git@v0.7.1.dev1")
 
     assert result.ok
     assert calls == [
@@ -289,7 +289,7 @@ def test_ensure_omlx_tooling_apply_falls_back_to_direct_path_when_omlx_is_missin
 
     monkeypatch.setattr(omlx_module, "ssh_run", fake_ssh_run)
 
-    result = ensure_omlx_tooling(node, apply=True, timeout=120)
+    result = ensure_omlx_tooling(node, apply=True, timeout=120, tool_spec="git+https://github.com/jundot/omlx.git@v0.7.1.dev1")
 
     assert result.ok
     assert result.applied

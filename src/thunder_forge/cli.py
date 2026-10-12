@@ -65,8 +65,12 @@ from thunder_forge.cluster.log_retention import trim_local_logs
 from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases
 from thunder_forge.cluster.olla import dev_smoke_olla, run_olla_service_restart, smoke_olla_router
 from thunder_forge.cluster.omlx import (
+    OMLX_API_KEY_ENV,
+    OMLX_TOOL_REPO_SPEC,
     check_omlx_health,
+    ensure_omlx_auth_settings,
     ensure_omlx_tooling,
+    resolve_latest_omlx_release,
     run_omlx_daemon_restart,
     run_omlx_daemon_setup,
     run_omlx_install,
@@ -145,6 +149,7 @@ def _load_config() -> tuple[ClusterConfig, Path]:
     """Load the TF cluster config. Returns (ClusterConfig, repo_root Path)."""
     import thunder_forge.cluster.config as _cfg
 
+    _load_repo_dotenv()
     repo_root = _cfg.find_repo_root()
     cluster_config_path = _cfg.default_cluster_config_path(repo_root)
     if not cluster_config_path.exists():
@@ -2338,6 +2343,13 @@ def _latest_olla_release_version(*, timeout: int = 5) -> str:
     return latest
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _omlx_api_key_from_env() -> str:
+    return (os.environ.get(OMLX_API_KEY_ENV) or "").strip()
+
+
 def _resolved_olla_version_for_prepare(*, cli_version: str | None, services: ServiceConfig) -> str:
     if cli_version is not None and cli_version.strip():
         return cli_version.strip()
@@ -2452,7 +2464,11 @@ def cluster_prepare(
             escalation = f"su={resolved_admin_user}" if resolved_admin_user else f"sudo={node.user}"
             home_dir = node.home_dir or f"/Users/{node.user}"
             action = "upgrade" if upgrade_omlx else "ensure"
-            typer.echo(f"would: {action} oMLX CLI at {home_dir}/.local/bin/omlx")
+            typer.echo(
+                f"would: {action} oMLX CLI at {home_dir}/.local/bin/omlx "
+                "(latest release tag resolved at apply time)"
+            )
+            typer.echo(f"would: write oMLX 0.7 auth settings at {home_dir}/.omlx/settings.json")
             typer.echo(f"would: bootstrap {name} ssh={node.user}@{node.host} {escalation}")
         return
 
@@ -2530,6 +2546,33 @@ def cluster_prepare(
         )
         typer.echo("  status: cache hub ready")
 
+    omlx_tool_spec = ""
+    if inference_names:
+        omlx_api_key = _omlx_api_key_from_env()
+        unkeyed_nodes = [
+            node_id
+            for node_id in inference_names
+            if config.nodes[node_id].runtime is not None
+            and config.nodes[node_id].runtime.bind_host not in _LOOPBACK_HOSTS
+            and not omlx_api_key
+        ]
+        if unkeyed_nodes:
+            typer.echo(
+                f"Error: {OMLX_API_KEY_ENV} is not set; oMLX 0.7 requires an API key for "
+                f"non-loopback binds on: {', '.join(unkeyed_nodes)}. "
+                f"Add {OMLX_API_KEY_ENV} to .env (openssl rand -hex 32).",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        try:
+            omlx_release_tag = resolve_latest_omlx_release()
+        except Exception as exc:
+            typer.echo(f"Error: failed to resolve latest oMLX release: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        omlx_tool_spec = f"{OMLX_TOOL_REPO_SPEC}@{omlx_release_tag}"
+        typer.echo(f"omlx: latest release tag {omlx_release_tag} ({omlx_tool_spec})")
+
     for node_id in inference_names:
         runtime_node = _get_runtime_node(config, node_id)
         if runtime_node.home_dir is None:
@@ -2555,6 +2598,7 @@ def cluster_prepare(
             apply=True,
             timeout=timeout,
             upgrade=upgrade_omlx,
+            tool_spec=omlx_tool_spec,
             progress=_progress,
         )
         _fail_on_setup_errors(tooling_result.errors)
@@ -2567,6 +2611,17 @@ def cluster_prepare(
             if upgrade_omlx
             else "  upgrade_note: upgrade disabled; keeping current installed version"
         )
+        auth_result = ensure_omlx_auth_settings(
+            runtime_node,
+            api_key=omlx_api_key,
+            apply=True,
+            timeout=timeout,
+            progress=_progress,
+        )
+        _fail_on_setup_errors(auth_result.errors)
+        if not auth_result.ok:
+            typer.echo("Error: oMLX auth settings did not verify cleanly", err=True)
+            raise typer.Exit(1)
         result = run_omlx_daemon_setup(
             runtime_node,
             admin_user=resolved_admin_user or None,

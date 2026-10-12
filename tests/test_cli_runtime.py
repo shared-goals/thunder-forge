@@ -18,6 +18,7 @@ from thunder_forge.cluster.edge import EdgeSmokeResult
 from thunder_forge.cluster.gateway import GatewayDaemonSetupResult
 from thunder_forge.cluster.olla import OllaDevSmokeResult, OllaSmokeResult
 from thunder_forge.cluster.omlx import (
+    OmlxAuthSettingsResult,
     OmlxDaemonSetupResult,
     OmlxHealthResult,
     OmlxProcessResult,
@@ -528,6 +529,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     def fake_ensure_omlx_tooling(runtime_node, **kwargs):
         calls.append(f"tooling:{runtime_node.host}")
         assert kwargs["upgrade"] is True
+        assert kwargs["tool_spec"] == "git+https://github.com/jundot/omlx.git@v0.7.1.dev1"
         kwargs["progress"]("tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx")
         return OmlxToolingResult(
             node=runtime_node.host,
@@ -562,12 +564,29 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
         return SimpleNamespace(label="com.thunder-forge.omlx-8018", errors=[], applied=True, ok=True)
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (repo, repo / ".env"))
+    monkeypatch.setenv("OMLX_API_KEY", "test-omlx-key")
     monkeypatch.setattr(cli_module, "ensure_olla_binary", fake_ensure_olla_binary)
     monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
     monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
     monkeypatch.setattr(cli_module, "_is_local_host", lambda host: True)
     monkeypatch.setattr(cli_module, "ensure_cache_hub_dir", fake_ensure_cache_hub_dir)
     monkeypatch.setattr(cli_module, "ensure_omlx_tooling", fake_ensure_omlx_tooling)
+
+    def fake_ensure_omlx_auth_settings(runtime_node, **kwargs):
+        calls.append("auth")
+        assert kwargs["api_key"] == "test-omlx-key"
+        assert kwargs["apply"] is True
+        kwargs["progress"]("auth: oMLX settings ready at /Users/shag/.omlx/settings.json")
+        return OmlxAuthSettingsResult(
+            node=runtime_node.host,
+            settings_path=f"{runtime_node.home_dir}/.omlx/settings.json",
+            applied=True,
+            verified=True,
+        )
+
+    monkeypatch.setattr(cli_module, "resolve_latest_omlx_release", lambda: "v0.7.1.dev1")
+    monkeypatch.setattr(cli_module, "ensure_omlx_auth_settings", fake_ensure_omlx_auth_settings)
     monkeypatch.setattr(cli_module, "run_omlx_daemon_setup", fake_run_omlx_daemon_setup)
     monkeypatch.setattr(cli_module, "run_omlx_daemon_restart", fake_run_omlx_daemon_restart)
 
@@ -580,6 +599,7 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
         "gateway",
         "cache",
         "tooling:infer-03.lan",
+        "auth",
         "inference",
         "restart",
     ]
@@ -595,8 +615,42 @@ def test_cluster_prepare_apply_runs_gateway_cache_and_inference(tmp_path: Path, 
     assert "== Inference: infer-03 (infer-03.lan) ==" in result.stdout
     assert "auth: ssh=shag@infer-03.lan method=su admin=admin reason=install oMLX LaunchDaemon" in result.stdout
     assert "tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx" in result.stdout
+    assert "auth: oMLX settings ready at /Users/shag/.omlx/settings.json" in result.stdout
     assert "omlx: restarted com.thunder-forge.omlx-8018" in result.stdout
     assert "status: cluster prepare complete" in result.stdout
+
+
+def test_cluster_prepare_requires_omlx_api_key_for_inference(tmp_path: Path, monkeypatch) -> None:
+    """oMLX 0.7 refuses non-loopback binds without a key, so prepare fails fast."""
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent("""\
+            models: {}
+            nodes:
+              infer-03:
+                host: infer-03.lan
+                ram_gb: 128
+                roles: [inference]
+                user: shag
+                admin_user: admin
+                runtime:
+                  type: omlx
+        """)
+    )
+
+    # Hermetic: no developer .env may satisfy the oMLX 0.7 key requirement.
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_load_repo_dotenv", lambda: (repo, repo / ".env"))
+    monkeypatch.delenv("OMLX_API_KEY", raising=False)
+
+    result = runner.invoke(app, ["cluster", "prepare", "--apply"])
+
+    assert result.exit_code == 1
+    assert "Error: OMLX_API_KEY is not set" in result.stderr
+    assert "non-loopback binds on: infer-03" in result.stderr
 
 
 def test_cluster_prepare_dry_run_uses_latest_olla_when_config_is_unpinned(tmp_path: Path, monkeypatch) -> None:
@@ -804,6 +858,7 @@ def test_cluster_prepare_apply_prepares_remote_cache_hub(tmp_path: Path, monkeyp
     def fake_ensure_omlx_tooling(runtime_node, **kwargs):
         calls.append(f"tooling:{runtime_node.host}")
         assert kwargs["upgrade"] is True
+        assert kwargs["tool_spec"] == "git+https://github.com/jundot/omlx.git@v0.7.1.dev1"
         kwargs["progress"]("tooling: oMLX CLI ready at /Users/shag/.local/bin/omlx")
         return OmlxToolingResult(
             node=runtime_node.host,
@@ -822,6 +877,7 @@ def test_cluster_prepare_apply_prepares_remote_cache_hub(tmp_path: Path, monkeyp
     monkeypatch.setattr(cli_module, "ensure_olla_binary", fake_ensure_olla_binary)
     monkeypatch.setattr(cli_module, "write_generated_olla_config", fake_write_generated_olla_config)
     monkeypatch.setattr(cli_module, "run_gateway_daemon_setup", fake_run_gateway_daemon_setup)
+    monkeypatch.setattr(cli_module, "resolve_latest_omlx_release", lambda: "v0.7.1.dev1")
     monkeypatch.setattr(cli_module, "ensure_omlx_tooling", fake_ensure_omlx_tooling)
     monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
     monkeypatch.setattr(cli_module, "_is_local_host", lambda host: host == "rock.lan")
