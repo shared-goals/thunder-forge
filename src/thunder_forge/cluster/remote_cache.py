@@ -6,7 +6,7 @@ import base64
 import json
 import shlex
 
-from thunder_forge.cluster.artifacts import build_artifact_identity
+from thunder_forge.cluster.artifacts import artifact_complete_command, build_artifact_identity
 from thunder_forge.cluster.config import Node
 
 
@@ -355,6 +355,13 @@ PY"""
     return script.replace("__PAYLOAD_B64__", repr(payload_b64))
 
 
+def _ssh_client_options(ssh_host_key_alias: str | None) -> list[str]:
+    options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+    if ssh_host_key_alias:
+        options.extend(["-o", f"HostKeyAlias={ssh_host_key_alias}"])
+    return options
+
+
 def remote_cache_sync_command(
     *,
     repo_id: str,
@@ -370,9 +377,7 @@ def remote_cache_sync_command(
     remote_model_parent_dir = f"{remote_omlx_models_dir}/{identity.namespace}"
     destination = f"{runtime_node.user}@{transport_host}:{remote_omlx_models_dir}/{identity.model_dir_name}/"
 
-    ssh_options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
-    if ssh_host_key_alias:
-        ssh_options.extend(["-o", f"HostKeyAlias={ssh_host_key_alias}"])
+    ssh_options = _ssh_client_options(ssh_host_key_alias)
 
     ssh_mkdir_cmd = " ".join(
         shlex.quote(arg)
@@ -386,18 +391,7 @@ def remote_cache_sync_command(
         ]
     )
     remote_model_dir = f"{remote_omlx_models_dir}/{identity.model_dir_name}"
-    destination_ready_command = " && ".join(
-        [
-            f"test -d {shlex.quote(remote_model_dir)}",
-            f"test -f {shlex.quote(f'{remote_model_dir}/config.json')}",
-            f"test -z \"$(find {shlex.quote(remote_model_dir)} -name '*.incomplete' -print -quit)\"",
-            f"test ! -e {shlex.quote(f'{remote_model_dir}/.rsync-partial')}",
-            (
-                f"test -n \"$(find {shlex.quote(remote_model_dir)} "
-                "\\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""
-            ),
-        ]
-    )
+    destination_ready_command = artifact_complete_command(shlex.quote(remote_model_dir))
     destination_readiness_cmd = " ".join(
         shlex.quote(arg)
         for arg in [
@@ -576,3 +570,90 @@ else:
 print('__TF_TRANSPORT_PLAN__' + json.dumps(plan, sort_keys=True))
 PY"""
     return script.replace("__PAYLOAD_B64__", repr(payload_b64))
+
+
+def remote_cache_stage_command(
+    *,
+    repo_id: str,
+    source_node: Node,
+    cache_node: Node,
+    cache_models_dir: str,
+    transport_host: str,
+    ssh_host_key_alias: str | None,
+) -> tuple[str, str, str]:
+    """Build a source-node script that stages one model directory onto the cache hub.
+
+    Runs on the source inference node (the machine holding the model) and
+    pushes `<home>/.omlx/models/<dir>/` to the hub over the given transport.
+    Mirrors remote_cache_sync_command's source-readiness checks and verifies
+    the staged copy on the hub afterwards.
+    """
+    identity = build_artifact_identity(repo_id)
+    source_path = f"{source_node.home_dir}/.omlx/models/{identity.model_dir_name}/"
+    destination = f"{cache_node.user}@{transport_host}:{cache_models_dir}/{identity.model_dir_name}/"
+
+    ssh_options = _ssh_client_options(ssh_host_key_alias)
+
+    ssh_mkdir_cmd = " ".join(
+        shlex.quote(arg)
+        for arg in [
+            "ssh",
+            *ssh_options,
+            f"{cache_node.user}@{transport_host}",
+            "mkdir",
+            "-p",
+            f"{cache_models_dir}/{identity.namespace}",
+        ]
+    )
+    rsync_cmd = " ".join(
+        shlex.quote(arg)
+        for arg in [
+            "rsync",
+            "-a",
+            "--progress",
+            "--partial-dir=.rsync-partial",
+            "--exclude",
+            ".cache/",
+            "-e",
+            "ssh " + " ".join(shlex.quote(option) for option in ssh_options),
+            f"{source_path}",
+            destination,
+        ]
+    )
+    staged_path = f"{cache_models_dir}/{identity.model_dir_name}"
+    staged_ready_command = artifact_complete_command(shlex.quote(staged_path))
+    staged_readiness_cmd = " ".join(
+        shlex.quote(arg)
+        for arg in [
+            "ssh",
+            *ssh_options,
+            f"{cache_node.user}@{transport_host}",
+            staged_ready_command,
+        ]
+    )
+
+    command = (
+        "set -euo pipefail; "
+        f'SOURCE_PATH={shlex.quote(source_path)}; '
+        'if [[ ! -d "$SOURCE_PATH" ]]; then '
+        f'echo "missing source oMLX model dir: $SOURCE_PATH" >&2; '
+        "exit 2; "
+        "fi; "
+        'test -f "$SOURCE_PATH/config.json" || { '
+        'echo "incomplete source oMLX model dir: missing config.json: $SOURCE_PATH" >&2; '
+        "exit 2; "
+        "}; "
+        'test -z "$(find "$SOURCE_PATH" -name \'*.incomplete\' -print -quit)" || { '
+        'echo "incomplete source oMLX model dir: partial artifact present: $SOURCE_PATH" >&2; '
+        "exit 2; "
+        "}; "
+        f"{ssh_mkdir_cmd}; "
+        f"{rsync_cmd}; "
+        f"if {staged_readiness_cmd}; then "
+        f'echo "staged {identity.model_dir_name} to hub"; '
+        "else "
+        'echo "staged model incomplete on hub: ' + identity.model_dir_name + '" >&2; '
+        "exit 3; "
+        "fi"
+    )
+    return source_path, destination, command

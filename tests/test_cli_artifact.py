@@ -397,23 +397,22 @@ def test_artifact_sync_apply_runs_directly_on_remote_cache_host(tmp_path: Path, 
 
     assert result.exit_code == 0
     assert "cache_exec: remote studio (remote-cache.lan)" in result.stdout
+    assert "hub: up to date mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stdout
     assert calls[0][0] == "shag"
     assert calls[0][1] == "remote-cache.lan"
-    assert "rsync" in calls[0][2]
-    assert "--exclude" in calls[0][2]
-    assert ".cache/" in calls[0][2]
-    assert "TF_CACHE_REMOTE_EXEC=1" not in calls[0][2]
-    assert "mkdir -p" in calls[0][2]
-    assert "destination already has complete oMLX model" in calls[0][2]
-    assert "test -d /Users/shag/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8" in calls[0][2]
-    assert "missing cache oMLX model dir" in calls[0][2]
-    assert 'test -f "$SOURCE_PATH/config.json"' in calls[0][2]
-    assert "find \"$SOURCE_PATH\" -name '*.incomplete'" in calls[0][2]
-    assert 'test ! -e "$SOURCE_PATH/.rsync-partial"' in calls[0][2]
-    assert "find \"$SOURCE_PATH\" \\( -name '*.safetensors' -o -name '*.bin' \\)" in calls[0][2]
-    assert '"$SOURCE_PATH"' in calls[0][2]
-    assert "'$SOURCE_PATH'" not in calls[0][2]
-    assert calls[0][3]["timeout"] == 123
+    assert "MODEL_DIR" in calls[0][2]
+    assert calls[1][0] == "shag"
+    assert calls[1][1] == "remote-cache.lan"
+    assert "rsync" in calls[1][2]
+    assert "--exclude" in calls[1][2]
+    assert ".cache/" in calls[1][2]
+    assert "TF_CACHE_REMOTE_EXEC=1" not in calls[1][2]
+    assert "mkdir -p" in calls[1][2]
+    assert "destination already has complete oMLX model" in calls[1][2]
+    assert "test -d /Users/shag/.omlx/models/mlx-community/gpt-oss-20b-MXFP4-Q8" in calls[1][2]
+    assert "missing cache oMLX model dir" in calls[1][2]
+    assert calls[0][3]["timeout"] == 30
+    assert calls[1][3]["timeout"] == 123
     assert "status: synced" in result.stdout
 
 
@@ -469,10 +468,11 @@ def test_artifact_sync_apply_resolves_fabric_on_remote_cache_host(tmp_path: Path
     assert calls[0][0] == "shag"
     assert calls[0][1] == "remote-cache.lan"
     assert "__TF_TRANSPORT_PLAN__" in calls[0][2]
-    assert calls[1][0] == "shag"
-    assert calls[1][1] == "remote-cache.lan"
-    assert "HostKeyAlias=infer-01.lan" in calls[1][2]
-    assert "169.254.251.195" in calls[1][2]
+    assert "MODEL_DIR" in calls[1][2]
+    assert calls[2][0] == "shag"
+    assert calls[2][1] == "remote-cache.lan"
+    assert "HostKeyAlias=infer-01.lan" in calls[2][2]
+    assert "169.254.251.195" in calls[2][2]
     assert "transport_host: 169.254.251.195" in result.stdout
     assert "fabric_fallback" not in result.stdout
     assert "status: synced" in result.stdout
@@ -1102,3 +1102,114 @@ def test_artifact_sync_apply_propagates_runner_failure(tmp_path: Path, monkeypat
 
     assert result.exit_code == 23
     assert "sync failed with exit code 23" in result.stderr
+
+
+def test_artifact_sync_stages_missing_model_from_seed_node_to_hub(tmp_path: Path, monkeypatch) -> None:
+    """Hub missing + seed node complete: stage node->hub (fabric), then sync hub->node."""
+    repo = tmp_path
+    _write_runtime_config_with_remote_cache_and_fabric(repo, cache_host="studio.lan")
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_is_local_host", lambda host: False)
+    # Hub is missing the model; the seed node has it complete.
+    monkeypatch.setattr(cli_module, "_remote_artifact_complete_on_cache", lambda **kwargs: False)
+    monkeypatch.setattr(cli_module, "_remote_artifact_complete", lambda **kwargs: True)
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd, kwargs))
+        if "__TF_TRANSPORT_PLAN__" in cmd:
+            mgmt = "infer-01.lan" if "infer-01.lan" in cmd else "studio.lan"
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=(
+                    f'__TF_TRANSPORT_PLAN__{{"error": "", '
+                    f'"fabric_fallback": "", '
+                    f'"management_host": "{mgmt}", '
+                    f'"requested_transport": "auto", '
+                    f'"resolved_transport_host": "169.254.251.195", '
+                    f'"transport_host": "169.254.251.195"}}\n'
+                ),
+                stderr="",
+            )
+        if "printf %s" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="/Users/shag/.omlx/models", stderr=""
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            "--node",
+            "infer-01",
+            "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "hub_stage: mlx-community/gpt-oss-20b-MXFP4-Q8 from infer-01.lan (fabric)" in result.stdout
+    stage_calls = [c for c in calls if "staged" in c[2] and "CACHE_ROOT" not in c[2]]
+    assert stage_calls, "expected a staging rsync command"
+    assert stage_calls[0][0] == "shag"
+    assert stage_calls[0][1] == "infer-01.lan"
+    assert "HostKeyAlias=studio.lan" in stage_calls[0][2]
+    assert "169.254.251.195" in stage_calls[0][2]
+    assert "rsync" in stage_calls[0][2]
+    # Ordinary hub->node sync still ran afterwards.
+    sync_calls = [c for c in calls if "missing cache oMLX model dir" in c[2]]
+    assert sync_calls, "expected the ordinary hub-to-node sync to run"
+    assert "status: synced" in result.stdout
+
+
+def test_artifact_sync_fails_fast_when_hub_and_nodes_missing_model(tmp_path: Path, monkeypatch) -> None:
+    """Hub missing + no inference node has the model: fail with seeding guidance."""
+    repo = tmp_path
+    _write_runtime_config_with_remote_cache(repo, cache_host="studio.lan")
+    calls = []
+
+    import subprocess
+
+    import thunder_forge.cli as cli_module
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+    monkeypatch.setattr(cli_module, "_remote_artifact_complete_on_cache", lambda **kwargs: False)
+    monkeypatch.setattr(cli_module, "_remote_artifact_complete", lambda **kwargs: False)
+
+    def fake_ssh_run(user, ip, cmd, **kwargs):
+        calls.append((user, ip, cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_module, "ssh_run", fake_ssh_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "artifact",
+            "sync",
+            "--model",
+            "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            "--node",
+            "infer-01",
+            "--apply",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "hub is missing mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stderr
+    assert "seed it first: make model mlx-community/gpt-oss-20b-MXFP4-Q8" in result.stderr
+    # No sync script may run when nothing can stage the model.
+    assert not [c for c in calls if "missing cache oMLX model dir" in c[2]]

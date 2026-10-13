@@ -40,3 +40,6 @@ logs/
 
 # Temporary local spike artifacts
 .tmp/
+
+# benchmark reports
+reports/

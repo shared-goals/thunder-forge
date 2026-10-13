@@ -58,7 +58,7 @@ def resolve_latest_omlx_release(
     return tag
 
 
-def _resolve_omlx_api_key(api_key: str | None) -> str:
+def resolve_omlx_api_key(api_key: str | None) -> str:
     """Resolve an explicit API key or fall back to the OMLX_API_KEY env var."""
     if api_key is not None and api_key.strip():
         return api_key.strip()
@@ -239,7 +239,7 @@ def check_omlx_health(
     """
     normalized_base_url = base_url.rstrip("/")
     result = OmlxHealthResult(base_url=normalized_base_url)
-    resolved_api_key = _resolve_omlx_api_key(api_key)
+    resolved_api_key = resolve_omlx_api_key(api_key)
     headers = {"Authorization": f"Bearer {resolved_api_key}"} if resolved_api_key else {}
 
     with httpx.Client(
@@ -305,7 +305,7 @@ def smoke_omlx_chat(
     """Run a minimal direct oMLX chat smoke test."""
     normalized_base_url = base_url.rstrip("/")
     result = OmlxSmokeResult(base_url=normalized_base_url, model=model)
-    resolved_api_key = _resolve_omlx_api_key(api_key)
+    resolved_api_key = resolve_omlx_api_key(api_key)
     headers = {"Authorization": f"Bearer {resolved_api_key}"} if resolved_api_key else {}
 
     with httpx.Client(

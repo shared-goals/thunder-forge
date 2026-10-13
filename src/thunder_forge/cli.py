@@ -29,6 +29,8 @@ from thunder_forge.cluster.artifacts import (
     ArtifactPresence,
     ArtifactReadinessAction,
     ArtifactSyncPlan,
+    _remote_artifact_complete,
+    artifact_complete_command,
     build_artifact_download_plan,
     build_artifact_identity,
     build_artifact_readiness_plan,
@@ -71,6 +73,7 @@ from thunder_forge.cluster.omlx import (
     ensure_omlx_auth_settings,
     ensure_omlx_tooling,
     resolve_latest_omlx_release,
+    resolve_omlx_api_key,
     run_omlx_daemon_restart,
     run_omlx_daemon_setup,
     run_omlx_install,
@@ -93,6 +96,9 @@ from thunder_forge.cluster.remote_cache import (
 )
 from thunder_forge.cluster.remote_cache import (
     remote_artifact_download_command as _remote_artifact_download_command,
+)
+from thunder_forge.cluster.remote_cache import (
+    remote_cache_stage_command as _remote_cache_stage_command,
 )
 from thunder_forge.cluster.remote_cache import (
     remote_cache_sync_command as _remote_cache_sync_command,
@@ -426,11 +432,7 @@ def _remote_artifact_complete_on_cache(*, cache_node: Node, model_dir_name: str,
         "set -euo pipefail; "
         'CACHE_ROOT="${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"; '
         f'MODEL_DIR="$CACHE_ROOT/{model_dir_name}"; '
-        'test -d "$MODEL_DIR" && '
-        'test -f "$MODEL_DIR/config.json" && '
-        "test -z \"$(find \"$MODEL_DIR\" -name '*.incomplete' -print -quit)\" && "
-        'test ! -e "$MODEL_DIR/.rsync-partial" && '
-        "test -n \"$(find \"$MODEL_DIR\" \\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""
+        + artifact_complete_command('"$MODEL_DIR"')
     )
     result = ssh_run(
         cache_node.user,
@@ -440,6 +442,62 @@ def _remote_artifact_complete_on_cache(*, cache_node: Node, model_dir_name: str,
         shell=cache_node.shell,
     )
     return result.returncode == 0
+
+
+def _remote_transport_plan_probe(
+    probe_node: Node,
+    *,
+    requested_transport: str,
+    management_host: str,
+    node_user: str,
+    fabric_host: bool,
+    timeout: int,
+) -> TransportPlan:
+    """Run the dynamic fabric probe on probe_node toward management_host."""
+    payload = {
+        "requested_transport": requested_transport,
+        "management_host": management_host,
+        "node_user": node_user,
+        "fabric_host": fabric_host,
+        "timeout": 2,
+    }
+    payload_b64 = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    result = ssh_run(
+        probe_node.user,
+        probe_node.host,
+        _remote_transport_plan_probe_command(payload_b64=payload_b64),
+        timeout=max(timeout + 30, 60),
+        shell=probe_node.shell,
+        node_id=probe_node.host,
+    )
+    if result.returncode != 0:
+        typer.echo(f"Error: remote transport probe failed on {probe_node.host}", err=True)
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            typer.echo(stderr, err=True)
+        raise typer.Exit(result.returncode)
+
+    marker = "__TF_TRANSPORT_PLAN__"
+    payload_line = next(
+        (line for line in reversed((result.stdout or "").splitlines()) if line.startswith(marker)),
+        None,
+    )
+    if payload_line is None:
+        typer.echo(
+            f"Error: remote transport probe on {probe_node.host} returned no plan",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    plan_data = json.loads(payload_line[len(marker) :])
+    return TransportPlan(
+        requested_transport=str(plan_data["requested_transport"]),
+        management_host=str(plan_data["management_host"]),
+        transport_host=str(plan_data["transport_host"]),
+        resolved_transport_host=str(plan_data["resolved_transport_host"]),
+        fabric_fallback=str(plan_data.get("fabric_fallback", "")),
+        error=str(plan_data.get("error", "")),
+    )
 
 
 def _resolve_transport_plan_for_sync(
@@ -458,49 +516,13 @@ def _resolve_transport_plan_for_sync(
         )
 
     cache_name, cache_node = remote_cache_target
-    payload = {
-        "requested_transport": requested_transport,
-        "management_host": runtime_node.host,
-        "node_user": runtime_node.user,
-        "fabric_host": runtime_node.fabric_host,
-        "timeout": 2,
-    }
-    payload_b64 = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
-    result = ssh_run(
-        cache_node.user,
-        cache_node.host,
-        _remote_transport_plan_probe_command(payload_b64=payload_b64),
-        timeout=max(timeout + 30, 60),
-        shell=cache_node.shell,
-        node_id=cache_name,
-    )
-    if result.returncode != 0:
-        typer.echo(f"Error: remote transport probe failed on {cache_name} ({cache_node.host})", err=True)
-        stderr = (result.stderr or "").strip()
-        if stderr:
-            typer.echo(stderr, err=True)
-        raise typer.Exit(result.returncode)
-
-    marker = "__TF_TRANSPORT_PLAN__"
-    payload_line = next(
-        (line for line in reversed((result.stdout or "").splitlines()) if line.startswith(marker)),
-        None,
-    )
-    if payload_line is None:
-        typer.echo(
-            f"Error: remote transport probe on {cache_name} ({cache_node.host}) returned no plan",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    plan_data = json.loads(payload_line[len(marker) :])
-    return TransportPlan(
-        requested_transport=str(plan_data["requested_transport"]),
-        management_host=str(plan_data["management_host"]),
-        transport_host=str(plan_data["transport_host"]),
-        resolved_transport_host=str(plan_data["resolved_transport_host"]),
-        fabric_fallback=str(plan_data.get("fabric_fallback", "")),
-        error=str(plan_data.get("error", "")),
+    return _remote_transport_plan_probe(
+        cache_node,
+        requested_transport=requested_transport,
+        management_host=runtime_node.host,
+        node_user=runtime_node.user,
+        fabric_host=runtime_node.fabric_host,
+        timeout=timeout,
     )
 
 
@@ -2347,7 +2369,7 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _omlx_api_key_from_env() -> str:
-    return (os.environ.get(OMLX_API_KEY_ENV) or "").strip()
+    return resolve_omlx_api_key(None)
 
 
 def _resolved_olla_version_for_prepare(*, cli_version: str | None, services: ServiceConfig) -> str:
@@ -2755,6 +2777,110 @@ def cluster_restart(
         return
     typer.echo("")
     typer.echo("status: cluster restart complete" if not dry_run else "status: dry-run complete")
+
+
+@cluster_app.command("bench")
+def cluster_bench(
+    node_id: str = typer.Argument(..., help="Node name from tfconfig.yaml (e.g. msm1)."),
+    model_alias: str = typer.Argument(..., help="Model alias from tfconfig, or a raw HF repo id."),
+    compare_alias: str = typer.Argument(
+        "agent",
+        help="The assigned alias slot the candidate would take over (default: agent).",
+    ),
+    skip_local: bool = typer.Option(False, "--skip-local", help="Card + omlx.ai data only; run no local benchmarks."),
+    run_context: bool = typer.Option(
+        False,
+        "--context",
+        help="Also run the context-window benchmark (minutes of pure prefill; off by default).",
+    ),
+    skip_throughput: bool = typer.Option(False, "--skip-throughput", help="Skip the local throughput benchmark."),
+    target_context: int = typer.Option(
+        65536,
+        "--target-context",
+        help="Context benchmark target tokens (16384..524288). Lower = faster (prefill cost scales).",
+    ),
+    generation_length: int = typer.Option(128, "--generation-length", help="Throughput bench generation tokens."),
+    prompt_lengths: str = typer.Option(
+        "1024,4096", "--prompt-lengths", help="Comma-separated prompt lengths for the throughput bench."
+    ),
+    batch_sizes: str = typer.Option(
+        "2,4", "--batch-sizes", help="Comma-separated batch sizes for the throughput bench."
+    ),
+    accuracy: str = typer.Option(
+        "",
+        "--accuracy",
+        help=(
+            "Optional accuracy run as name=samples CSV, e.g. 'livecodebench=25,gsm8k=50,mmlu=50'. "
+            "Expensive; off by default."
+        ),
+    ),
+    timeout_context: int = typer.Option(2400, "--timeout-context", help="Context bench timeout in seconds."),
+    timeout_throughput: int = typer.Option(1800, "--timeout-throughput", help="Throughput bench timeout in seconds."),
+) -> None:
+    """Benchmark a model on a node and compare it with the assigned model set.
+
+    Pulls model-card facts from Hugging Face, published chip benchmarks from
+    omlx.ai, then runs the throughput benchmark locally. `--context` adds the
+    context-window (memory boundary) benchmark; `--accuracy` adds quality
+    indexes. Embedding and reranker models assigned to the node are
+    reserved: never benchmarked, always subtracted from the budget. Reports
+    are saved under reports/bench/.
+    """
+    import thunder_forge.cluster.bench as bench_mod
+
+    config, repo_root = _load_config()
+    if node_id not in config.nodes:
+        typer.echo(f"Error: node '{node_id}' is not defined in tfconfig.yaml", err=True)
+        raise typer.Exit(1)
+    node = config.nodes[node_id]
+    if node.runtime is None:
+        typer.echo(f"Error: node '{node_id}' has no runtime configured", err=True)
+        raise typer.Exit(1)
+
+    def _progress(message: str) -> None:
+        typer.echo(f"  {message}")
+
+    accuracy_specs: dict[str, int] | None = None
+    if accuracy.strip():
+        accuracy_specs = {}
+        for part in accuracy.split(","):
+            name, _, size = part.partition("=")
+            accuracy_specs[name.strip()] = int(size or 0)
+
+    lengths = tuple(int(part) for part in prompt_lengths.split(",") if part.strip())
+    batches = tuple(int(part) for part in batch_sizes.split(",") if part.strip())
+
+    try:
+        report_lines, report_path = bench_mod.run_bench_workflow(
+            config=config,
+            node_id=node_id,
+            node=node,
+            repo_root=repo_root,
+            model_alias=model_alias,
+            compare_alias=compare_alias,
+            api_key=_omlx_api_key_from_env(),
+            skip_local=skip_local,
+            run_context=run_context,
+            skip_throughput=skip_throughput,
+            target_context=target_context,
+            generation_length=generation_length,
+            prompt_lengths=lengths,
+            batch_sizes=batches,
+            accuracy=accuracy_specs,
+            timeout_context=timeout_context,
+            timeout_throughput=timeout_throughput,
+            progress=_progress,
+        )
+    except bench_mod.BenchError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("")
+    for line in report_lines:
+        typer.echo(line)
+    typer.echo("")
+    typer.echo(f"report: saved to {report_path}")
+    typer.echo("status: bench complete")
 
 
 @cluster_app.command("status")
@@ -4224,6 +4350,158 @@ def _run_artifact_sync_execution(
     typer.echo("status: synced")
 
 
+def _stage_missing_models_to_hub(
+    *,
+    config: ClusterConfig,
+    repo_ids: list[str],
+    dry_run: bool,
+    requested_transport: str,
+    timeout: int,
+    remote_cache_target: tuple[str, Node],
+) -> None:
+    """Ensure the cache hub holds every model about to be synced.
+
+    Models downloaded directly on an inference node (e.g. the testing node)
+    never reach the hub on their own; without staging, the hub-to-node sync
+    fails with 'missing cache oMLX model dir'. For each missing model, probe
+    the inference nodes for a complete copy and rsync it onto the hub over
+    the best transport (fabric first, management fallback).
+    """
+    cache_name, cache_node = remote_cache_target
+
+    if dry_run:
+        typer.echo(f"would: verify hub models on {cache_name} and stage missing ones from first complete node")
+        return
+
+    missing: list[str] = []
+    for repo_id in repo_ids:
+        identity = build_artifact_identity(repo_id)
+        if _remote_artifact_complete_on_cache(cache_node=cache_node, model_dir_name=identity.model_dir_name):
+            typer.echo(f"hub: up to date {repo_id}")
+        else:
+            missing.append(repo_id)
+    if not missing:
+        return
+
+    hub_models_dir: str | None = None
+    for repo_id in missing:
+        source_node = _find_staging_source_node(config, repo_id)
+        if source_node is None:
+            typer.echo(
+                f"Error: hub is missing {repo_id} and no inference node has it complete; "
+                f"seed it first: make model {repo_id}",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if hub_models_dir is None:
+            hub_models_dir = _remote_cache_models_dir(cache_node)
+        _stage_model_to_hub(
+            source_node=source_node,
+            cache_node=cache_node,
+            repo_id=repo_id,
+            hub_models_dir=hub_models_dir,
+            requested_transport=requested_transport,
+            timeout=timeout,
+        )
+
+
+def _find_staging_source_node(config: ClusterConfig, repo_id: str) -> Node | None:
+    """First inference node holding a complete copy of the model, if any."""
+    identity = build_artifact_identity(repo_id)
+    for candidate_node in config.nodes.values():
+        if not candidate_node.has_role(NodeRole.INFERENCE):
+            continue
+        candidate_home = candidate_node.home_dir or f"/Users/{candidate_node.user}"
+        candidate_model_dir = f"{candidate_home}/.omlx/models/{identity.model_dir_name}"
+        if _remote_artifact_complete(
+            user=candidate_node.user,
+            host=candidate_node.host,
+            path=candidate_model_dir,
+        ):
+            return candidate_node
+    return None
+
+
+def _stage_model_to_hub(
+    *,
+    source_node: Node,
+    cache_node: Node,
+    repo_id: str,
+    hub_models_dir: str,
+    requested_transport: str,
+    timeout: int,
+) -> None:
+    """Rsync one model from a source node onto the hub (fabric preferred)."""
+    if source_node.home_dir is None:
+        source_node.home_dir = f"/Users/{source_node.user}"
+
+    transport_host = cache_node.host
+    ssh_host_key_alias: str | None = None
+    transport_label = "management"
+    if source_node.fabric_host and requested_transport != "management":
+        plan = _remote_transport_plan_probe(
+            source_node,
+            requested_transport=requested_transport,
+            management_host=cache_node.host,
+            node_user=cache_node.user,
+            fabric_host=True,
+            timeout=timeout,
+        )
+        if plan.ok and plan.uses_fabric:
+            transport_host = plan.resolved_transport_host
+            ssh_host_key_alias = cache_node.host
+            transport_label = "fabric"
+        elif requested_transport == "fabric":
+            typer.echo(f"Error: {plan.error}", err=True)
+            raise typer.Exit(1)
+        elif plan.fabric_fallback:
+            typer.echo(f"hub_stage: fabric fallback ({plan.fabric_fallback})")
+
+    source_path, destination, command = _remote_cache_stage_command(
+        repo_id=repo_id,
+        source_node=source_node,
+        cache_node=cache_node,
+        cache_models_dir=hub_models_dir,
+        transport_host=transport_host,
+        ssh_host_key_alias=ssh_host_key_alias,
+    )
+    typer.echo(f"hub_stage: {repo_id} from {source_node.host} ({transport_label})")
+    typer.echo(f"hub_stage_source: {source_path}")
+    typer.echo(f"hub_stage_dest: {destination}")
+    result = ssh_run(
+        source_node.user,
+        source_node.host,
+        command,
+        timeout=max(timeout, 600),
+        stream=True,
+        shell=source_node.shell,
+        node_id=source_node.host,
+    )
+    if result.returncode != 0:
+        typer.echo(f"Error: staging {repo_id} to hub failed with exit code {result.returncode}", err=True)
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            typer.echo(stderr, err=True)
+        raise typer.Exit(result.returncode)
+    typer.echo(f"hub_stage: staged {repo_id}")
+
+
+def _remote_cache_models_dir(cache_node: Node) -> str:
+    """Resolve the hub's literal oMLX models dir (env override aware)."""
+    result = ssh_run(
+        cache_node.user,
+        cache_node.host,
+        'printf %s "${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"',
+        timeout=30,
+        shell=cache_node.shell,
+        node_id=cache_node.host,
+    )
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        typer.echo(f"Error: could not resolve cache models dir on {cache_node.host}", err=True)
+        raise typer.Exit(1)
+    return (result.stdout or "").strip()
+
+
 def _run_artifact_sync_workflow(
     *,
     config: ClusterConfig,
@@ -4252,6 +4530,16 @@ def _run_artifact_sync_workflow(
     if not transport_plan.ok:
         typer.echo(f"Error: {transport_plan.error}", err=True)
         raise typer.Exit(1)
+
+    if remote_cache_target is not None:
+        _stage_missing_models_to_hub(
+            config=config,
+            repo_ids=repo_ids,
+            dry_run=dry_run,
+            requested_transport=requested_transport,
+            timeout=timeout,
+            remote_cache_target=remote_cache_target,
+        )
 
     if len(repo_ids) > 1:
         typer.echo("sync_scope: node")

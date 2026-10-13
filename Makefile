@@ -1,7 +1,9 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev dev-sync dev-test dev-lint dev-check bootstrap restart smoke status sync prune config model usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes vscode
+_TARGETS := help cli-help dev dev-sync dev-test dev-lint dev-check bootstrap restart smoke bench status sync prune config model usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes vscode
 ARG ?= $(word 2,$(MAKECMDGOALS))
+MODEL ?= $(word 3,$(MAKECMDGOALS))
+ALIAS ?= $(word 4,$(MAKECMDGOALS))
 EDGE_CLIENTS ?=
 
 ifneq ($(ARG),)
@@ -19,6 +21,7 @@ help:
 	@printf "  %-24s %s\n" "bootstrap [node]" "setup gateway/cache/inference daemons"
 	@printf "  %-24s %s\n" "restart [node]" "restart gateway and inference daemons"
 	@printf "  %-24s %s\n" "smoke [node]" "smoke runtime, Olla, and edge"
+	@printf "  %-24s %s\n" "bench [node] [model] [alias]" "benchmark model for an alias slot vs the assigned set"
 	@printf "  %-24s %s\n" "sync [node]" "sync configured models and restart node runtime"
 	@printf "  %-24s %s\n" "model <hf-repo>" "verify HF source, download to cache hub, add unassigned tfconfig model entry"
 	@printf "  %-24s %s\n" "prune [node]" "sync, prune unassigned node cache models, and restart runtime"
@@ -77,6 +80,16 @@ restart:
 
 smoke:
 	$(UV) thunder-forge cluster smoke $(ARG)
+
+bench:
+	@if [ -z "$(MODEL)" ]; then \
+		echo 'usage: make bench NODE MODEL [ALIAS] (model: alias or HF repo id; alias slot defaults to agent)'; exit 2; \
+	fi
+	@if [ -n "$(ALIAS)" ]; then \
+		$(UV) thunder-forge cluster bench "$(ARG)" "$(MODEL)" "$(ALIAS)"; \
+	else \
+		$(UV) thunder-forge cluster bench "$(ARG)" "$(MODEL)"; \
+	fi
 
 status:
 	$(UV) thunder-forge cluster status $(ARG)
@@ -144,3 +157,7 @@ vscode:
 
 .PHONY: $(_TARGETS)
 .DEFAULT_GOAL := help
+
+# Suppress 'No rule to make target' for pass-through args (e.g. HF repo ids)
+%:
+	@:

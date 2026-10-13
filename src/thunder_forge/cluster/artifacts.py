@@ -457,6 +457,27 @@ def _poll_omlx_hf_task(
     raise TimeoutError(f"Timed out waiting for oMLX download {repo_id}; {detail}")
 
 
+def artifact_complete_command(path_expr: str) -> str:
+    """Shell condition: true when an oMLX model directory looks complete.
+
+    ``path_expr`` is used verbatim inside the condition — pass a literal path
+    pre-wrapped with ``shlex.quote``, or a double-quoted remote variable like
+    ``'"$MODEL_DIR"'`` so it expands in the remote shell.
+    """
+    return " && ".join(
+        [
+            f"test -d {path_expr}",
+            f"test -f {path_expr}/config.json",
+            f"test -z \"$(find {path_expr} -name '*.incomplete' -print -quit)\"",
+            f"test ! -e {path_expr}/.rsync-partial",
+            (
+                f"test -n \"$(find {path_expr} "
+                "\\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""
+            ),
+        ]
+    )
+
+
 def is_local_artifact_complete(model_dir: Path) -> bool:
     """Return True when a local oMLX model directory looks complete enough to serve."""
     if not model_dir.is_dir():
@@ -471,17 +492,7 @@ def is_local_artifact_complete(model_dir: Path) -> bool:
 
 
 def _remote_artifact_complete(*, user: str, host: str, path: str) -> bool:
-    quoted_path = shlex.quote(path)
-    quoted_config = shlex.quote(f"{path}/config.json")
-    command = " && ".join(
-        [
-            f"test -d {quoted_path}",
-            f"test -f {quoted_config}",
-            f"test -z \"$(find {quoted_path} -name '*.incomplete' -print -quit)\"",
-            f"test ! -e {shlex.quote(f'{path}/.rsync-partial')}",
-            (f"test -n \"$(find {quoted_path} \\( -name '*.safetensors' -o -name '*.bin' \\) -type f -print -quit)\""),
-        ]
-    )
+    command = artifact_complete_command(shlex.quote(path))
     result = ssh_run(user, host, command, timeout=30)
     return result.returncode == 0
 
