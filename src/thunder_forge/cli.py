@@ -29,7 +29,6 @@ from thunder_forge.cluster.artifacts import (
     ArtifactPresence,
     ArtifactReadinessAction,
     ArtifactSyncPlan,
-    _remote_artifact_complete,
     artifact_complete_command,
     build_artifact_download_plan,
     build_artifact_identity,
@@ -427,21 +426,57 @@ def _dispatch_cache_command_if_remote(
     return True
 
 
-def _remote_artifact_complete_on_cache(*, cache_node: Node, model_dir_name: str, timeout: int = 30) -> bool:
-    command = (
-        "set -euo pipefail; "
-        'CACHE_ROOT="${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"; '
-        f'MODEL_DIR="$CACHE_ROOT/{model_dir_name}"; '
-        + artifact_complete_command('"$MODEL_DIR"')
-    )
+# Marker prefix for batched artifact-presence lines (one ssh, many models).
+_PRESENCE_MARKER = "TFPRESENCE|"
+_HUB_MODELS_ROOT_EXPR = '"${TF_CACHE_OMLX_MODELS_DIR:-$HOME/.omlx/models}"'
+_NODE_MODELS_ROOT_EXPR = '"$HOME/.omlx/models"'
+
+
+def _remote_models_presence(
+    *,
+    node: Node,
+    model_dir_names: list[str],
+    root_expr: str,
+    timeout: int = 30,
+) -> dict[str, bool]:
+    """Check completeness of many model dirs on one host in a single ssh call."""
+    if not model_dir_names:
+        return {}
+    lines = [f"ROOT={root_expr}"]
+    check = artifact_complete_command('"$ROOT/$MODEL_DIR"')
+    for name in model_dir_names:
+        lines.append(f"MODEL_DIR={shlex.quote(name)}")
+        lines.append(
+            f'if {{ {check} ; }}; then echo "{_PRESENCE_MARKER}$MODEL_DIR=1"; '
+            f'else echo "{_PRESENCE_MARKER}$MODEL_DIR=0"; fi'
+        )
     result = ssh_run(
-        cache_node.user,
-        cache_node.host,
-        command,
+        node.user,
+        node.host,
+        "; ".join(lines),
         timeout=timeout,
-        shell=cache_node.shell,
+        shell=node.shell,
     )
-    return result.returncode == 0
+    presence: dict[str, bool] = {}
+    if result.returncode != 0:
+        return presence
+    for line in (result.stdout or "").splitlines():
+        if not line.startswith(_PRESENCE_MARKER):
+            continue
+        key, _, value = line[len(_PRESENCE_MARKER) :].rpartition("=")
+        if key:
+            presence[key] = value == "1"
+    return presence
+
+
+def _remote_artifact_complete_on_cache(*, cache_node: Node, model_dir_name: str, timeout: int = 30) -> bool:
+    presence = _remote_models_presence(
+        node=cache_node,
+        model_dir_names=[model_dir_name],
+        root_expr=_HUB_MODELS_ROOT_EXPR,
+        timeout=timeout,
+    )
+    return presence.get(model_dir_name, False)
 
 
 def _remote_transport_plan_probe(
@@ -497,6 +532,7 @@ def _remote_transport_plan_probe(
         resolved_transport_host=str(plan_data["resolved_transport_host"]),
         fabric_fallback=str(plan_data.get("fabric_fallback", "")),
         error=str(plan_data.get("error", "")),
+        fabric_rejected=tuple(str(item) for item in plan_data.get("fabric_rejected", [])),
     )
 
 
@@ -4301,7 +4337,8 @@ def _print_artifact_sync_execution_plan(
     if transport_plan.resolved_transport_host != transport_plan.transport_host:
         typer.echo(f"resolved_transport_host: {transport_plan.resolved_transport_host}")
     if transport_plan.fabric_fallback:
-        typer.echo(f"fabric_fallback: {transport_plan.fabric_fallback}")
+        detail = f": {', '.join(transport_plan.fabric_rejected)}" if transport_plan.fabric_rejected else ""
+        typer.echo(f"fabric_fallback: {transport_plan.fabric_fallback}{detail}")
     typer.echo(f"source_path: {plan.source_path}")
     typer.echo(f"destination: {plan.destination}")
     typer.echo("action: sync_to_node_omlx")
@@ -4353,43 +4390,81 @@ def _run_artifact_sync_execution(
 def _stage_missing_models_to_hub(
     *,
     config: ClusterConfig,
+    target_node: Node,
     repo_ids: list[str],
     dry_run: bool,
     requested_transport: str,
     timeout: int,
     remote_cache_target: tuple[str, Node],
-) -> None:
-    """Ensure the cache hub holds every model about to be synced.
+) -> set[str]:
+    """Ensure the hub holds what the sync target needs, and nothing more.
 
-    Models downloaded directly on an inference node (e.g. the testing node)
-    never reach the hub on their own; without staging, the hub-to-node sync
-    fails with 'missing cache oMLX model dir'. For each missing model, probe
-    the inference nodes for a complete copy and rsync it onto the hub over
-    the best transport (fabric first, management fallback).
+    Models downloaded directly on an inference node (e.g. the testing node) never
+    reach the hub on their own; without staging, the hub-to-node sync fails with
+    'missing cache oMLX model dir'. Only models the target node is actually
+    missing get staged onto the hub - hub gaps for models the node already has
+    are informational. Staging runs smallest-first over the best transport
+    (fabric first, management fallback).
     """
     cache_name, cache_node = remote_cache_target
+    dir_names = {repo_id: build_artifact_identity(repo_id).model_dir_name for repo_id in repo_ids}
 
     if dry_run:
-        typer.echo(f"would: verify hub models on {cache_name} and stage missing ones from first complete node")
-        return
+        typer.echo(
+            f"would: verify hub models on {cache_name} and stage only models "
+            f"{target_node.host} still lacks"
+        )
+        return set()
 
-    missing: list[str] = []
+    hub_presence = _remote_models_presence(
+        node=cache_node,
+        model_dir_names=list(dir_names.values()),
+        root_expr=_HUB_MODELS_ROOT_EXPR,
+    )
+    node_presence = _remote_models_presence(
+        node=target_node,
+        model_dir_names=list(dir_names.values()),
+        root_expr=_NODE_MODELS_ROOT_EXPR,
+    )
+
+    stage_set: list[str] = []
+    satisfied_on_node: set[str] = set()
     for repo_id in repo_ids:
-        identity = build_artifact_identity(repo_id)
-        if _remote_artifact_complete_on_cache(cache_node=cache_node, model_dir_name=identity.model_dir_name):
-            typer.echo(f"hub: up to date {repo_id}")
-        else:
-            missing.append(repo_id)
-    if not missing:
-        return
+        model_dir = dir_names[repo_id]
+        on_node = node_presence.get(model_dir, False)
+        on_hub = hub_presence.get(model_dir, False)
+        if on_hub:
+            typer.echo(f"hub: ready {repo_id}")
+        if on_node:
+            typer.echo(f"node: ready {repo_id}")
+            if not on_hub:
+                # Hub gap this sync does not need: report it, never copy it, and
+                # drop the repo from the hub->node dispatch (no source to read).
+                typer.echo(f"hub: skip {repo_id} (not needed by {target_node.host})")
+                satisfied_on_node.add(repo_id)
+            continue
+        if not on_hub:
+            stage_set.append(repo_id)
 
+    if not stage_set:
+        return satisfied_on_node
+
+    # Smallest first: quick wins before any multi-hundred-GB pull.
+    stage_set.sort(key=lambda repo_id: _model_disk_gb(config, repo_id))
     hub_models_dir: str | None = None
-    for repo_id in missing:
-        source_node = _find_staging_source_node(config, repo_id)
+    sources = _find_staging_sources(
+        config,
+        target_node=target_node,
+        repo_ids=stage_set,
+        dir_names=dir_names,
+    )
+
+    for repo_id in stage_set:
+        source_node = sources.get(repo_id)
         if source_node is None:
             typer.echo(
-                f"Error: hub is missing {repo_id} and no inference node has it complete; "
-                f"seed it first: make model {repo_id}",
+                f"Error: hub is missing {repo_id}, {target_node.host} needs it, and no inference node "
+                f"has it complete; seed it first: make model {repo_id}",
                 err=True,
             )
             raise typer.Exit(1)
@@ -4404,22 +4479,47 @@ def _stage_missing_models_to_hub(
             timeout=timeout,
         )
 
+    return satisfied_on_node
 
-def _find_staging_source_node(config: ClusterConfig, repo_id: str) -> Node | None:
-    """First inference node holding a complete copy of the model, if any."""
-    identity = build_artifact_identity(repo_id)
-    for candidate_node in config.nodes.values():
-        if not candidate_node.has_role(NodeRole.INFERENCE):
+
+def _model_disk_gb(config: ClusterConfig, repo_id: str) -> float:
+    """Configured size for a repo in GB; models without a size sort last."""
+    for model in config.models.values():
+        if model.source is not None and model.source.repo == repo_id:
+            if not model.disk_gb:
+                return float("inf")
+            return float(model.disk_gb)
+    return float("inf")
+
+
+def _find_staging_sources(
+    config: ClusterConfig,
+    *,
+    target_node: Node,
+    repo_ids: list[str],
+    dir_names: dict[str, str],
+) -> dict[str, Node]:
+    """Map each repo to the first inference node with a complete copy.
+
+    One ssh call per candidate node, regardless of how many models are pending.
+    """
+    sources: dict[str, Node] = {}
+    pending = {repo_id: dir_names[repo_id] for repo_id in repo_ids}
+    for candidate in config.nodes.values():
+        if not pending:
+            break
+        if not candidate.has_role(NodeRole.INFERENCE) or candidate.host == target_node.host:
             continue
-        candidate_home = candidate_node.home_dir or f"/Users/{candidate_node.user}"
-        candidate_model_dir = f"{candidate_home}/.omlx/models/{identity.model_dir_name}"
-        if _remote_artifact_complete(
-            user=candidate_node.user,
-            host=candidate_node.host,
-            path=candidate_model_dir,
-        ):
-            return candidate_node
-    return None
+        presence = _remote_models_presence(
+            node=candidate,
+            model_dir_names=list(pending.values()),
+            root_expr=_NODE_MODELS_ROOT_EXPR,
+        )
+        for repo_id, model_dir in list(pending.items()):
+            if presence.get(model_dir, False):
+                sources[repo_id] = candidate
+                del pending[repo_id]
+    return sources
 
 
 def _stage_model_to_hub(
@@ -4455,7 +4555,8 @@ def _stage_model_to_hub(
             typer.echo(f"Error: {plan.error}", err=True)
             raise typer.Exit(1)
         elif plan.fabric_fallback:
-            typer.echo(f"hub_stage: fabric fallback ({plan.fabric_fallback})")
+            detail = f": {', '.join(plan.fabric_rejected)}" if plan.fabric_rejected else ""
+            typer.echo(f"hub_stage: fabric fallback ({plan.fabric_fallback}{detail})")
 
     source_path, destination, command = _remote_cache_stage_command(
         repo_id=repo_id,
@@ -4531,9 +4632,11 @@ def _run_artifact_sync_workflow(
         typer.echo(f"Error: {transport_plan.error}", err=True)
         raise typer.Exit(1)
 
+    satisfied_on_node: set[str] = set()
     if remote_cache_target is not None:
-        _stage_missing_models_to_hub(
+        satisfied_on_node = _stage_missing_models_to_hub(
             config=config,
+            target_node=runtime_node,
             repo_ids=repo_ids,
             dry_run=dry_run,
             requested_transport=requested_transport,
@@ -4550,6 +4653,8 @@ def _run_artifact_sync_workflow(
         typer.echo(f"cache_exec: remote {cache_name} ({cache_node.host})")
 
     for index, repo_id in enumerate(repo_ids, start=1):
+        if repo_id in satisfied_on_node:
+            continue
         if len(repo_ids) > 1:
             typer.echo("")
             typer.echo(f"== Model {index}/{len(repo_ids)} ==")

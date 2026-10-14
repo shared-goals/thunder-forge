@@ -107,3 +107,26 @@ def test_remote_transport_plan_probe_command_decodes_payload() -> None:
     assert command.startswith("python3 - <<'PY'")
     assert "payload = json.loads(base64.b64decode('eyJmb28iOiJiYXIifQ==').decode())" in command
     assert "__TF_TRANSPORT_PLAN__" in command
+
+
+def test_remote_transport_plan_probe_verifies_peer_identity() -> None:
+    """A discovered fabric address must answer as the hub, never as ourselves."""
+    command = remote_transport_plan_probe_command(payload_b64="e30=")
+
+    # our own link-local addresses can never be offered as a peer path
+    assert "local_addresses" in command
+    assert "own-interface" in command
+    # identity anchor comes from the management path, and candidates are compared to it
+    assert "identity-anchor-missing" in command
+    assert "identity-mismatch" in command
+    assert "'BatchMode=yes'" in command
+    assert "ConnectTimeout=8" in command
+    assert "hostname" in command
+
+
+def test_remote_transport_plan_probe_retries_transient_thunderbolt() -> None:
+    """macOS Thunderbolt link-locals vanish for seconds after a renegotiation."""
+    command = remote_transport_plan_probe_command(payload_b64="e30=")
+
+    assert "for attempt in range(3):" in command
+    assert "time.sleep(1.5)" in command

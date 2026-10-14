@@ -458,7 +458,9 @@ import ipaddress
 import json
 import platform
 import re
+import socket
 import subprocess
+import time
 payload = json.loads(base64.b64decode(__PAYLOAD_B64__).decode())
 requested_transport = payload['requested_transport']
 management_host = payload['management_host']
@@ -507,6 +509,12 @@ else:
         except ValueError:
             return False
         return parsed.version == 4 and parsed.is_link_local
+    def _tcp_open(address):
+        try:
+            with socket.create_connection((address, 22), timeout=4):
+                return True
+        except OSError:
+            return False
     def _extract_link_local_ipv4(text, allowed_interfaces):
         addresses = []
         current_interface = ''
@@ -528,45 +536,109 @@ else:
             return False
         match = re.search(r'^\\s*interface:\\s*(\\S+)\\s*$', result.stdout, flags=re.MULTILINE)
         return bool(match and match.group(1) in allowed_interfaces)
-    def _ssh_hostname_check(address):
-        result = _run([
-            'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
-            '-o', f'HostKeyAlias={management_host}',
-            f'{node_user}@{address}', 'hostname'
-        ], extra_timeout=8)
-        return result is not None and result.returncode == 0
+    def _ssh_hostname(address, alias=''):
+        # Callers pass either the trusted management hostname or an already
+        # validated candidate address, so no IP validation happens here.
+        argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8']
+        if alias:
+            argv.extend(['-o', f'HostKeyAlias={alias}'])
+        argv.extend([f'{node_user}@{address}', 'hostname'])
+        result = _run(argv, extra_timeout=8)
+        if result is None or result.returncode != 0:
+            return ''
+        return (result.stdout or '').strip().lower()
+    def _extract_ipv4(text):
+        addrs = []
+        for match in re.finditer(r'\\binet\\s+(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\b', text):
+            addrs.append(match.group(1))
+        return addrs
+    local_addresses = set()
+    local_ifconfig = _run(['ifconfig'], extra_timeout=5)
+    if local_ifconfig is not None and local_ifconfig.returncode == 0:
+        local_addresses = set(_extract_ipv4(local_ifconfig.stdout or ''))
+    # Identity anchor: the management path is authoritative for who the peer is.
+    # HostKeyAlias suppresses key mismatches on fabric addresses, so a candidate
+    # that answers with a different hostname - or with our own - is never trusted.
+    expected_hostname = _ssh_hostname(management_host)
+    expected_short = expected_hostname.split('.')[0] if expected_hostname else ''
+    candidates = []
+    rejected = []
+    def _reject(reason):
+        if reason not in rejected:
+            rejected.append(reason)
+    def _offer(address):
+        text = str(address)
+        if not _acceptable(text) or text in candidates:
+            return
+        if text in local_addresses:
+            _reject(text + '=own-interface')
+            return
+        candidates.append(text)
+    def _probe_fabric():
+        # macOS renegotiates Thunderbolt links: addresses can vanish and return,
+        # so re-run discovery a few times before declaring fabric unavailable.
+        for attempt in range(3):
+            if attempt:
+                time.sleep(1.5)
+            remote_inventory = _run([
+                'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
+                f'{node_user}@{management_host}',
+                (
+                    "networksetup -listallhardwareports 2>/dev/null; "
+                    "printf '\\n__TF_IFCONFIG__\\n'; ifconfig"
+                ),
+            ], extra_timeout=8)
+            if remote_inventory is None or remote_inventory.returncode != 0:
+                # Cannot see the peer's interfaces at all; say so instead of
+                # implying the peer simply has no Thunderbolt link.
+                _reject(management_host + '=inventory-failed')
+            else:
+                inventory, _, ifconfig_text = remote_inventory.stdout.partition('__TF_IFCONFIG__')
+                remote_devices = _extract_thunderbolt_devices(inventory)
+                if not remote_devices:
+                    _reject(management_host + '=no-thunderbolt-device')
+                for address in _extract_link_local_ipv4(ifconfig_text, remote_devices):
+                    _offer(address)
+            # Prefer addresses the kernel already routes over Thunderbolt.
+            for address in sorted(
+                candidates,
+                key=lambda item: 0 if _route_uses_allowed_interface(item, local_devices) else 1,
+            ):
+                if not _tcp_open(address):
+                    _reject(address + '=tcp-closed')
+                    continue
+                actual = _ssh_hostname(address, alias=management_host)
+                if not actual:
+                    _reject(address + '=ssh-unreachable')
+                    continue
+                if not expected_short:
+                    _reject(address + '=identity-anchor-missing')
+                    continue
+                if actual.split('.')[0] != expected_short:
+                    _reject(address + '=identity-mismatch:' + actual)
+                    continue
+                return address
+        return ''
     resolved = None
     if platform.system() == 'Darwin':
         local_inventory = _run(['networksetup', '-listallhardwareports'])
+        local_devices = set()
         if local_inventory is not None and local_inventory.returncode == 0:
             local_devices = _extract_thunderbolt_devices(local_inventory.stdout)
-            if local_devices:
-                remote_inventory = _run([
-                    'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
-                    f'{node_user}@{management_host}',
-                    (
-                        "networksetup -listallhardwareports 2>/dev/null; "
-                        "printf '\\n__TF_IFCONFIG__\\n'; ifconfig"
-                    ),
-                ], extra_timeout=8)
-                if remote_inventory is not None and remote_inventory.returncode == 0:
-                    inventory, _, ifconfig_text = remote_inventory.stdout.partition('__TF_IFCONFIG__')
-                    remote_devices = _extract_thunderbolt_devices(inventory)
-                    for address in _extract_link_local_ipv4(
-                        ifconfig_text, remote_devices
-                    ):
-                        if _route_uses_allowed_interface(
-                            address, local_devices
-                        ) and _ssh_hostname_check(address):
-                            resolved = address
-                            break
+        if local_devices:
+            resolved = _probe_fabric() or None
     if resolved is not None:
         plan['transport_host'] = resolved
         plan['resolved_transport_host'] = resolved
     elif requested_transport == 'fabric':
         plan['error'] = 'no reachable fabric address discovered'
+    elif rejected:
+        plan['fabric_fallback'] = 'all-fabric-candidates-rejected'
+    elif not candidates:
+        plan['fabric_fallback'] = 'no-link-local-fabric-candidate'
     else:
         plan['fabric_fallback'] = 'dynamic probe unresolved'
+plan['fabric_rejected'] = rejected
 print('__TF_TRANSPORT_PLAN__' + json.dumps(plan, sort_keys=True))
 PY"""
     return script.replace("__PAYLOAD_B64__", repr(payload_b64))

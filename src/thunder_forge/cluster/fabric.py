@@ -17,6 +17,7 @@ class TransportPlan:
     resolved_transport_host: str
     fabric_fallback: str = ""
     error: str = ""
+    fabric_rejected: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
