@@ -1,6 +1,7 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev dev-sync dev-test dev-lint dev-check bootstrap restart smoke bench status sync prune config model usage usage-json usage-trim usage-duckdb edge-keys edge-usage opencode hermes vscode
+_TARGETS := help cli-help dev dev-sync dev-test dev-lint dev-check bootstrap restart smoke bench status sync prune config model usage usage-json usage-trim usage-duckdb \
+	export opencode hermes vscode
 ARG ?= $(word 2,$(MAKECMDGOALS))
 MODEL ?= $(word 3,$(MAKECMDGOALS))
 ALIAS ?= $(word 4,$(MAKECMDGOALS))
@@ -33,6 +34,7 @@ help:
 	@printf "  %-24s %s\n" "usage-json [day]" "print usage summary as JSON"
 	@printf "  %-24s %s\n" "usage-trim [days]" "trim local TF logs (default 3 days)"
 	@printf "  %-24s %s\n" "usage-duckdb [day]" "run DuckDB daily usage SQL over JSONL logs"
+	@printf "  %-24s %s\n" "export [node]" "export oMLX state files and logs from a node (or all inference nodes)"
 	@echo ""
 	@echo "Edge clients:"
 	@printf "  %-24s %s\n" "edge-keys [clients]" "create missing TF edge client keys"
@@ -135,6 +137,9 @@ usage-duckdb:
 		exit 2; \
 	fi
 	duckdb -readonly -cmd ".mode table" -cmd ".headers on" -cmd ".param set period $(if $(strip $(ARG)),$(ARG),$(shell date -u +%F))" -f docs/operations/daily-usage-duckdb.sql
+
+export:
+	$(UV) thunder-forge cluster export $(if $(strip $(ARG)),"$(ARG)")
 
 edge-keys:
 	@clients="$(if $(strip $(EDGE_CLIENTS)),$(EDGE_CLIENTS),$(ARG))"; \

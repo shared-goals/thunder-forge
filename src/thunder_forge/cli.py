@@ -3028,6 +3028,50 @@ def cluster_sync(
         typer.echo(notice)
 
 
+@cluster_app.command("export")
+def cluster_export(
+    node: str | None = typer.Argument(
+        None,
+        help="Inference node name. Omit to export all configured inference nodes.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Output directory for the archive. Defaults to reports/exports under the repo root.",
+    ),
+) -> None:
+    """Export oMLX runtime state (settings, stats, model settings, usage DB, logs)."""
+    from thunder_forge.cluster.config import NodeRole
+    from thunder_forge.cluster.export import export_cluster
+
+    config, repo_root = _load_config()
+    if node is not None:
+        runtime_node = _get_runtime_node(config, node)
+        targets = [(node, runtime_node)]
+    else:
+        targets = [
+            (node_id, config.nodes[node_id])
+            for node_id in sorted(config.nodes)
+            if config.nodes[node_id].has_role(NodeRole.INFERENCE) and config.nodes[node_id].runtime is not None
+        ]
+        if not targets:
+            typer.echo("Error: no inference nodes configured in tfconfig.yaml", err=True)
+            raise typer.Exit(1)
+
+    output_dir = output or repo_root / "reports" / "exports"
+    typer.echo(f"export scope: {', '.join(node_id for node_id, _ in targets)}")
+    results, final_path = export_cluster(targets, output_dir)
+    for result in results:
+        if result.ok:
+            typer.echo(f"  {result.node_id}: ok")
+        else:
+            typer.echo(f"  {result.node_id}: failed ({result.error})", err=True)
+    if any(not result.ok for result in results):
+        raise typer.Exit(1)
+    if final_path is not None:
+        typer.echo(f"archive: {final_path}")
+
+
 @cluster_app.command("smoke")
 def cluster_smoke(
     target: str | None = typer.Argument(
