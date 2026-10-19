@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -132,8 +133,9 @@ class NodeRuntime:
     bind_host: str = "0.0.0.0"
     base_path: str | None = None
     log_level: str | None = None
-    max_model_memory: str | None = None
-    max_process_memory: str | None = None
+    memory_guard: str | None = None
+    memory_guard_gb: float | None = None
+    gpu_memory_gb: int | None = None
     max_concurrent_requests: int | None = None
     paged_ssd_cache_dir: str | None = None
     paged_ssd_cache_max_size: str | None = None
@@ -164,6 +166,7 @@ class ServiceConfig:
     olla_local_binary: str = ""
     olla_log_level: str = DEFAULT_OLLA_LOG_LEVEL
     omlx_port: int = DEFAULT_OMLX_PORT
+    omlx_gpu_memory_gb: int | None = None
     edge_access_log: str = DEFAULT_EDGE_ACCESS_LOG
     edge_inspector_enabled: bool = DEFAULT_EDGE_INSPECTOR_ENABLED
     edge_inspector_output_dir: str = DEFAULT_EDGE_INSPECTOR_OUTPUT_DIR
@@ -375,6 +378,14 @@ def _parse_bool(raw: object, *, name: str, default: bool) -> bool:
     raise ValueError(msg)
 
 
+def _parse_gpu_memory_gb(raw: object, *, name: str) -> int | None:
+    if raw is None:
+        return None
+    if type(raw) is not int or raw <= 0:
+        raise ValueError(f"{name} must be a positive integer in GiB or null (RAM minus 10 GiB)")
+    return raw
+
+
 def _parse_optional_positive_int(raw: object, *, name: str) -> int | None:
     if raw is None:
         return None
@@ -461,6 +472,9 @@ def _parse_services(raw: object) -> ServiceConfig:
     olla_version_raw = str(olla_raw.get("version", "")).strip()
     olla_version_pinned = bool(olla_version_raw) or not has_olla_block
     olla_version = olla_version_raw or DEFAULT_OLLA_VERSION
+    omlx_raw = raw.get("omlx", {}) or {}
+    if not isinstance(omlx_raw, dict):
+        raise ValueError("services.omlx must be a mapping")
     return ServiceConfig(
         edge_host=edge_host,
         edge_port=_parse_service_port(raw, "edge", DEFAULT_EDGE_PORT),
@@ -482,6 +496,9 @@ def _parse_services(raw: object) -> ServiceConfig:
             default=DEFAULT_OLLA_LOG_LEVEL,
         ) or DEFAULT_OLLA_LOG_LEVEL,
         omlx_port=_parse_service_port(raw, "omlx", DEFAULT_OMLX_PORT),
+        omlx_gpu_memory_gb=_parse_gpu_memory_gb(
+            omlx_raw.get("gpu_memory_gb"), name="services.omlx.gpu_memory_gb",
+        ),
         edge_access_log=edge_access_log,
         edge_inspector_enabled=_parse_bool(
             edge_inspector_raw.get("enabled"),
@@ -565,6 +582,7 @@ def _parse_node_runtime(
     *,
     node_id: str,
     default_port: int = DEFAULT_OMLX_PORT,
+    default_gpu_memory_gb: int | None = None,
 ) -> NodeRuntime | None:
     if raw is None:
         return None
@@ -581,6 +599,24 @@ def _parse_node_runtime(
     except ValueError as exc:
         msg = f"{path}.type must be one of: {', '.join(item.value for item in RuntimeType)}"
         raise ValueError(msg) from exc
+    for obsolete in ("max_model_memory", "max_process_memory"):
+        if obsolete in raw:
+            raise ValueError(
+                f"{path}.{obsolete} is no longer supported by oMLX; remove it and configure "
+                "memory_guard or memory_guard_gb explicitly (the old limits are not equivalent)"
+            )
+    memory_guard = _parse_optional_non_empty_string(raw.get("memory_guard"), name=f"{path}.memory_guard")
+    if memory_guard not in {None, "off", "safe", "balanced", "aggressive"}:
+        raise ValueError(f"{path}.memory_guard must be one of: off, safe, balanced, aggressive")
+    memory_guard_gb = None
+    if raw.get("memory_guard_gb") is not None:
+        if isinstance(raw["memory_guard_gb"], bool):
+            raise ValueError(f"{path}.memory_guard_gb must be a finite positive number")
+        memory_guard_gb = _parse_positive_float(raw["memory_guard_gb"], name=f"{path}.memory_guard_gb", default=0)
+        if not math.isfinite(memory_guard_gb):
+            raise ValueError(f"{path}.memory_guard_gb must be a finite positive number")
+        if memory_guard == "off":
+            raise ValueError(f"{path}.memory_guard off cannot be combined with memory_guard_gb")
     return NodeRuntime(
         type=runtime_type,
         port=parse_port(raw.get("port", default_port), name=f"{path}.port"),
@@ -589,10 +625,10 @@ def _parse_node_runtime(
         or "0.0.0.0",
         base_path=_parse_optional_non_empty_string(raw.get("base_path"), name=f"{path}.base_path"),
         log_level=_parse_optional_non_empty_string(raw.get("log_level"), name=f"{path}.log_level"),
-        max_model_memory=_parse_optional_non_empty_string(raw.get("max_model_memory"), name=f"{path}.max_model_memory"),
-        max_process_memory=_parse_optional_non_empty_string(
-            raw.get("max_process_memory"),
-            name=f"{path}.max_process_memory",
+        memory_guard=memory_guard,
+        memory_guard_gb=memory_guard_gb,
+        gpu_memory_gb=_parse_gpu_memory_gb(
+            raw.get("gpu_memory_gb", default_gpu_memory_gb), name=f"{path}.gpu_memory_gb",
         ),
         max_concurrent_requests=_parse_optional_positive_int(
             raw.get("max_concurrent_requests"),
@@ -696,7 +732,10 @@ def parse_cluster_config(raw: dict) -> ClusterConfig:
             admin_user=str(v.get("admin_user", "")).strip(),
             roles=roles,
             fabric_host=_parse_fabric_host(v.get("fabric_host"), node_id=k),
-            runtime=_parse_node_runtime(v.get("runtime"), node_id=k, default_port=services.omlx_port),
+            runtime=_parse_node_runtime(
+                v.get("runtime"), node_id=k, default_port=services.omlx_port,
+                default_gpu_memory_gb=services.omlx_gpu_memory_gb,
+            ),
             models=list(v.get("models", [])),
             platform=v.get("platform"),
             shell=v.get("shell"),

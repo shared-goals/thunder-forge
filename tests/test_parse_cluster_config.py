@@ -149,3 +149,30 @@ def test_parse_model_server_args_partial():
     assert sa.prompt_concurrency is None
     assert sa.temp is None
     assert sa.draft_model is None
+
+
+@pytest.mark.parametrize("global_limit,node_limit,expected", [
+    (None, "omitted", None), (118, "omitted", 118), (118, 90, 90), (118, None, None),
+])
+def test_gpu_memory_config_inheritance(global_limit, node_limit, expected):
+    runtime = {"type": "omlx"}
+    if node_limit != "omitted":
+        runtime["gpu_memory_gb"] = node_limit
+    config = parse_cluster_config({
+        "services": {"omlx": {"gpu_memory_gb": global_limit}},
+        "nodes": {"n": {"host": "n.lan", "ram_gb": 128, "runtime": runtime}},
+    })
+    assert config.services.omlx_gpu_memory_gb == global_limit
+    assert config.nodes["n"].runtime.gpu_memory_gb == expected
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 118.5, "118", "auto", "118; id"])
+@pytest.mark.parametrize("scope", ["global", "node"])
+def test_gpu_memory_config_rejects_invalid_values(value, scope):
+    raw = {"nodes": {"n": {"host": "n.lan", "ram_gb": 128, "runtime": {"type": "omlx"}}}}
+    if scope == "global":
+        raw["services"] = {"omlx": {"gpu_memory_gb": value}}
+    else:
+        raw["nodes"]["n"]["runtime"]["gpu_memory_gb"] = value
+    with pytest.raises(ValueError, match="gpu_memory_gb"):
+        parse_cluster_config(raw)

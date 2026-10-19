@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import plistlib
+import shlex
 import subprocess
+
+import pytest
 
 from thunder_forge.cluster.config import RuntimeType
 from thunder_forge.cluster.omlx import (
@@ -74,7 +78,10 @@ def test_generate_launchd_plist_system_daemon_runs_as_node_user() -> None:
     plist = generate_launchd_plist(_make_runtime_node(), system_daemon=True)
 
     assert "<key>UserName</key>" in plist
-    assert "<string>shag</string>" in plist
+    parsed = plistlib.loads(plist.encode())
+    assert parsed["UserName"] == "root"
+    assert parsed["ProgramArguments"][:2] == ["/bin/sh", "-c"]
+    assert "exec /usr/bin/sudo -n -H -u shag -- /usr/bin/env" in parsed["ProgramArguments"][2]
     assert "<key>EnvironmentVariables</key>" in plist
     assert "<key>HOME</key>" in plist
     assert "<string>/Users/shag</string>" in plist
@@ -431,3 +438,84 @@ def test_run_omlx_process_restart_apply_records_pid_and_health(monkeypatch) -> N
     assert len(calls) == 2
     assert "pkill" in calls[0]
     assert "nohup" in calls[1]
+
+
+@pytest.mark.parametrize(
+    "configured,total_gib,current_mb,write_failure,readback_bad,expected_mb,success",
+    [
+        (None, 128, 0, False, False, 120832, True),
+        (None, 64, 0, False, False, 55296, True),
+        (100, 128, 0, False, False, 102400, True),
+        (118, 128, 120832, False, False, 120832, True),
+        (None, 8, 0, False, False, None, False),
+        (128, 128, 0, False, False, None, False),
+        (129, 128, 0, False, False, None, False),
+        (118, 128, 0, True, False, 120832, False),
+        (118, 128, 0, False, True, 120832, False),
+    ],
+)
+def test_gpu_memory_start_script_executes_before_unprivileged_runtime(
+    tmp_path, configured, total_gib, current_mb, write_failure, readback_bad, expected_mb, success,
+):
+    node = _make_runtime_node(home_dir="/Users/model operator")
+    node.runtime.gpu_memory_gb = configured
+    plist = plistlib.loads(generate_launchd_plist(node, system_daemon=True).encode())
+    script = plist["ProgramArguments"][2]
+    state = tmp_path / "limit"
+    state.write_text(str(current_mb))
+    events = tmp_path / "events"
+    sysctl = tmp_path / "sysctl"
+    sysctl.write_text(f"""#!/bin/sh
+set -eu
+case "$*" in
+  '-n hw.memsize') echo {total_gib * 1024**3} ;;
+  '-n iogpu.wired_limit_mb') cat {shlex.quote(str(state))} ;;
+  '-w iogpu.wired_limit_mb='*)
+    echo write >> {shlex.quote(str(events))}
+    {"exit 1" if write_failure else ":"}
+    {":" if readback_bad else 'echo "${2#*=}" > ' + shlex.quote(str(state))}
+    ;;
+  *) exit 2 ;;
+esac
+""")
+    sysctl.chmod(0o700)
+    sudo = tmp_path / "sudo"
+    sudo.write_text(f"""#!/bin/sh
+set -eu
+[ "$1 $2 $3 $4 $5 $6" = '-n -H -u shag -- /usr/bin/env' ]
+[ "$7" = 'HOME=/Users/model operator' ]
+[ "$9" = '/Users/model operator/.local/bin/omlx' ]
+echo start >> {shlex.quote(str(events))}
+""")
+    sudo.chmod(0o700)
+    # Execute only fixture commands: never call real sudo or mutate the host sysctl.
+    script = script.replace("/usr/sbin/sysctl", shlex.quote(str(sysctl)))
+    script = script.replace("/usr/bin/sudo", shlex.quote(str(sudo)))
+    script = script.replace("/usr/bin/id -u shag", "printf 501")
+    script = script.replace("/usr/bin/uname -s", "printf Darwin")
+    script = script.replace("/usr/bin/uname -m", "printf arm64")
+    result = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
+    assert (result.returncode == 0) == success, result.stderr
+    calls = events.read_text().splitlines() if events.exists() else []
+    assert ("start" in calls) == success
+    if success:
+        assert int(state.read_text()) == expected_mb
+        assert calls == (["start"] if current_mb == expected_mb else ["write", "start"])
+    elif expected_mb is None:
+        assert not calls
+
+
+
+@pytest.mark.parametrize("user", ["root", ""])
+def test_gpu_memory_rejects_invalid_runtime_user(user):
+    node = _make_runtime_node()
+    node.user = user
+    with pytest.raises(ValueError, match="non-root"):
+        generate_launchd_plist(node, system_daemon=True)
+
+
+def test_gpu_memory_rejects_overflow():
+    node = _make_runtime_node()
+    node.runtime.gpu_memory_gb = 2**64
+    with pytest.raises(ValueError, match="integer range"):
+        generate_launchd_plist(node, system_daemon=True)

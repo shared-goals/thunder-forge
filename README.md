@@ -159,6 +159,14 @@ After changing model placement or node topology in `tfconfig.yaml`, run `make re
 
 TF edge defaults to a 180-second upstream I/O timeout, leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records a 502 failure in its access log; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
 
+### GPU memory ceiling on inference nodes
+
+Set `services.omlx.gpu_memory_gb` in `tfconfig.yaml` for a shared ceiling, or override it with `nodes.<node>.runtime.gpu_memory_gb`. Use a positive integer in **GiB**. Omitted node values inherit the service setting; explicit `null` selects actual RAM minus 10 GiB. A 128 GiB node therefore defaults to 118 GiB (`iogpu.wired_limit_mb=120832`). RAM comes from `hw.memsize` on the inference node, not the controller or the inventory's `ram_gb`.
+
+`make bootstrap <node>`, `make restart <node>`, and sync with runtime restart install the setting in the oMLX system LaunchDaemon. At every start, including after reboot, a short root-owned plist command validates the limit, applies it only when changed, verifies it by reading sysctl back, then uses `sudo -n -H -u <node.user>` to start oMLX as the non-root runtime user. No extra sysctl sudoers permission is granted. An unsupported host, invalid limit, or failed write/readback prevents oMLX startup and reports the error in its stderr log. Dry-run only renders the plist. The legacy user LaunchAgent and process managers do not apply GPU memory settings; use the system `daemon` manager.
+
+This is a **host-wide ceiling**, shared by all GPU processes, not a reserved allocation or an Olla router option. It must be strictly below physical RAM. It does not override oMLX's memory guard (`--memory-guard` or `--memory-guard-gb`); review that separately if its ceiling remains lower. Raising the ceiling can increase host memory pressure. To roll back, set the previous explicit GiB limit and restart; for the macOS automatic policy, remove the startup policy before resetting `sudo sysctl -w iogpu.wired_limit_mb=0`, otherwise the next daemon start reapplies it. [MLX wired-limit documentation](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.set_wired_limit.html).
+
 Bootstrap verifies minimal service readiness only: Olla `/internal/health`, TF edge auth boundary health, and direct oMLX `/health`. It does not require inference models or chat to be ready; use `make smoke` for model visibility, routing, and chat checks after the cluster has warmed up.
 
 Run system-daemon install targets from a real terminal, not the VS Code guarded terminal, because macOS sudo/su password prompts can be blocked by the editor guard:
@@ -212,6 +220,7 @@ Thunder Forge service ports live in `tfconfig.yaml` under `services:`:
 | `services.edge.host` | `0.0.0.0` | TF edge bind address; use `0.0.0.0` for LAN clients, keep raw Olla private |
 | `services.edge.port` | `40116` | Local TF edge OpenAI-compatible proxy |
 | `services.omlx.port` | `8018` | Default oMLX node runtime port when a node runtime omits `port` |
+| `services.omlx.gpu_memory_gb` | `null` | Host-wide GPU wired-memory ceiling in GiB; null/omitted means actual node RAM minus 10 GiB |
 | `services.edge.access_log` | `logs/tf-edge-access.jsonl` | TF edge JSONL accounting log |
 | `services.frontend.admin_user` | empty | Admin account used for frontend system-daemon sudo operations |
 
@@ -269,10 +278,12 @@ Run `uv run thunder-forge config lint` before generating runtime/router config. 
 ### Parameter Sources
 
 - Cache artifact root: `.env` key `TF_CACHE_OMLX_MODELS_DIR`, default `~/.omlx/models`. Artifact `status`, `download`, and `sync` use this path on the cache execution host (local cache role or remotely dispatched cache role).
-- Node oMLX process args: `tfconfig.yaml` under `nodes.<node>.runtime`. `type` and `port` are required; optional keys map directly to `omlx serve` flags: `model_dir`, `bind_host`, `base_path`, `log_level`, `max_model_memory`, `max_process_memory`, `max_concurrent_requests`, `paged_ssd_cache_dir`, `paged_ssd_cache_max_size`, `hot_cache_max_size`, `no_cache`, `mcp_config`, and `hf_endpoint`.
+- Node oMLX process args: `tfconfig.yaml` under `nodes.<node>.runtime`. `type` and `port` are required; optional keys map directly to `omlx serve` flags: `model_dir`, `bind_host`, `base_path`, `log_level`, `memory_guard`, `memory_guard_gb`, `max_concurrent_requests`, `paged_ssd_cache_dir`, `paged_ssd_cache_max_size`, `hot_cache_max_size`, `no_cache`, `mcp_config`, and `hf_endpoint`.
 - Olla generated endpoints: `generate-olla-config` reads `nodes.<node>.host`, `nodes.<node>.runtime.port`, and node names. Endpoint names are `<node>-omlx-live`.
 - Olla model aliases: generated from `models.<alias>.runtime_model_id` and `nodes.<node>.models`.
 - Olla router defaults: still owned by `thunder_forge.cluster.config.generate_olla_config` rather than a YAML schema. Use `olla smoke --expected-endpoint <node>-omlx-live` or `olla dev-smoke --expected-endpoint <node>-omlx-live` when you want smoke tests to pin a specific generated endpoint.
+
+oMLX memory settings follow the [current CLI contract](https://github.com/jundot/omlx/blob/7a5a3d75ce7463300bdfa5fedccd34348f60ff46/omlx/cli.py#L1246), verified against `v0.7.1rc1`. `memory_guard` accepts `safe`, `balanced`, `aggressive`, or the quoted YAML string `"off"`. `memory_guard_gb` accepts a finite positive number in oMLX's GB units, including fractions; it selects a custom ceiling and enables the guard. A custom ceiling takes precedence over a tier and cannot be combined with `"off"`. Omitted or null settings add no CLI overrides, preserving oMLX's saved settings/defaults. The obsolete `max_model_memory` and `max_process_memory` keys now fail config validation: remove them and choose a guard tier or custom ceiling explicitly. Their meanings are different, so TF does not convert them automatically. This configures oMLX's memory guard; it does not change the macOS GPU wired-memory ceiling.
 
 With no `.env` and no TF-specific environment variables, Thunder Forge uses these defaults: cache artifacts under `~/.omlx/models`; omitted node users from `GATEWAY_SSH_USER`, then `$USER`, then `unknown`; and no TF edge clients because no `TF_USER_<CLIENT>` entries are set. Commands that need edge auth, such as `edge smoke`, fail until the requested client has a matching key such as `TF_USER_HINDSIGHT`.
 

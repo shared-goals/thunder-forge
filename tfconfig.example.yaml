@@ -26,6 +26,10 @@ services:
       output_dir: logs/inspector
   omlx:
     port: 8018
+    # Host-wide Metal wired-memory ceiling, in GiB (1 GiB = 1024 MiB).
+    # null/omitted: actual node RAM minus 10 GiB, computed at each daemon start.
+    # Applied before oMLX starts by the system LaunchDaemon, including after reboot.
+    gpu_memory_gb: null
 
 # ── Operator workflow defaults ──────────────────────────────────
 # Non-secret command defaults used by `make smoke` and `make sync`.
@@ -169,6 +173,11 @@ nodes:
     admin_user: admin
     runtime:
       type: omlx
+      # Optional oMLX memory guard; omit to preserve saved settings/defaults.
+      # memory_guard: balanced  # safe, balanced, aggressive, or quoted "off"
+      # memory_guard_gb: 100.5  # custom GB ceiling; enables the guard, overrides the tier
+      # Optional override of services.omlx.gpu_memory_gb; null restores RAM minus 10 GiB.
+      # gpu_memory_gb: 118
       trusted_network: true
     models:
       - memory
