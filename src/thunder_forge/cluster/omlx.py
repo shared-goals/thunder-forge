@@ -793,6 +793,55 @@ def ensure_omlx_tooling(
     return result
 
 
+def _gpu_memory_start_script(node: Node, program_arguments: list[str]) -> str:
+    """Apply the host-wide Metal ceiling before dropping privileges to run oMLX."""
+    if node.runtime is None or not node.user or node.user == "root":
+        raise ValueError("GPU memory setup requires a runtime and a non-root node user")
+    limit = node.runtime.gpu_memory_gb
+    if limit is not None and (type(limit) is not int or limit <= 0):
+        raise ValueError("gpu_memory_gb must be a positive integer in GiB or null")
+    if limit is not None and limit * 1024 > 2**63 - 1:
+        raise ValueError("gpu_memory_gb exceeds the supported system integer range")
+    # GB in tfconfig follows the binary units of hw.memsize and iogpu.wired_limit_mb.
+    target = str(limit * 1024) if limit is not None else "$((total_mb - 10240))"
+    command = shlex.join([
+        "/usr/bin/sudo", "-n", "-H", "-u", node.user, "--", "/usr/bin/env",
+        f"HOME={node.home_dir}",
+        f"PATH={node.home_dir}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        *program_arguments,
+    ])
+    return f"""set -eu
+if [ "$(/usr/bin/uname -s)" != Darwin ] || [ "$(/usr/bin/uname -m)" != arm64 ]; then
+    echo "GPU memory setup requires Apple Silicon macOS" >&2
+    exit 1
+fi
+runtime_uid=$(/usr/bin/id -u {shlex.quote(node.user)})
+if [ "$runtime_uid" -eq 0 ]; then
+    echo "oMLX must run as a non-root user" >&2
+    exit 1
+fi
+total_bytes=$(/usr/sbin/sysctl -n hw.memsize)
+case "$total_bytes" in ''|*[!0-9]*) echo "Invalid hw.memsize" >&2; exit 1;; esac
+total_mb=$((total_bytes / 1048576))
+limit_mb={target}
+if [ "$limit_mb" -le 0 ] || [ "$limit_mb" -ge "$total_mb" ]; then
+    echo "GPU memory limit must be positive and below physical RAM: $limit_mb / $total_mb MiB" >&2
+    exit 1
+fi
+current_mb=$(/usr/sbin/sysctl -n iogpu.wired_limit_mb)
+if [ "$current_mb" != "$limit_mb" ]; then
+    /usr/sbin/sysctl -w "iogpu.wired_limit_mb=$limit_mb"
+fi
+actual_mb=$(/usr/sbin/sysctl -n iogpu.wired_limit_mb)
+if [ "$actual_mb" != "$limit_mb" ]; then
+    echo "GPU memory limit readback mismatch: expected $limit_mb, got $actual_mb MiB" >&2
+    exit 1
+fi
+echo "GPU wired memory limit: $actual_mb MiB (physical RAM: $total_mb MiB)"
+exec {command}
+"""
+
+
 def generate_launchd_plist(node: Node, *, system_daemon: bool = False) -> str:
     """Generate a macOS launchd plist for a node-level oMLX daemon."""
     if node.runtime is None:
@@ -806,6 +855,7 @@ def generate_launchd_plist(node: Node, *, system_daemon: bool = False) -> str:
     program_arguments = _omlx_program_arguments(node)
     environment = {}
     if system_daemon:
+        program_arguments = ["/bin/sh", "-c", _gpu_memory_start_script(node, program_arguments)]
         environment = {
             "HOME": node.home_dir,
             "PATH": f"{node.home_dir}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -818,7 +868,7 @@ def generate_launchd_plist(node: Node, *, system_daemon: bool = False) -> str:
         stdout_log=f"{log_dir}/omlx-{node.runtime.port}.stdout.log",
         stderr_log=f"{log_dir}/omlx-{node.runtime.port}.stderr.log",
         environment=environment,
-        user=node.user,
+        user="root" if system_daemon else node.user,
     )
     return generate_service_launchd_plist(spec, system_daemon=system_daemon)
 
