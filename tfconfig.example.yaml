@@ -169,6 +169,9 @@ nodes:
     admin_user: admin
     runtime:
       type: omlx
+      # Optional oMLX memory guard; omit to preserve saved settings/defaults.
+      # memory_guard: balanced  # safe, balanced, aggressive, or quoted "off"
+      # memory_guard_gb: 100.5  # custom GB ceiling; enables the guard, overrides the tier
       trusted_network: true
     models:
       - memory

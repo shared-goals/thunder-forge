@@ -376,8 +376,8 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
               bind_host: 127.0.0.1
               base_path: /Users/shag/.omlx-tf
               log_level: warning
-              max_model_memory: 90GB
-              max_process_memory: auto
+              memory_guard: balanced
+              memory_guard_gb: 90.5
               max_concurrent_requests: 4
               paged_ssd_cache_dir: /Users/shag/.omlx/cache
               paged_ssd_cache_max_size: 50GB
@@ -397,8 +397,8 @@ def test_parse_node_runtime_options_for_omlx_serve(tmp_path: Path) -> None:
     assert runtime.bind_host == "127.0.0.1"
     assert runtime.base_path == "/Users/shag/.omlx-tf"
     assert runtime.log_level == "warning"
-    assert runtime.max_model_memory == "90GB"
-    assert runtime.max_process_memory == "auto"
+    assert runtime.memory_guard == "balanced"
+    assert runtime.memory_guard_gb == 90.5
     assert runtime.max_concurrent_requests == 4
     assert runtime.paged_ssd_cache_dir == "/Users/shag/.omlx/cache"
     assert runtime.paged_ssd_cache_max_size == "50GB"
@@ -424,6 +424,28 @@ def test_parse_node_runtime_requires_type() -> None:
                 },
             }
         )
+
+
+@pytest.mark.parametrize("options", [
+    {"max_model_memory": "90GB"},
+    {"max_process_memory": "auto"},
+    {"max_model_memory": None},
+    {"memory_guard": "custom"},
+    {"memory_guard": False},
+    {"memory_guard_gb": 0},
+    {"memory_guard_gb": -1},
+    {"memory_guard_gb": True},
+    {"memory_guard_gb": float("inf")},
+    {"memory_guard_gb": float("nan")},
+    {"memory_guard_gb": "90GB"},
+    {"memory_guard": "off", "memory_guard_gb": 90},
+])
+def test_parse_node_runtime_rejects_invalid_memory_settings(options: dict) -> None:
+    with pytest.raises(ValueError, match="nodes.infer-03.runtime.*memory_guard"):
+        parse_cluster_config({"nodes": {"infer-03": {
+            "host": "infer-03.lan", "ram_gb": 128,
+            "runtime": {"type": "omlx", **options},
+        }}})
 
 
 @pytest.mark.parametrize("field", ["no_cache", "trusted_network"])

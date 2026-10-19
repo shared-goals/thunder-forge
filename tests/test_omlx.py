@@ -1,15 +1,19 @@
 """Tests for oMLX node-level runtime helpers."""
 
+import plistlib
+import shlex
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
-from thunder_forge.cluster.config import Node, NodeRuntime
+from thunder_forge.cluster.config import Node, NodeRuntime, parse_cluster_config
 from thunder_forge.cluster.omlx import (
     build_omlx_auth_settings_command,
     build_omlx_serve_command,
     check_omlx_health,
     ensure_omlx_auth_settings,
+    generate_launchd_plist,
     resolve_latest_omlx_release,
     smoke_omlx_chat,
 )
@@ -31,26 +35,28 @@ def test_build_omlx_serve_command_omits_default_model_dir() -> None:
     assert "--model-dir" not in command
 
 
-def test_build_omlx_serve_command_includes_memory_caps_when_configured() -> None:
-    node = Node(
-        host="infer-03.lan",
-        ram_gb=128,
-        user="shag",
-        roles=["inference"],
-        runtime=NodeRuntime(
-            type="omlx",
-            port=8018,
-            max_model_memory="90GB",
-            max_process_memory="auto",
-        ),
-        home_dir="/Users/shag",
-    )
-
-    command = build_omlx_serve_command(node)
-
-    assert command == (
-        "/Users/shag/.local/bin/omlx serve --host 0.0.0.0 --port 8018 --max-model-memory 90GB --max-process-memory auto"
-    )
+@pytest.mark.parametrize("options,expected", [
+    ({}, []),
+    ({"memory_guard": "off"}, ["--memory-guard", "off"]),
+    ({"memory_guard": "safe"}, ["--memory-guard", "safe"]),
+    ({"memory_guard": "balanced"}, ["--memory-guard", "balanced"]),
+    ({"memory_guard": "aggressive"}, ["--memory-guard", "aggressive"]),
+    ({"memory_guard_gb": 90.5}, ["--memory-guard-gb", "90.5"]),
+    ({"memory_guard": "safe", "memory_guard_gb": 90},
+     ["--memory-guard", "safe", "--memory-guard-gb", "90.0"]),
+])
+def test_memory_settings_reach_process_and_launchd(options: dict, expected: list[str]) -> None:
+    config = parse_cluster_config({"nodes": {"infer-03": {
+        "host": "infer-03.lan", "ram_gb": 128, "user": "shag",
+        "runtime": {"type": "omlx", **options},
+    }}})
+    node = config.nodes["infer-03"]
+    node.home_dir = "/Users/shag"
+    arguments = ["/Users/shag/.local/bin/omlx", "serve", "--host", "0.0.0.0", "--port", "8018", *expected]
+    assert shlex.split(build_omlx_serve_command(node)) == arguments
+    for system_daemon in (False, True):
+        plist = plistlib.loads(generate_launchd_plist(node, system_daemon=system_daemon).encode())
+        assert plist["ProgramArguments"] == arguments
 
 
 def test_build_omlx_serve_command_includes_explicit_model_dir_only_when_configured() -> None:
