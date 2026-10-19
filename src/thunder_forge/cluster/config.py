@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -132,8 +133,8 @@ class NodeRuntime:
     bind_host: str = "0.0.0.0"
     base_path: str | None = None
     log_level: str | None = None
-    max_model_memory: str | None = None
-    max_process_memory: str | None = None
+    memory_guard: str | None = None
+    memory_guard_gb: float | None = None
     gpu_memory_gb: int | None = None
     max_concurrent_requests: int | None = None
     paged_ssd_cache_dir: str | None = None
@@ -598,6 +599,24 @@ def _parse_node_runtime(
     except ValueError as exc:
         msg = f"{path}.type must be one of: {', '.join(item.value for item in RuntimeType)}"
         raise ValueError(msg) from exc
+    for obsolete in ("max_model_memory", "max_process_memory"):
+        if obsolete in raw:
+            raise ValueError(
+                f"{path}.{obsolete} is no longer supported by oMLX; remove it and configure "
+                "memory_guard or memory_guard_gb explicitly (the old limits are not equivalent)"
+            )
+    memory_guard = _parse_optional_non_empty_string(raw.get("memory_guard"), name=f"{path}.memory_guard")
+    if memory_guard not in {None, "off", "safe", "balanced", "aggressive"}:
+        raise ValueError(f"{path}.memory_guard must be one of: off, safe, balanced, aggressive")
+    memory_guard_gb = None
+    if raw.get("memory_guard_gb") is not None:
+        if isinstance(raw["memory_guard_gb"], bool):
+            raise ValueError(f"{path}.memory_guard_gb must be a finite positive number")
+        memory_guard_gb = _parse_positive_float(raw["memory_guard_gb"], name=f"{path}.memory_guard_gb", default=0)
+        if not math.isfinite(memory_guard_gb):
+            raise ValueError(f"{path}.memory_guard_gb must be a finite positive number")
+        if memory_guard == "off":
+            raise ValueError(f"{path}.memory_guard off cannot be combined with memory_guard_gb")
     return NodeRuntime(
         type=runtime_type,
         port=parse_port(raw.get("port", default_port), name=f"{path}.port"),
@@ -606,11 +625,8 @@ def _parse_node_runtime(
         or "0.0.0.0",
         base_path=_parse_optional_non_empty_string(raw.get("base_path"), name=f"{path}.base_path"),
         log_level=_parse_optional_non_empty_string(raw.get("log_level"), name=f"{path}.log_level"),
-        max_model_memory=_parse_optional_non_empty_string(raw.get("max_model_memory"), name=f"{path}.max_model_memory"),
-        max_process_memory=_parse_optional_non_empty_string(
-            raw.get("max_process_memory"),
-            name=f"{path}.max_process_memory",
-        ),
+        memory_guard=memory_guard,
+        memory_guard_gb=memory_guard_gb,
         gpu_memory_gb=_parse_gpu_memory_gb(
             raw.get("gpu_memory_gb", default_gpu_memory_gb), name=f"{path}.gpu_memory_gb",
         ),
