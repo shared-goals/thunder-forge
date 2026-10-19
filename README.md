@@ -157,6 +157,14 @@ When `services.olla.version` is omitted inside an explicit `services.olla` block
 
 After changing model placement or node topology in `tfconfig.yaml`, run `make restart gateway-cache-01` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
 
+### GPU memory ceiling on inference nodes
+
+Set `services.omlx.gpu_memory_gb` in `tfconfig.yaml` for a shared ceiling, or override it with `nodes.<node>.runtime.gpu_memory_gb`. Use a positive integer in **GiB**. Omitted node values inherit the service setting; explicit `null` selects actual RAM minus 10 GiB. A 128 GiB node therefore defaults to 118 GiB (`iogpu.wired_limit_mb=120832`). RAM comes from `hw.memsize` on the inference node, not the controller or the inventory's `ram_gb`.
+
+`make bootstrap <node>`, `make restart <node>`, and sync with runtime restart install the setting in the oMLX system LaunchDaemon. At every start, including after reboot, a short root-owned plist command validates the limit, applies it only when changed, verifies it by reading sysctl back, then uses `sudo -n -H -u <node.user>` to start oMLX as the non-root runtime user. No extra sysctl sudoers permission is granted. An unsupported host, invalid limit, or failed write/readback prevents oMLX startup and reports the error in its stderr log. Dry-run only renders the plist. The legacy user LaunchAgent and process managers do not apply GPU memory settings; use the system `daemon` manager.
+
+This is a **host-wide ceiling**, shared by all GPU processes, not a reserved allocation or an Olla router option. It must be strictly below physical RAM. It does not override oMLX's memory guard (`--memory-guard` or `--memory-guard-gb`); review that separately if its ceiling remains lower. Raising the ceiling can increase host memory pressure. To roll back, set the previous explicit GiB limit and restart; for the macOS automatic policy, remove the startup policy before resetting `sudo sysctl -w iogpu.wired_limit_mb=0`, otherwise the next daemon start reapplies it. [MLX wired-limit documentation](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.set_wired_limit.html).
+
 Bootstrap verifies minimal service readiness only: Olla `/internal/health`, TF edge auth boundary health, and direct oMLX `/health`. It does not require inference models or chat to be ready; use `make smoke` for model visibility, routing, and chat checks after the cluster has warmed up.
 
 Run system-daemon install targets from a real terminal, not the VS Code guarded terminal, because macOS sudo/su password prompts can be blocked by the editor guard:
@@ -210,6 +218,7 @@ Thunder Forge service ports live in `tfconfig.yaml` under `services:`:
 | `services.edge.host` | `0.0.0.0` | TF edge bind address; use `0.0.0.0` for LAN clients, keep raw Olla private |
 | `services.edge.port` | `40116` | Local TF edge OpenAI-compatible proxy |
 | `services.omlx.port` | `8018` | Default oMLX node runtime port when a node runtime omits `port` |
+| `services.omlx.gpu_memory_gb` | `null` | Host-wide GPU wired-memory ceiling in GiB; null/omitted means actual node RAM minus 10 GiB |
 | `services.edge.access_log` | `logs/tf-edge-access.jsonl` | TF edge JSONL accounting log |
 | `services.frontend.admin_user` | empty | Admin account used for frontend system-daemon sudo operations |
 

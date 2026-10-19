@@ -212,6 +212,9 @@ def test_runtime_restart_daemon_dry_run_prints_plist_and_sudo_commands(tmp_path:
     config_dir.mkdir()
     (repo / "tfconfig.yaml").write_text(
         dedent("""\
+            services:
+              omlx:
+                gpu_memory_gb: 100
             models: {}
             nodes:
               infer-03:
@@ -238,6 +241,8 @@ def test_runtime_restart_daemon_dry_run_prints_plist_and_sudo_commands(tmp_path:
     assert "plist_path: /Library/LaunchDaemons/com.thunder-forge.omlx-8018.plist" in result.stdout
     assert "staging_plist_path: /Users/shag/.omlx/run/com.thunder-forge.omlx-8018.plist" in result.stdout
     assert "<key>UserName</key>" in result.stdout
+    assert "limit_mb=102400" in result.stdout
+    assert "iogpu.wired_limit_mb" in result.stdout
     assert "sudo -n /usr/bin/install" in result.stdout
     assert "sudo -n /bin/launchctl bootstrap system" in result.stdout
 
