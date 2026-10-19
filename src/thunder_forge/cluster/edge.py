@@ -61,6 +61,7 @@ EDGE_USER_PREFIX = "TF_USER_"
 EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
 EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
 EDGE_DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
+EDGE_MAX_STREAM_CAPTURE_BYTES = 1024 * 1024
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"
@@ -106,7 +107,8 @@ class EdgeProxyConfig:
     active_requests: dict[str, tuple[str, str]] = field(default_factory=dict)
     active_requests_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     model_catalog: list[EdgeModelCatalogEntry] = field(default_factory=list)
-    timeout: float = 60.0
+    # Leave room for Olla's 120-second backend timeouts and connection attempts.
+    timeout: float = 180.0
     status_timeout: float = 8.0
     max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
     inspector: EdgeInspectorConfig | None = None
@@ -1166,6 +1168,7 @@ def _write_edge_inspector_entry(
     status_code: int | None = None,
     headers: dict[str, str] | httpx.Headers | None = None,
     body: bytes | None = None,
+    body_truncated: bool = False,
     error: str | None = None,
 ) -> None:
     inspector = config.inspector
@@ -1188,6 +1191,8 @@ def _write_edge_inspector_entry(
         payload["headers"] = _normalize_headers_for_dump(headers)
     if body is not None:
         payload["body"] = _body_dump_payload(body)
+    if body_truncated:
+        payload["body_truncated"] = True
     if error:
         payload["error"] = error
 
@@ -1574,9 +1579,10 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     olla_endpoint=olla_endpoint,
                 )
                 logged = True
-                _unregister_active_request(config, upstream.request_id)
 
             normalized_base_url = config.olla_base_url.rstrip("/")
+            headers_sent = False
+            olla_endpoint = ""
             try:
                 with httpx.Client(base_url=normalized_base_url, timeout=config.timeout, trust_env=False) as client:
                     with client.stream(
@@ -1585,7 +1591,8 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         headers=upstream.forwarded_headers,
                         content=body,
                     ) as response:
-                        captured_body = bytearray()
+                        captured_body = bytearray() if inspector is not None and inspector.enabled else None
+                        body_truncated = False
                         olla_endpoint = response.headers.get("X-Olla-Endpoint", "")
                         self.send_response(response.status_code)
                         response_headers = _proxy_response_headers(response.headers)
@@ -1594,6 +1601,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                             self.send_header(name, value)
                         try:
                             self.end_headers()
+                            headers_sent = True
                         except OSError as exc:
                             if self._is_client_disconnect(exc):
                                 record_stream(response.status_code, olla_endpoint=olla_endpoint)
@@ -1601,14 +1609,17 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                             raise
                         for chunk in response.iter_bytes():
                             if chunk:
-                                captured_body.extend(chunk)
+                                if captured_body is not None:
+                                    remaining = EDGE_MAX_STREAM_CAPTURE_BYTES - len(captured_body)
+                                    captured_body.extend(chunk[:remaining])
+                                    body_truncated |= len(chunk) > remaining
                                 try:
                                     self.wfile.write(chunk)
                                     self.wfile.flush()
                                 except OSError as exc:
                                     if self._is_client_disconnect(exc):
                                         record_stream(response.status_code, olla_endpoint=olla_endpoint)
-                                        if inspector is not None and inspector.enabled:
+                                        if captured_body is not None:
                                             _write_edge_inspector_entry(
                                                 config,
                                                 event_type="response",
@@ -1618,10 +1629,11 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                                                 status_code=response.status_code,
                                                 headers=response.headers,
                                                 body=bytes(captured_body),
+                                                body_truncated=body_truncated,
                                             )
                                         return
                                     raise
-                        if inspector is not None and inspector.enabled:
+                        if captured_body is not None:
                             _write_edge_inspector_entry(
                                 config,
                                 event_type="response",
@@ -1631,6 +1643,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                                 status_code=response.status_code,
                                 headers=response.headers,
                                 body=bytes(captured_body),
+                                body_truncated=body_truncated,
                             )
                         record_stream(response.status_code, olla_endpoint=olla_endpoint)
             except httpx.HTTPError as exc:
@@ -1643,8 +1656,13 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         path=self.path,
                         error=str(exc),
                     )
-                record_stream(502)
-                self._send_edge_response(_json_response(502, {"error": f"upstream_failed: {exc}"}))
+                record_stream(502, olla_endpoint=olla_endpoint)
+                if headers_sent:
+                    self.close_connection = True
+                else:
+                    self._send_edge_response(_json_response(502, {"error": f"upstream_failed: {exc}"}))
+            finally:
+                _unregister_active_request(config, upstream.request_id)
 
         def _send_edge_response(self, result: EdgeProxyResponse) -> None:
             self.send_response(result.status_code)

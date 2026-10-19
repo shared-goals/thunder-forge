@@ -157,6 +157,8 @@ When `services.olla.version` is omitted inside an explicit `services.olla` block
 
 After changing model placement or node topology in `tfconfig.yaml`, run `make restart gateway-cache-01` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
 
+TF edge defaults to a 180-second upstream I/O timeout, leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records a 502 failure in its access log; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
+
 Bootstrap verifies minimal service readiness only: Olla `/internal/health`, TF edge auth boundary health, and direct oMLX `/health`. It does not require inference models or chat to be ready; use `make smoke` for model visibility, routing, and chat checks after the cluster has warmed up.
 
 Run system-daemon install targets from a real terminal, not the VS Code guarded terminal, because macOS sudo/su password prompts can be blocked by the editor guard:
