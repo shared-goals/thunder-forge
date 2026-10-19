@@ -157,6 +157,8 @@ When `services.olla.version` is omitted inside an explicit `services.olla` block
 
 After changing model placement or node topology in `tfconfig.yaml`, run `make restart gateway-cache-01` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
 
+TF edge defaults to a 180-second upstream I/O timeout, leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records a 502 failure in its access log; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
+
 ### GPU memory ceiling on inference nodes
 
 Set `services.omlx.gpu_memory_gb` in `tfconfig.yaml` for a shared ceiling, or override it with `nodes.<node>.runtime.gpu_memory_gb`. Use a positive integer in **GiB**. Omitted node values inherit the service setting; explicit `null` selects actual RAM minus 10 GiB. A 128 GiB node therefore defaults to 118 GiB (`iogpu.wired_limit_mb=120832`). RAM comes from `hw.memsize` on the inference node, not the controller or the inventory's `ram_gb`.
