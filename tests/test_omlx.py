@@ -56,7 +56,12 @@ def test_memory_settings_reach_process_and_launchd(options: dict, expected: list
     assert shlex.split(build_omlx_serve_command(node)) == arguments
     for system_daemon in (False, True):
         plist = plistlib.loads(generate_launchd_plist(node, system_daemon=system_daemon).encode())
-        assert plist["ProgramArguments"] == arguments
+        if system_daemon:
+            # PR #5 wraps system-daemon arguments in a root sh -c GPU-memory setup script.
+            assert plist["ProgramArguments"][:2] == ["/bin/sh", "-c"]
+            assert shlex.join(arguments) in plist["ProgramArguments"][2]
+        else:
+            assert plist["ProgramArguments"] == arguments
 
 
 def test_build_omlx_serve_command_includes_explicit_model_dir_only_when_configured() -> None:
