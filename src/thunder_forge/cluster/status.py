@@ -25,6 +25,7 @@ def normalize_model_statuses(
         is_loading = raw_status.get("is_loading") is True
         status: dict[str, object] = {
             "id": aliases[0],
+            "aliases": aliases,
             "runtime_id": runtime_model_id,
             "loaded": loaded,
             "is_loading": is_loading,

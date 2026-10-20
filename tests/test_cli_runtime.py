@@ -1222,11 +1222,105 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "macos_version: 15.6.1" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
-    assert "served_models (13G): memory" in result.stdout
-    assert "hot_loaded_models (13G): memory" in result.stdout
+    # Disk totals come from the repo tfconfig model registry; only the alias list
+    # is stable across registry changes, so assert the shape without the size.
+    served_lines = [line for line in result.stdout.splitlines() if line.strip().startswith("served_models (")]
+    hot_lines = [line for line in result.stdout.splitlines() if line.strip().startswith("hot_loaded_models (")]
+    assert len(served_lines) == 1 and served_lines[0].strip().endswith(": memory")
+    assert len(hot_lines) == 1 and hot_lines[0].strip().endswith(": memory")
     assert "model: memory tf_user=shag state=active idle=12s ram=13.0G" in result.stdout
     assert "latest_omlx_version: v0.4.2" in result.stdout
     assert "omlx_upgrade_hint: no (versions aligned)" in result.stdout
+
+
+def test_cluster_status_shows_alias_group_for_shared_runtime_model(tmp_path: Path, monkeypatch) -> None:
+    """Unified layout: one loaded runtime model behind several aliases must show them all."""
+    import thunder_forge.cli as cli_module
+
+    payload = {
+        "ok": True,
+        "target": "all",
+        "gateway": None,
+        "inference": [
+            {
+                "name": "infer-03",
+                "host": "infer-03.lan",
+                "health": "ok",
+                "models": "ok",
+                "active_requests": 1,
+                "omlx_version": "0.7.1rc1",
+                "macos_version": "27.0.1",
+                "served_models": ["agent", "coder", "memory"],
+                "hot_loaded_models": ["agent", "coder", "memory"],
+                "model_statuses": [
+                    {
+                        "id": "agent",
+                        "aliases": ["agent", "coder", "memory"],
+                        "runtime_id": "Qwen3.8-Flash-Next-oQ4e-mtp",
+                        "state": "loaded",
+                        "idle_seconds": 12.0,
+                        "actual_size": 106 * 1024**3,
+                    }
+                ],
+                "errors": [],
+            }
+        ],
+        "summary": {},
+        "active_edge_requests": [{"client_id": "shag", "model": "coder"}],
+    }
+    monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
+
+    result = runner.invoke(app, ["cluster", "status"])
+
+    assert result.exit_code == 0
+    assert (
+        "model: agent,coder,memory (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag state=active idle=12s ram=106.0G"
+        in result.stdout
+    )
+    # Aliases sharing one runtime model must be counted once, not once per alias.
+    assert "served_models (106.3G): agent, coder, memory" in result.stdout
+    assert "hot_loaded_models (106.3G): agent, coder, memory" in result.stdout
+
+
+def test_print_cluster_status_rich_shows_alias_group() -> None:
+    """Rich table must show the full alias group, runtime id, and group-wide active users."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from thunder_forge.cli import _print_cluster_status_rich
+
+    payload = {
+        "ok": True,
+        "gateway": None,
+        "inference": [
+            {
+                "name": "msm3",
+                "host": "msm3-wifi.lan",
+                "health": "ok",
+                "models": "ok",
+                "model_statuses": [
+                    {
+                        "id": "agent",
+                        "aliases": ["agent", "coder", "memory"],
+                        "runtime_id": "Qwen3.8-Flash-Next-oQ4e-mtp",
+                        "state": "loaded",
+                        "idle_seconds": 12.0,
+                        "actual_size": 106 * 1024**3,
+                    }
+                ],
+            }
+        ],
+        "active_edge_requests": [{"client_id": "shag", "model": "coder", "node": "msm3"}],
+        "summary": {},
+    }
+    output = StringIO()
+    _print_cluster_status_rich(payload, console=Console(file=output, width=200, color_system=None))
+    value = output.getvalue()
+
+    assert "agent,coder,memory" in value
+    assert "Qwen3.8-Flash-Next-oQ4e-mtp" in value
+    assert "shag" in value
 
 
 def test_cluster_status_replaces_unknown_upstream_versions(monkeypatch) -> None:
