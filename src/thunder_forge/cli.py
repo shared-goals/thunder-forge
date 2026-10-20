@@ -2087,6 +2087,30 @@ def _model_display_id(status: dict) -> str:
     return aliases[0]
 
 
+def _expand_alias_rows(status: dict) -> list[dict[str, object]]:
+    """Expand one runtime-model status into one row per configured alias.
+
+    The alias label becomes the row identity; the shared runtime model id and
+    size are carried on every row so the display can render one row per alias.
+    """
+    aliases = _model_status_aliases(status)
+    runtime_id = str(status.get("runtime_id", aliases[0]))
+    actual_size = status.get("actual_size")
+    rows: list[dict[str, object]] = []
+    for index, alias in enumerate(aliases):
+        rows.append(
+            {
+                "alias": str(alias),
+                "runtime_id": runtime_id,
+                "actual_size": actual_size if index == 0 else None,
+                "state": status.get("state", "unknown"),
+                "idle_seconds": status.get("idle_seconds"),
+                "tf_user": status.get("tf_user", "-"),
+            }
+        )
+    return rows
+
+
 def _node_idle_seconds(node: dict[str, object]) -> float | None:
     active_requests = node.get("active_requests")
     if isinstance(active_requests, int) and active_requests > 0:
@@ -2196,33 +2220,36 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
         active_users = _active_model_users(payload)
         model_table = Table(title="Models")
         model_table.add_column("Node", style="bold")
+        model_table.add_column("Alias")
         model_table.add_column("Model")
         model_table.add_column("TF User")
         model_table.add_column("State")
         model_table.add_column("Idle", justify="right")
         model_table.add_column("RAM", justify="right")
         for node_name, status in model_statuses:
-            model_id = _model_display_id(status)
-            matched_users: set[str] = set()
-            for active_key in ((node_name, alias) for alias in _model_status_aliases(status)):
-                matched_users |= active_users.get(active_key, set())
-            state = "active" if matched_users else str(status.get("state", "unknown"))
-            tf_user = (
-                ", ".join(sorted(matched_users))
-                if matched_users
-                else str(status.get("tf_user", "-"))
-            )
-            state_style = {"loaded": "green", "loading": "yellow", "cold": "dim"}.get(
-                state, "bold green" if state == "active" else "red"
-            )
-            model_table.add_row(
-                node_name,
-                model_id,
-                tf_user,
-                f"[{state_style}]{state}[/{state_style}]",
-                _format_model_idle(status.get("idle_seconds")),
-                _format_model_size(status.get("actual_size")),
-            )
+            rows = _expand_alias_rows(status)
+            for row in rows:
+                alias = str(row["alias"])
+                runtime_id = str(row["runtime_id"])
+                model_label = runtime_id if alias == runtime_id else f"{alias} ({runtime_id})"
+                base_state = str(row.get("state", "unknown"))
+                matched_users: set[str] = set()
+                for active_key in ((node_name, alias) for alias in _model_status_aliases(status)):
+                    matched_users |= active_users.get(active_key, set())
+                state = "active" if matched_users else base_state
+                tf_user = ", ".join(sorted(matched_users)) if matched_users else str(row.get("tf_user", "-"))
+                state_style = {"loaded": "green", "loading": "yellow", "cold": "dim"}.get(
+                    state, "bold green" if state == "active" else "red"
+                )
+                model_table.add_row(
+                    node_name,
+                    alias,
+                    model_label,
+                    tf_user,
+                    f"[{state_style}]{state}[/{state_style}]",
+                    _format_model_idle(row.get("idle_seconds")),
+                    _format_model_size(row.get("actual_size")),
+                )
         console.print(model_table)
         console.print()
 
@@ -2317,26 +2344,26 @@ def _print_cluster_status_payload(
                 for model_status in model_statuses:
                     if not isinstance(model_status, dict):
                         continue
-                    model_idle = _format_model_idle(model_status.get("idle_seconds"))
-                    model_id = _model_display_id(model_status)
                     node_name = str(node.get("name", "node"))
-                    active_keys = [(node_name, alias) for alias in _model_status_aliases(model_status)]
-                    matched_users: set[str] = set()
-                    for active_key in active_keys:
-                        matched_users |= active_users.get(active_key, set())
-                    state = "active" if matched_users else str(model_status.get("state", "unknown"))
-                    tf_user = (
-                        ", ".join(sorted(matched_users))
-                        if matched_users
-                        else str(model_status.get("tf_user", "-"))
-                    )
-                    typer.echo(
-                        f"  model: {model_id} "
-                        f"tf_user={tf_user} "
-                        f"state={state} "
-                        f"idle={model_idle} "
-                        f"ram={_format_model_size(model_status.get('actual_size'))}"
-                    )
+                    alias_keys = _model_status_aliases(model_status)
+                    rows = _expand_alias_rows(model_status)
+                    for row in rows:
+                        alias = str(row["alias"])
+                        runtime_id = str(row["runtime_id"])
+                        model_id = runtime_id if alias == runtime_id else f"{alias} ({runtime_id})"
+                        active_keys = [(node_name, a) for a in alias_keys]
+                        matched_users: set[str] = set()
+                        for active_key in active_keys:
+                            matched_users |= active_users.get(active_key, set())
+                        state = "active" if matched_users else str(row.get("state", "unknown"))
+                        tf_user = ", ".join(sorted(matched_users)) if matched_users else str(row.get("tf_user", "-"))
+                        typer.echo(
+                            f"  model: {model_id} "
+                            f"tf_user={tf_user} "
+                            f"state={state} "
+                            f"idle={_format_model_idle(row.get('idle_seconds'))} "
+                            f"ram={_format_model_size(row.get('actual_size'))}"
+                        )
             errors = node.get("errors")
             if isinstance(errors, list):
                 for error in errors:

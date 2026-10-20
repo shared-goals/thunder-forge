@@ -12,7 +12,7 @@ import yaml as yaml_lib
 from rich.console import Console
 from typer.testing import CliRunner
 
-from thunder_forge.cli import app
+from thunder_forge.cli import _print_cluster_status_rich, app
 from thunder_forge.cluster.config import ClusterConfig, ServiceConfig
 from thunder_forge.cluster.edge import EdgeSmokeResult
 from thunder_forge.cluster.gateway import GatewayDaemonSetupResult
@@ -1273,13 +1273,12 @@ def test_cluster_status_shows_alias_group_for_shared_runtime_model(tmp_path: Pat
     result = runner.invoke(app, ["cluster", "status"])
 
     assert result.exit_code == 0
-    assert (
-        "model: agent,coder,memory (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag state=active idle=12s ram=106.0G"
-        in result.stdout
-    )
-    # Aliases sharing one runtime model must be counted once, not once per alias.
-    assert "served_models (106.3G): agent, coder, memory" in result.stdout
-    assert "hot_loaded_models (106.3G): agent, coder, memory" in result.stdout
+    # Each alias renders its own row carrying the shared runtime model id.
+    assert "model: agent (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag state=active idle=12s ram=106.0G" in result.stdout
+    assert "model: coder (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag state=active idle=12s ram=-" in result.stdout
+    assert "model: memory (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag state=active idle=12s ram=-" in result.stdout
+    # RAM shows once per shared runtime model (first alias row), then "-" on the rest.
+    assert result.stdout.count("106.0G") == 1
 
 
 def test_print_cluster_status_rich_shows_alias_group() -> None:
@@ -1318,9 +1317,75 @@ def test_print_cluster_status_rich_shows_alias_group() -> None:
     _print_cluster_status_rich(payload, console=Console(file=output, width=200, color_system=None))
     value = output.getvalue()
 
-    assert "agent,coder,memory" in value
+    # Each alias on its own row (Alias column), all carrying the runtime model id.
+    assert "Alias" in value
+    for alias in ("agent", "coder", "memory"):
+        assert f"\n{alias}\n" in value or f" │ {alias} " in value
     assert "Qwen3.8-Flash-Next-oQ4e-mtp" in value
+    assert value.count("Qwen3.8-Flash-Next-oQ4e-mtp") == 3
+    # RAM shown once per shared runtime model (first alias row only).
+    assert value.count("106.0G") == 1
+    # Active attribution on the coder row.
     assert "shag" in value
+
+
+def _alias_group_status_payload() -> dict:
+    """One runtime model behind three aliases plus a second single-alias model."""
+    return {
+        "ok": True,
+        "gateway": None,
+        "inference": [
+            {
+                "name": "msm1",
+                "host": "msm1-wifi.lan",
+                "health": "ok",
+                "models": "ok",
+                "model_statuses": [
+                    {
+                        "id": "agent",
+                        "aliases": ["agent", "coder", "memory"],
+                        "runtime_id": "Ornith-1.5-35B-A3B-MLX-8bit",
+                        "state": "loaded",
+                        "idle_seconds": 12.0,
+                        "actual_size": 37372915040,
+                        "tf_user": "shag_hindsight",
+                    },
+                    {
+                        "id": "embedding",
+                        "aliases": ["embedding"],
+                        "runtime_id": "bge-m3-mlx-fp16",
+                        "state": "loaded",
+                        "idle_seconds": 5.0,
+                        "actual_size": 1347617920,
+                        "tf_user": "shag_hindsight",
+                    },
+                ],
+                "active_requests": 0,
+            }
+        ],
+        "active_edge_requests": [{"client_id": "shag_hindsight", "model": "memory", "node": "msm1"}],
+        "summary": {},
+    }
+
+
+def test_rich_status_expands_aliases_to_separate_rows() -> None:
+    """Each alias renders its own row; runtime model id repeats, RAM shows once."""
+    output = StringIO()
+    _print_cluster_status_rich(
+        _alias_group_status_payload(), console=Console(file=output, width=200, color_system=None)
+    )
+    value = output.getvalue()
+    assert "Alias" in value
+    for alias in ("agent", "coder", "memory"):
+        assert f"│ {alias} " in value
+    # Real runtime model id appears once per alias row.
+    assert value.count("Ornith-1.5-35B-A3B-MLX-8bit") == 3
+    # RAM shown once (first alias row only).
+    assert value.count("34.8G") == 1
+    # embedding row keeps its own RAM figure.
+    assert "1.3G" in value
+    # active attribution is on the memory alias row.
+    assert "shag_hindsight" in value
 
 
 def test_cluster_status_replaces_unknown_upstream_versions(monkeypatch) -> None:
