@@ -2231,7 +2231,7 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
             for row in rows:
                 alias = str(row["alias"])
                 runtime_id = str(row["runtime_id"])
-                model_label = runtime_id if alias == runtime_id else f"{alias} ({runtime_id})"
+                model_label = runtime_id
                 base_state = str(row.get("state", "unknown"))
                 matched_users: set[str] = set()
                 for active_key in ((node_name, alias) for alias in _model_status_aliases(status)):
