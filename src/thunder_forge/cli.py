@@ -737,12 +737,28 @@ def _format_disk_gb(total_disk_gb: float) -> str:
 
 
 def _sum_aliases_disk_gb(config: ClusterConfig, aliases: list[str]) -> float:
+    """Sum disk usage of the listed aliases, counting each runtime model once.
+
+    Aliases that share a runtime_model_id (unified layout) point at the same
+    on-disk model, so they must not be summed per alias.
+    """
+    disk_by_runtime: dict[str, float] = {}
+    for model in config.models.values():
+        if model.runtime_model_id:
+            disk_by_runtime.setdefault(model.runtime_model_id, model.disk_gb)
+    seen_runtimes: set[str] = set()
     total = 0.0
     for alias in aliases:
         model = config.models.get(alias)
         if model is None:
             continue
-        total += model.disk_gb
+        if model.runtime_model_id:
+            if model.runtime_model_id in seen_runtimes:
+                continue
+            seen_runtimes.add(model.runtime_model_id)
+            total += disk_by_runtime.get(model.runtime_model_id, model.disk_gb)
+        else:
+            total += model.disk_gb
     return total
 
 
@@ -2056,6 +2072,21 @@ def _active_model_users(payload: dict[str, object]) -> dict[tuple[str, str], set
     return active_users
 
 
+def _model_status_aliases(status: dict) -> list[str]:
+    aliases = status.get("aliases")
+    if isinstance(aliases, list) and aliases and all(isinstance(a, str) and a for a in aliases):
+        return aliases
+    return [str(status.get("id", status.get("runtime_id", "model")))]
+
+
+def _model_display_id(status: dict) -> str:
+    aliases = _model_status_aliases(status)
+    runtime_id = str(status.get("runtime_id", aliases[0]))
+    if len(aliases) > 1:
+        return f"{','.join(aliases)} ({runtime_id})"
+    return aliases[0]
+
+
 def _node_idle_seconds(node: dict[str, object]) -> float | None:
     active_requests = node.get("active_requests")
     if isinstance(active_requests, int) and active_requests > 0:
@@ -2171,12 +2202,14 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
         model_table.add_column("Idle", justify="right")
         model_table.add_column("RAM", justify="right")
         for node_name, status in model_statuses:
-            model_id = str(status.get("id", status.get("runtime_id", "model")))
-            active_key = (node_name, model_id)
-            state = "active" if active_key in active_users else str(status.get("state", "unknown"))
+            model_id = _model_display_id(status)
+            matched_users: set[str] = set()
+            for active_key in ((node_name, alias) for alias in _model_status_aliases(status)):
+                matched_users |= active_users.get(active_key, set())
+            state = "active" if matched_users else str(status.get("state", "unknown"))
             tf_user = (
-                ", ".join(sorted(active_users[active_key]))
-                if active_key in active_users
+                ", ".join(sorted(matched_users))
+                if matched_users
                 else str(status.get("tf_user", "-"))
             )
             state_style = {"loaded": "green", "loading": "yellow", "cold": "dim"}.get(
@@ -2285,12 +2318,16 @@ def _print_cluster_status_payload(
                     if not isinstance(model_status, dict):
                         continue
                     model_idle = _format_model_idle(model_status.get("idle_seconds"))
-                    model_id = str(model_status.get("id", model_status.get("runtime_id", "model")))
-                    active_key = (str(node.get("name", "node")), model_id)
-                    state = "active" if active_key in active_users else str(model_status.get("state", "unknown"))
+                    model_id = _model_display_id(model_status)
+                    node_name = str(node.get("name", "node"))
+                    active_keys = [(node_name, alias) for alias in _model_status_aliases(model_status)]
+                    matched_users: set[str] = set()
+                    for active_key in active_keys:
+                        matched_users |= active_users.get(active_key, set())
+                    state = "active" if matched_users else str(model_status.get("state", "unknown"))
                     tf_user = (
-                        ", ".join(sorted(active_users[active_key]))
-                        if active_key in active_users
+                        ", ".join(sorted(matched_users))
+                        if matched_users
                         else str(model_status.get("tf_user", "-"))
                     )
                     typer.echo(
