@@ -443,11 +443,14 @@ def test_run_omlx_process_restart_apply_records_pid_and_health(monkeypatch) -> N
 @pytest.mark.parametrize(
     "configured,total_gib,current_mb,write_failure,readback_bad,expected_mb,success",
     [
-        (None, 128, 0, False, False, 120832, True),
-        (None, 64, 0, False, False, 55296, True),
+        (None, 128, 0, False, False, 128000, True),
+        (None, 128, 128000, False, False, 128000, True),
+        (None, 64, 0, False, False, 62464, True),
         (100, 128, 0, False, False, 102400, True),
         (118, 128, 120832, False, False, 120832, True),
-        (None, 8, 0, False, False, None, False),
+        (None, 8, 0, False, False, 5120, True),
+        (None, 3, 0, False, False, None, False),
+        (None, 2, 0, False, False, None, False),
         (128, 128, 0, False, False, None, False),
         (129, 128, 0, False, False, None, False),
         (118, 128, 0, True, False, 120832, False),
