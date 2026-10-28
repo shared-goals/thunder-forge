@@ -382,7 +382,7 @@ def _parse_gpu_memory_gb(raw: object, *, name: str) -> int | None:
     if raw is None:
         return None
     if type(raw) is not int or raw <= 0:
-        raise ValueError(f"{name} must be a positive integer in GiB or null (RAM minus 10 GiB)")
+        raise ValueError(f"{name} must be a positive integer in GiB or null (RAM minus 3 GiB)")
     return raw
 
 

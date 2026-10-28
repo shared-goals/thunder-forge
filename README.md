@@ -161,7 +161,7 @@ TF edge defaults to a 180-second upstream I/O timeout, leaving room for the gene
 
 ### GPU memory ceiling on inference nodes
 
-Set `services.omlx.gpu_memory_gb` in `tfconfig.yaml` for a shared ceiling, or override it with `nodes.<node>.runtime.gpu_memory_gb`. Use a positive integer in **GiB**. Omitted node values inherit the service setting; explicit `null` selects actual RAM minus 10 GiB. A 128 GiB node therefore defaults to 118 GiB (`iogpu.wired_limit_mb=120832`). RAM comes from `hw.memsize` on the inference node, not the controller or the inventory's `ram_gb`.
+Set `services.omlx.gpu_memory_gb` in `tfconfig.yaml` for a shared ceiling, or override it with `nodes.<node>.runtime.gpu_memory_gb`. Use a positive integer in **GiB**. Omitted node values inherit the service setting; explicit `null` selects actual RAM minus 3 GiB. A 128 GiB node therefore defaults to 125 GiB (`iogpu.wired_limit_mb=128000`). RAM comes from `hw.memsize` on the inference node, not the controller or the inventory's `ram_gb`.
 
 `make bootstrap <node>`, `make restart <node>`, and sync with runtime restart install the setting in the oMLX system LaunchDaemon. At every start, including after reboot, a short root-owned plist command validates the limit, applies it only when changed, verifies it by reading sysctl back, then uses `sudo -n -H -u <node.user>` to start oMLX as the non-root runtime user. No extra sysctl sudoers permission is granted. An unsupported host, invalid limit, or failed write/readback prevents oMLX startup and reports the error in its stderr log. Dry-run only renders the plist. The legacy user LaunchAgent and process managers do not apply GPU memory settings; use the system `daemon` manager.
 
@@ -220,7 +220,7 @@ Thunder Forge service ports live in `tfconfig.yaml` under `services:`:
 | `services.edge.host` | `0.0.0.0` | TF edge bind address; use `0.0.0.0` for LAN clients, keep raw Olla private |
 | `services.edge.port` | `40116` | Local TF edge OpenAI-compatible proxy |
 | `services.omlx.port` | `8018` | Default oMLX node runtime port when a node runtime omits `port` |
-| `services.omlx.gpu_memory_gb` | `null` | Host-wide GPU wired-memory ceiling in GiB; null/omitted means actual node RAM minus 10 GiB |
+| `services.omlx.gpu_memory_gb` | `null` | Host-wide GPU wired-memory ceiling in GiB; null/omitted means actual node RAM minus 3 GiB |
 | `services.edge.access_log` | `logs/tf-edge-access.jsonl` | TF edge JSONL accounting log |
 | `services.frontend.admin_user` | empty | Admin account used for frontend system-daemon sudo operations |
 

@@ -803,7 +803,7 @@ def _gpu_memory_start_script(node: Node, program_arguments: list[str]) -> str:
     if limit is not None and limit * 1024 > 2**63 - 1:
         raise ValueError("gpu_memory_gb exceeds the supported system integer range")
     # GB in tfconfig follows the binary units of hw.memsize and iogpu.wired_limit_mb.
-    target = str(limit * 1024) if limit is not None else "$((total_mb - 10240))"
+    target = str(limit * 1024) if limit is not None else "$((total_mb - 3072))"
     command = shlex.join([
         "/usr/bin/sudo", "-n", "-H", "-u", node.user, "--", "/usr/bin/env",
         f"HOME={node.home_dir}",
