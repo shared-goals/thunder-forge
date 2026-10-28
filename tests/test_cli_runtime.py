@@ -34,6 +34,15 @@ def _cluster_config(*, edge_port: int = 40116, olla_port: int = 40115) -> Cluste
     return ClusterConfig(services=ServiceConfig(edge_port=edge_port, olla_port=olla_port))
 
 
+def _use_tmp_tfconfig(tmp_path: Path, monkeypatch) -> None:
+    """Point find_repo_root at tmp_path with a minimal tfconfig so tests do not
+    depend on an untracked repo-root tfconfig.yaml (absent in CI)."""
+    (tmp_path / "tfconfig.yaml").write_text("models: {}\nnodes: {}\n")
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: tmp_path)
+
+
 def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     config_dir = repo / "config"
@@ -1181,6 +1190,7 @@ def test_cluster_restart_apply_uses_configured_local_olla_binary(tmp_path: Path,
 def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
+    _use_tmp_tfconfig(tmp_path, monkeypatch)
     payload = {
         "ok": True,
         "target": "all",
@@ -1237,6 +1247,7 @@ def test_cluster_status_shows_alias_group_for_shared_runtime_model(tmp_path: Pat
     """Unified layout: one loaded runtime model behind several aliases must show them all."""
     import thunder_forge.cli as cli_module
 
+    _use_tmp_tfconfig(tmp_path, monkeypatch)
     payload = {
         "ok": True,
         "target": "all",
@@ -1553,6 +1564,7 @@ def test_cluster_status_probes_activity_when_model_statuses_exist(monkeypatch) -
 
 
 def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, monkeypatch) -> None:
+    _use_tmp_tfconfig(tmp_path, monkeypatch)
     import thunder_forge.cli as cli_module
 
     payload = {
@@ -1605,9 +1617,10 @@ def test_cluster_status_reports_gateway_and_runtime_versions(tmp_path: Path, mon
     assert "Upgrades: Olla no, oMLX no (versions aligned) (latest v0.4.2)" in rich_output
 
 
-def test_cluster_status_json_output_emits_payload(monkeypatch) -> None:
+def test_cluster_status_json_output_emits_payload(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
+    _use_tmp_tfconfig(tmp_path, monkeypatch)
     payload = {
         "ok": True,
         "target": "msm1",
@@ -1626,9 +1639,10 @@ def test_cluster_status_json_output_emits_payload(monkeypatch) -> None:
     assert json.loads(result.stdout) == payload
 
 
-def test_cluster_status_returns_success_for_unhealthy_payload(monkeypatch) -> None:
+def test_cluster_status_returns_success_for_unhealthy_payload(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
+    _use_tmp_tfconfig(tmp_path, monkeypatch)
     payload = {
         "ok": False,
         "target": "all",
