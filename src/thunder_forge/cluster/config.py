@@ -781,7 +781,6 @@ def load_cluster_config(path: Path) -> ClusterConfig:
 
 def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo_root: Path | None = None) -> str:
     olla_port = resolve_port(port, default=config.services.olla_port)
-    log_output_path = str((repo_root / "logs" / "olla.log").resolve()) if repo_root else "../logs/olla.log"
     endpoints: list[dict[str, str | int]] = []
     aliases: dict[str, list[str]] = {}
     seen_nodes: set[str] = set()
@@ -893,7 +892,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
         "logging": {
             "level": config.services.olla_log_level,
             "format": "json",
-            "output": log_output_path,
+            "output": "stdout",
         },
         "model_aliases": aliases,
     }

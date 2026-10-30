@@ -589,7 +589,7 @@ def test_generate_olla_config_node_models_with_alias_and_failover_probe(tmp_path
     assert parsed["server"]["host"] == "127.0.0.1"
     assert parsed["server"]["port"] == 40115
     assert parsed["logging"]["level"] == "debug"
-    assert parsed["logging"]["output"] == str((tmp_path / "logs" / "olla.log").resolve())
+    assert parsed["logging"]["output"] == "stdout"
     assert parsed["proxy"]["engine"] == "olla"
     assert parsed["proxy"]["connection_timeout"] == "5s"
     assert parsed["proxy"]["sticky_sessions"]["enabled"] is True
