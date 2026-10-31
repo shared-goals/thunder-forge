@@ -43,6 +43,34 @@ def _use_tmp_tfconfig(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(config_module, "find_repo_root", lambda: tmp_path)
 
 
+def _write_edge_access_log(
+    repo_root: Path, records: list[tuple[str, str, float]], *, node: str = "msm4"
+) -> None:
+    """Write edge access-log records as (client_id, model alias, seconds_ago).
+
+    The olla endpoint label is derived from the node id so that
+    derive_node_id_from_olla_endpoint maps it back to `node`.
+    """
+    from datetime import datetime, timedelta
+
+    logs_dir = repo_root / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    now = datetime.now().astimezone()
+    lines = [
+        json.dumps(
+            {
+                "timestamp": (now - timedelta(seconds=seconds_ago)).isoformat(),
+                "client_id": client_id,
+                "model": model,
+                "latency_ms": 100,
+                "olla_endpoint": f"{node}-omlx-live",
+            }
+        )
+        for client_id, model, seconds_ago in records
+    ]
+    (logs_dir / "tf-edge-access.jsonl").write_text("\n".join(lines) + "\n")
+
+
 def test_runtime_start_dry_run_omits_default_model_dir(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     config_dir = repo / "config"
@@ -1191,6 +1219,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
     import thunder_forge.cli as cli_module
 
     _use_tmp_tfconfig(tmp_path, monkeypatch)
+    _write_edge_access_log(tmp_path, [("shag", "memory", 12)], node="infer-03")
     payload = {
         "ok": True,
         "target": "all",
@@ -1248,6 +1277,11 @@ def test_cluster_status_shows_alias_group_for_shared_runtime_model(tmp_path: Pat
     import thunder_forge.cli as cli_module
 
     _use_tmp_tfconfig(tmp_path, monkeypatch)
+    _write_edge_access_log(
+        tmp_path,
+        [("shag", "agent", 12), ("shag", "coder", 12), ("shag", "memory", 12)],
+        node="infer-03",
+    )
     payload = {
         "ok": True,
         "target": "all",
@@ -1290,6 +1324,63 @@ def test_cluster_status_shows_alias_group_for_shared_runtime_model(tmp_path: Pat
     assert "model: memory (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag state=active idle=12s ram=-" in result.stdout
     # RAM shows once per shared runtime model (first alias row), then "-" on the rest.
     assert result.stdout.count("106.0G") == 1
+
+
+def test_cluster_status_shows_per_alias_idle_from_access_log(tmp_path: Path, monkeypatch) -> None:
+    """Idle time must be scoped to the alias (edge access log), not the shared runtime model."""
+    import thunder_forge.cli as cli_module
+
+    _use_tmp_tfconfig(tmp_path, monkeypatch)
+    _write_edge_access_log(
+        tmp_path,
+        [("shag", "coder", 10), ("shag_hindsight", "memory", 125)],
+    )
+    payload = {
+        "ok": True,
+        "target": "all",
+        "gateway": None,
+        "inference": [
+            {
+                "name": "msm4",
+                "host": "msm4.lan",
+                "health": "ok",
+                "models": "ok",
+                "active_requests": 0,
+                "omlx_version": "0.7.1rc1",
+                "macos_version": "27.0.1",
+                "served_models": ["agent", "coder", "memory"],
+                "hot_loaded_models": ["agent", "coder", "memory"],
+                "model_statuses": [
+                    {
+                        "id": "agent",
+                        "aliases": ["agent", "coder", "memory"],
+                        "runtime_id": "Qwen3.8-Flash-Next-oQ4e-mtp",
+                        "state": "loaded",
+                        # Runtime-level idle (shared by all aliases): one hour.
+                        "idle_seconds": 3600.0,
+                        "actual_size": 106 * 1024**3,
+                    }
+                ],
+                "errors": [],
+            }
+        ],
+        "summary": {},
+        "active_edge_requests": [],
+    }
+    monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
+
+    result = runner.invoke(app, ["cluster", "status"])
+
+    assert result.exit_code == 0
+    # Each alias row carries its own idle time; the shared runtime idle (1h) must
+    # not leak into alias rows.
+    assert "model: agent (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=- state=loaded idle=- ram=106.0G" in result.stdout
+    assert "model: coder (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag state=loaded idle=10s ram=-" in result.stdout
+    assert (
+        "model: memory (Qwen3.8-Flash-Next-oQ4e-mtp) tf_user=shag_hindsight state=loaded idle=2m05s ram=-"
+        in result.stdout
+    )
+    assert "idle=1h00m" not in result.stdout
 
 
 def test_print_cluster_status_rich_shows_alias_group() -> None:

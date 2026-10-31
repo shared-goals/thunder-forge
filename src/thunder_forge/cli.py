@@ -229,8 +229,12 @@ def _edge_access_log_path(repo_root: Path, config: ClusterConfig, access_log: Pa
     return _repo_relative_path(repo_root, Path(configured))
 
 
-def _latest_tf_users_by_node_model(repo_root: Path, config: ClusterConfig) -> dict[tuple[str, str], str]:
-    """Return the last recorded TF client for each node/model pair."""
+def _latest_access_by_node_model(repo_root: Path, config: ClusterConfig) -> dict[tuple[str, str], tuple[datetime, str]]:
+    """Return the latest access-log record (timestamp, TF client) per node/model pair.
+
+    The access log records the public alias the client asked for, so the model
+    component of each key is an alias, not the oMLX runtime model id.
+    """
     latest: dict[tuple[str, str], tuple[datetime, str]] = {}
     path = _edge_access_log_path(repo_root, config, None)
     if not path.exists():
@@ -256,13 +260,14 @@ def _latest_tf_users_by_node_model(repo_root: Path, config: ClusterConfig) -> di
         previous = latest.get(key)
         if previous is None or parsed_timestamp > previous[0]:
             latest[key] = (parsed_timestamp, client_id)
-    return {key: value[1] for key, value in latest.items()}
+    return latest
 
 
 def _enrich_status_with_tf_users(
     payload: dict[str, object], *, repo_root: Path, config: ClusterConfig
 ) -> None:
-    users = _latest_tf_users_by_node_model(repo_root, config)
+    latest_access = _latest_access_by_node_model(repo_root, config)
+    now = datetime.now().astimezone()
     inference = payload.get("inference")
     if not isinstance(inference, list):
         return
@@ -279,10 +284,20 @@ def _enrich_status_with_tf_users(
             # The access log records the public alias the client asked for, while
             # a runtime status entry covers one loaded model whose aliases may
             # collapse onto it (agent/coder/memory share one runtime). Index by
-            # alias so each rendered row gets the user of its own alias.
-            status["tf_user_by_alias"] = {
-                alias: users.get((node_id, alias), "-") for alias in _model_status_aliases(status)
-            }
+            # alias so each rendered row gets the user and idle time of its own
+            # alias rather than the shared runtime model's values.
+            tf_user_by_alias: dict[str, str] = {}
+            idle_by_alias: dict[str, float] = {}
+            for alias in _model_status_aliases(status):
+                access = latest_access.get((node_id, alias))
+                if access is None:
+                    tf_user_by_alias[alias] = "-"
+                    continue
+                accessed_at, client_id = access
+                tf_user_by_alias[alias] = client_id
+                idle_by_alias[alias] = max(0.0, (now - accessed_at).total_seconds())
+            status["tf_user_by_alias"] = tf_user_by_alias
+            status["idle_seconds_by_alias"] = idle_by_alias
 
 
 def _usage_metrics_log_path(repo_root: Path, metrics_log: Path | None) -> Path:
@@ -2096,24 +2111,32 @@ def _expand_alias_rows(status: dict) -> list[dict[str, object]]:
 
     The alias label becomes the row identity; the shared runtime model id and
     size are carried on every row so the display can render one row per alias.
+    Idle time is per alias too (from the edge access log, like the TF user);
+    aliases without a recorded access show "-" instead of the shared runtime
+    model's idle.
     """
     aliases = _model_status_aliases(status)
     runtime_id = str(status.get("runtime_id", aliases[0]))
     actual_size = status.get("actual_size")
     tf_user_by_alias = status.get("tf_user_by_alias")
+    idle_by_alias = status.get("idle_seconds_by_alias")
     rows: list[dict[str, object]] = []
     for index, alias in enumerate(aliases):
         if isinstance(tf_user_by_alias, dict):
             tf_user = tf_user_by_alias.get(alias, "-")
         else:
             tf_user = status.get("tf_user", "-")
+        if isinstance(idle_by_alias, dict):
+            idle_seconds = idle_by_alias.get(alias)
+        else:
+            idle_seconds = status.get("idle_seconds")
         rows.append(
             {
                 "alias": str(alias),
                 "runtime_id": runtime_id,
                 "actual_size": actual_size if index == 0 else None,
                 "state": status.get("state", "unknown"),
-                "idle_seconds": status.get("idle_seconds"),
+                "idle_seconds": idle_seconds,
                 "tf_user": tf_user,
             }
         )
