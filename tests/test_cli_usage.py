@@ -79,10 +79,11 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
     assert payload["requests"]["by_user"] == {"alice": 1}
     assert payload["requests"]["by_user_model"] == {"alice": {"coder": 1}}
     assert payload["requests"]["by_node"] == {"msm1": 1}
-    assert payload["requests"]["by_node_user"] == {"msm1": {"alice": 1}}
     assert payload["requests"]["by_node_hour"] == {"msm1": {"08": 1}}
     assert payload["requests"]["by_model"] == {"coder": 1}
-    assert payload["requests"]["by_hour"] == {"08": 1}
+    assert payload["requests"]["by_hour"] == {
+        "08": {"requests": 1, "consumed_ms": 100, "by_model": {"coder": 1}, "by_user": {"alice": 1}}
+    }
     assert payload["consumed_ms"]["total"] == 100
     assert payload["node_metrics"]["hot_loaded_models"] == {"msm1": ["coder", "agent"]}
     assert payload["node_metrics"]["hot_loaded_count"] == {"msm1": 2}
@@ -237,9 +238,13 @@ def test_usage_report_cli_text_formats_numbers_and_omits_consumed_breakdowns(tmp
     assert result.exit_code == 0
     assert "requests_total: 2" in result.stdout
     assert "consumed_ms_total: 3,234" in result.stdout
-    assert "requests_by_node_user:" in result.stdout
-    assert "  - msm1:" in result.stdout
-    assert "      alice: 2" in result.stdout
+    assert "requests_by_hour:" in result.stdout
+    assert "  - 08:" in result.stdout
+    assert "consumed_ms: 3,234" in result.stdout
+    assert "by_model: coder: 2" in result.stdout
+    assert "by_user: alice: 2" in result.stdout
+    assert "requests_by_node_user:" not in result.stdout
+    assert "requests_by_node_model:" not in result.stdout
     assert "consumed_ms_by_node:" not in result.stdout
     assert "consumed_ms_by_model:" not in result.stdout
 

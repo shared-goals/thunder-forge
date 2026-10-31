@@ -77,6 +77,11 @@ def _ordered_nested_counter(counter: dict[str, Counter[str]]) -> dict[str, dict[
     return {key: dict(sorted(value.items())) for key, value in sorted(counter.items())}
 
 
+def _ordered_counter_by_weight(counter: Counter[str], weights: dict[str, int]) -> dict[str, int]:
+    """Order entries by aggregate weight desc, then key asc; ties keep key order."""
+    return dict(sorted(counter.items(), key=lambda item: (-weights.get(item[0], item[1]), item[0])))
+
+
 def _as_non_negative_int(raw: object) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int):
         return None
@@ -132,12 +137,10 @@ class DailyUsageSummary:
     consumed_ms_by_user: dict[str, int] = field(default_factory=dict)
     requests_by_user_model: dict[str, dict[str, int]] = field(default_factory=dict)
     requests_by_node: dict[str, int] = field(default_factory=dict)
-    requests_by_node_user: dict[str, dict[str, int]] = field(default_factory=dict)
     consumed_ms_by_node: dict[str, int] = field(default_factory=dict)
-    requests_by_node_model: dict[str, dict[str, int]] = field(default_factory=dict)
     requests_by_model: dict[str, int] = field(default_factory=dict)
     consumed_ms_by_model: dict[str, int] = field(default_factory=dict)
-    requests_by_hour: dict[str, int] = field(default_factory=dict)
+    requests_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     node_metrics_present: bool = False
     node_hot_loaded_models: dict[str, list[str]] = field(default_factory=dict)
@@ -154,8 +157,6 @@ class DailyUsageSummary:
                 "by_user": self.requests_by_user,
                 "by_user_model": self.requests_by_user_model,
                 "by_node": self.requests_by_node,
-                "by_node_user": self.requests_by_node_user,
-                "by_node_model": self.requests_by_node_model,
                 "by_model": self.requests_by_model,
                 "by_hour": self.requests_by_hour,
                 "by_node_hour": self.requests_by_node_hour,
@@ -192,12 +193,13 @@ def summarize_daily_usage(
     consumed_ms_by_user: Counter[str] = Counter()
     requests_by_user_model: dict[str, Counter[str]] = defaultdict(Counter)
     requests_by_node: Counter[str] = Counter()
-    requests_by_node_user: dict[str, Counter[str]] = defaultdict(Counter)
     consumed_ms_by_node: Counter[str] = Counter()
     requests_by_model: Counter[str] = Counter()
     consumed_ms_by_model: Counter[str] = Counter()
     requests_by_hour: Counter[str] = Counter()
-    requests_by_node_model: dict[str, Counter[str]] = defaultdict(Counter)
+    consumed_ms_by_hour: Counter[str] = Counter()
+    requests_by_hour_model: dict[str, Counter[str]] = defaultdict(Counter)
+    requests_by_hour_user: dict[str, Counter[str]] = defaultdict(Counter)
     requests_by_node_hour: dict[str, Counter[str]] = defaultdict(Counter)
     requests_total = 0
     invalid_lines = 0
@@ -234,15 +236,16 @@ def summarize_daily_usage(
 
         requests_by_user[client_id] += 1
         consumed_ms_by_user[client_id] += latency_ms
+        requests_by_hour[hour_bucket] += 1
+        consumed_ms_by_hour[hour_bucket] += latency_ms
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_user_model[client_id][model_name] += 1
+            requests_by_hour_model[hour_bucket][model_name] += 1
+        requests_by_hour_user[hour_bucket][client_id] += 1
 
         if node_id:
             requests_by_node[node_id] += 1
-            requests_by_node_user[node_id][client_id] += 1
             consumed_ms_by_node[node_id] += latency_ms
-            if model_name and _include_model_in_usage(model_name, excluded_model_names):
-                requests_by_node_model[node_id][model_name] += 1
             if timestamp is not None:
                 requests_by_node_hour[node_id][hour_bucket] += 1
 
@@ -250,8 +253,15 @@ def summarize_daily_usage(
             requests_by_model[model_name] += 1
             consumed_ms_by_model[model_name] += latency_ms
 
-        if timestamp is not None:
-            requests_by_hour[hour_bucket] += 1
+    requests_by_hour_payload: dict[str, dict[str, object]] = {
+        hour: {
+            "requests": count,
+            "consumed_ms": consumed_ms_by_hour.get(hour, 0),
+            "by_model": _ordered_counter_by_weight(requests_by_hour_model.get(hour, Counter()), requests_by_model),
+            "by_user": _ordered_counter_by_weight(requests_by_hour_user.get(hour, Counter()), requests_by_user),
+        }
+        for hour, count in requests_by_hour.items()
+    }
 
     node_metrics_path_str = ""
     node_metrics_present = False
@@ -311,12 +321,10 @@ def summarize_daily_usage(
         consumed_ms_by_user=_ordered_counter(consumed_ms_by_user),
         requests_by_user_model=_ordered_nested_counter(requests_by_user_model),
         requests_by_node=_ordered_counter(requests_by_node),
-        requests_by_node_user=_ordered_nested_counter(requests_by_node_user),
         consumed_ms_by_node=_ordered_counter(consumed_ms_by_node),
-        requests_by_node_model=_ordered_nested_counter(requests_by_node_model),
         requests_by_model=_ordered_counter(requests_by_model),
         consumed_ms_by_model=_ordered_counter(consumed_ms_by_model),
-        requests_by_hour=_ordered_counter(requests_by_hour),
+        requests_by_hour=requests_by_hour_payload,
         requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
         node_metrics_present=node_metrics_present,
         node_hot_loaded_models=_ordered_list_map(node_hot_loaded_models),

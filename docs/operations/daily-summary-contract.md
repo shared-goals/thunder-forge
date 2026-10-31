@@ -72,10 +72,10 @@ Expected keys:
 - `requests.total`
 - `requests.by_user`
 - `requests.by_node`
-- `requests.by_node_model`
-- `requests.by_node_hour` (0-23 buckets)
 - `requests.by_model`
-- `requests.by_hour`
+- `requests.by_hour` (0-23 buckets, each bucket carries `requests`, `consumed_ms`,
+  `by_model`, and `by_user` so one view answers when/what/who)
+- `requests.by_node_hour` (0-23 buckets)
 - `consumed_ms.total`
 - `consumed_ms.by_user`
 - `consumed_ms.by_node`
@@ -117,7 +117,7 @@ The SQL script emits daily tables for:
 
 - by user: requests, consumed time, tokens
 - by node: requests, consumed time, tokens
-- by node/model: request split
+- by hour: requests with model and user split
 - by node/hour: request split
 - by model: requests, consumed time, tokens
 - node hot-loaded summary from collected snapshots

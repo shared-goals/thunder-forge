@@ -3605,7 +3605,7 @@ def usage_report(
         help="Emit machine-readable JSON instead of a compact text summary.",
     ),
 ) -> None:
-    """Summarize daily TF usage by user, node, model, and hour."""
+    """Summarize daily TF usage by user, node, model, and hour (who/what/when)."""
     config, repo_root = _load_config()
     access_log_path = _edge_access_log_path(repo_root, config, access_log)
     node_metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
@@ -3651,20 +3651,20 @@ def usage_report(
             for model, count in models.items():
                 typer.echo(f"      {model}: {_fmt_number(count)}")
     _print_mapping("requests_by_node", summary.requests_by_node)
-    if summary.requests_by_node_user:
-        typer.echo("requests_by_node_user:")
-        for node_id, users in summary.requests_by_node_user.items():
-            typer.echo(f"  - {node_id}:")
-            for user, count in users.items():
-                typer.echo(f"      {user}: {_fmt_number(count)}")
     _print_mapping("requests_by_model", summary.requests_by_model)
-    _print_mapping("requests_by_hour", summary.requests_by_hour)
-    if summary.requests_by_node_model:
-        typer.echo("requests_by_node_model:")
-        for node_id, models in summary.requests_by_node_model.items():
-            typer.echo(f"  - {node_id}:")
-            for model, count in models.items():
-                typer.echo(f"      {model}: {_fmt_number(count)}")
+    typer.echo("requests_by_hour:")
+    if not summary.requests_by_hour:
+        typer.echo("  []")
+    else:
+        for hour, bucket in summary.requests_by_hour.items():
+            typer.echo(f"  - {hour}: {_fmt_number(int(bucket['requests']))}")
+            typer.echo(f"      consumed_ms: {_fmt_number(int(bucket['consumed_ms']))}")
+            for key in ("by_model", "by_user"):
+                parts = cast("dict[str, int]", bucket[key])
+                rendered = ", ".join(f"{name}: {_fmt_number(count)}" for name, count in parts.items())
+                typer.echo(f"      {key}: {rendered or '[]'}")
+
+
 @usage_app.command("collect-node-metrics")
 def usage_collect_node_metrics(
     output: Path | None = typer.Option(

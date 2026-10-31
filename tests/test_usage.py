@@ -65,10 +65,11 @@ def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path
     assert summary.consumed_ms_by_user == {"alice": 300, "bob": 150}
     assert summary.requests_by_user_model == {"alice": {"coder": 2}, "bob": {"agent": 1}}
     assert summary.requests_by_node == {"msm1": 2, "msm2": 1}
-    assert summary.requests_by_node_user == {"msm1": {"alice": 2}, "msm2": {"bob": 1}}
-    assert summary.requests_by_node_model == {"msm1": {"coder": 2}, "msm2": {"agent": 1}}
     assert summary.requests_by_model == {"agent": 1, "coder": 2}
-    assert summary.requests_by_hour == {"08": 2, "09": 1}
+    assert summary.requests_by_hour == {
+        "08": {"requests": 2, "consumed_ms": 300, "by_model": {"coder": 2}, "by_user": {"alice": 2}},
+        "09": {"requests": 1, "consumed_ms": 150, "by_model": {"agent": 1}, "by_user": {"bob": 1}},
+    }
 
 
 def test_extract_hot_loaded_models_orders_by_last_access() -> None:
@@ -128,7 +129,7 @@ def test_summarize_daily_usage_excludes_tool_models_from_model_metrics(tmp_path:
     assert summary.requests_by_model == {"coder": 1}
     assert summary.consumed_ms_by_model == {"coder": 120}
     assert summary.requests_by_user_model == {"alice": {"coder": 1}}
-    assert summary.requests_by_node_model == {"msm1": {"coder": 1}}
+    assert summary.requests_by_hour["08"]["by_model"] == {"coder": 1}
     assert summary.node_hot_loaded_models == {"msm1": ["coder"]}
     assert summary.node_hot_loaded_count == {"msm1": 1}
 
