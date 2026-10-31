@@ -379,7 +379,7 @@ def test_run_olla_service_restart_dry_run_describes_frontend_launch_agent(tmp_pa
     assert result.staging_plist_path == ""
     assert str(repo_root / "olla-bin/olla") in result.plist_content
     assert str(repo_root / "config/olla-config.yaml") in result.plist_content
-    assert "/dev/null" in result.plist_content
+    assert str(repo_root / "logs/olla.log") in result.plist_content
     assert str(repo_root / "logs/olla-40115.stderr.log") in result.plist_content
     assert any("launchctl bootstrap gui/$(id -u)" in command for command in result.commands)
     assert any(

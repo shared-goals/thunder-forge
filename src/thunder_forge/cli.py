@@ -276,9 +276,13 @@ def _enrich_status_with_tf_users(
         for status in model_statuses:
             if not isinstance(status, dict):
                 continue
-            model_id = status.get("id")
-            if isinstance(model_id, str):
-                status["tf_user"] = users.get((node_id, model_id), "-")
+            # The access log records the public alias the client asked for, while
+            # a runtime status entry covers one loaded model whose aliases may
+            # collapse onto it (agent/coder/memory share one runtime). Index by
+            # alias so each rendered row gets the user of its own alias.
+            status["tf_user_by_alias"] = {
+                alias: users.get((node_id, alias), "-") for alias in _model_status_aliases(status)
+            }
 
 
 def _usage_metrics_log_path(repo_root: Path, metrics_log: Path | None) -> Path:
@@ -2096,8 +2100,13 @@ def _expand_alias_rows(status: dict) -> list[dict[str, object]]:
     aliases = _model_status_aliases(status)
     runtime_id = str(status.get("runtime_id", aliases[0]))
     actual_size = status.get("actual_size")
+    tf_user_by_alias = status.get("tf_user_by_alias")
     rows: list[dict[str, object]] = []
     for index, alias in enumerate(aliases):
+        if isinstance(tf_user_by_alias, dict):
+            tf_user = tf_user_by_alias.get(alias, "-")
+        else:
+            tf_user = status.get("tf_user", "-")
         rows.append(
             {
                 "alias": str(alias),
@@ -2105,7 +2114,7 @@ def _expand_alias_rows(status: dict) -> list[dict[str, object]]:
                 "actual_size": actual_size if index == 0 else None,
                 "state": status.get("state", "unknown"),
                 "idle_seconds": status.get("idle_seconds"),
-                "tf_user": status.get("tf_user", "-"),
+                "tf_user": tf_user,
             }
         )
     return rows
