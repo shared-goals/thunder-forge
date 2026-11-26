@@ -40,6 +40,8 @@
   <div class="card"><h2>Latency p50 / p95 / max per hour</h2><canvas id="latencyChart"></canvas></div>
   <div class="card"><h2>Peak parallel requests per hour</h2><canvas id="concurrencyChart"></canvas></div>
   <div class="card"><h2>Node load: max active requests per hour</h2><canvas id="loadChart"></canvas></div>
+  <div class="card"><h2>Requests per hour by user</h2><canvas id="userChart"></canvas></div>
+  <div class="card"><h2>Consumed time by user</h2><canvas id="consumedChart"></canvas></div>
   <div class="card"><h2>Requests by model</h2><canvas id="modelChart"></canvas></div>
   <div class="card"><h2>Loaded model memory</h2><div id="memory"></div></div>
 </div>
@@ -78,10 +80,12 @@ const options = {
   },
 };
 const line = (datasets, labels) => ({ type: "line", data: { labels, datasets }, options });
-const bar = (labels, values, label, color) => ({
+const bar = (labels, values, label, color, yTicks) => ({
   type: "bar",
   data: { labels, datasets: [{ label, data: values, backgroundColor: color }] },
-  options,
+  options: yTicks
+    ? { ...options, scales: { ...options.scales, y: { ...options.scales.y, ticks: yTicks } } }
+    : options,
 });
 const series = (entries) => entries.map(([name, values], i) => ({
   label: name,
@@ -105,16 +109,14 @@ async function load() {
     return;
   }
   const data = await response.json();
+  const byHour = data.requests.by_hour || {};
   const lat = data.latency_ms.by_hour || {};
   const conc = data.concurrency.peak_by_hour || {};
   const byNodeHour = data.requests.by_node_hour || {};
   const nodeMetrics = data.node_metrics || {};
   const loadByHour = nodeMetrics.load_by_hour || {};
   // Node samples exist for hours with no edge traffic, so the axis is the union.
-  const hours = [...new Set([
-    ...Object.keys(data.requests.by_hour || {}),
-    ...Object.keys(loadByHour),
-  ])].sort();
+  const hours = [...new Set([...Object.keys(byHour), ...Object.keys(loadByHour)])].sort();
   const memory = nodeMetrics.model_memory || {};
   const nodeIds = [...new Set(Object.keys(byNodeHour))].sort();
   const loadNodes = [...new Set(Object.values(loadByHour).flatMap((v) => Object.keys(v)))].sort();
@@ -131,7 +133,7 @@ async function load() {
   ].filter(Boolean).join(" \u00b7 ");
 
   const userSelect = el("user");
-  const users = ["", ...(data.users.available || [])];
+  const users = ["", ...[...new Set([...(data.users.available || []), ...(data.users.known || [])])].sort()];
   userSelect.innerHTML = users.map((name) => (
     "<option value=\"" + esc(name) + "\">" + esc(name || "all users") + "</option>"
   )).join("");
@@ -153,6 +155,17 @@ async function load() {
   draw("loadChart", line(series(loadNodes.map((node) => [
     node, hours.map((hour) => ((loadByHour[hour] || {})[node] || {}).active_max || 0),
   ])), hours));
+
+  const userHours = [...new Set(Object.values(byHour)
+    .flatMap((bucket) => Object.keys(bucket.by_user || {})))].sort();
+  draw("userChart", line(series(userHours.map((user) => [
+    user, hours.map((hour) => (((byHour[hour] || {}).by_user || {})[user] || 0)),
+  ])), hours));
+
+  const consumedByUser = data.consumed_ms.by_user || {};
+  draw("consumedChart", bar(Object.keys(consumedByUser),
+    Object.values(consumedByUser).map((ms) => +(ms / 3600000).toFixed(2)),
+    "hours", colors[4] + "99", { precision: 1, maxTicksLimit: 5 }));
 
   const byModel = data.requests.by_model || {};
   draw("modelChart", bar(Object.keys(byModel), Object.values(byModel),

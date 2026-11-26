@@ -279,7 +279,10 @@ def test_usage_report_filters_by_user_without_exposing_keys(tmp_path: Path, get)
     status, _, body = get(config, "/usage/report?period=2026-06-02&user=alice", token="admin-secret")
     assert status == 200
     payload = json.loads(body)
-    assert payload["users"] == {"available": ["alice", "bob"], "selected": ["alice"]}
+    assert payload["users"]["available"] == ["alice", "bob"]
+    assert payload["users"]["selected"] == ["alice"]
+    # No edge keys are configured in this fixture, so the configured roster is empty.
+    assert payload["users"]["known"] == []
     assert payload["requests"]["total"] == 1
     assert payload["requests"]["by_user"] == {"alice": 1}
     # Client identities only: the admin token and any key material stay out of the payload.
@@ -297,3 +300,18 @@ def test_usage_report_filters_by_user_without_exposing_keys(tmp_path: Path, get)
     unknown = json.loads(get(config, "/usage/report?period=2026-06-02&user=nobody", token="admin-secret")[2])
     assert unknown["requests"]["total"] == 0
     assert unknown["users"]["available"] == ["alice", "bob"]
+
+def test_usage_report_lists_configured_clients_without_traffic(tmp_path: Path, get) -> None:
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+    config.clients_by_key = {
+        "key-alice": edge.EdgeClient(client_id="alice"),
+        "key-quiet": edge.EdgeClient(client_id="quiet-client"),
+    }
+
+    payload = json.loads(get(config, "/usage/report?period=2026-06-02", token="admin-secret")[2])
+
+    # The selector must offer a client that sent nothing today.
+    assert payload["users"]["known"] == ["alice", "quiet-client"]
+    assert payload["users"]["available"] == ["alice", "bob"]
+    # Keys themselves never leave the edge.
+    assert "key-alice" not in json.dumps(payload)

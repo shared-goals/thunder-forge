@@ -896,7 +896,12 @@ def build_usage_report_payload(
         exclude_unauthenticated=usage_settings.exclude_unauthenticated,
         client_ids=client_ids,
     )
-    return summary.to_json_dict()
+    payload = summary.to_json_dict()
+    users = payload.get("users")
+    if isinstance(users, dict):
+        # Configured identities, whether or not they sent anything in this period.
+        users["known"] = sorted({client.client_id for client in config.clients_by_key.values()})
+    return payload
 
 
 def _extract_version_token(raw_output: str) -> str:
