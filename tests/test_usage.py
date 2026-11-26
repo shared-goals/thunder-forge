@@ -317,3 +317,59 @@ def test_summarize_daily_usage_does_not_invent_idle_time(tmp_path: Path) -> None
 
     # The node reported no idle time, so the aggregate must not claim 0 seconds.
     assert summary.node_model_memory["msm1"]["agent"] == {"actual_size": 2048}
+
+
+def test_summarize_daily_usage_keeps_memory_when_the_node_probe_failed(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text("")
+    node_metrics = tmp_path / "tf-node-metrics.jsonl"
+    good = {
+        "timestamp": "2026-06-02T08:00:00+00:00",
+        "node_id": "msm1",
+        "health_ok": True,
+        "models_ok": True,
+        "status_ok": True,
+        "hot_loaded_models": ["agent"],
+        "hot_loaded_count": 1,
+        "active_requests": 1,
+        "waiting_requests": 2,
+        "loaded_models": [{"id": "agent", "actual_size": 2048, "idle_seconds": 7}],
+        "errors": [],
+    }
+    failed = {
+        **good,
+        "timestamp": "2026-06-02T09:00:00+00:00",
+        "health_ok": False,
+        "models_ok": False,
+        "status_ok": False,
+        "hot_loaded_models": [],
+        "hot_loaded_count": 0,
+        "active_requests": None,
+        "waiting_requests": None,
+        "loaded_models": [],
+        "errors": ["GET /health failed"],
+    }
+    # A node that answers but only reports active requests.
+    no_queue = {
+        **good,
+        "timestamp": "2026-06-02T09:00:00+00:00",
+        "node_id": "msm2",
+        "waiting_requests": None,
+        "active_requests": 3,
+        "loaded_models": [],
+        "hot_loaded_models": [],
+        "hot_loaded_count": 0,
+    }
+    node_metrics.write_text("\n".join(json.dumps(item) for item in (good, failed, no_queue)) + "\n")
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", node_metrics_path=node_metrics)
+
+    # A transient probe failure reports no models; it must not erase a real footprint.
+    assert summary.node_model_memory["msm1"]["agent"]["actual_size"] == 2048
+    assert summary.node_model_memory_sampled_at["msm1"] == "2026-06-02T08:00:00+00:00"
+    # The failed probe contributes no load sample for that node.
+    assert "msm1" not in summary.node_load_by_hour["09"]
+    assert summary.node_load_by_hour["08"]["msm1"]["waiting_max"] == 2
+    # A node that never reports a queue must read as unknown, not as an empty queue.
+    assert summary.node_load_by_hour["09"]["msm2"]["active_max"] == 3
+    assert summary.node_load_by_hour["09"]["msm2"]["waiting_max"] is None

@@ -719,29 +719,53 @@ def build_usage_response(
     if not usage_endpoints_enabled(config):
         # Invisible until configured, whatever the method or path.
         return _json_response(404, {"error": "not_found"})
-    if method != "GET":
-        return _json_response(405, {"error": "method_not_allowed"})
     if normalized_path == "/usage":
-        return build_usage_asset_response("usage.html")
+        return build_usage_asset_response("usage.html") if method == "GET" else _method_not_allowed()
     if normalized_path.startswith("/usage/assets/"):
+        if method != "GET":
+            return _method_not_allowed()
         return build_usage_asset_response(normalized_path.removeprefix("/usage/assets/"))
-    denied_status = authorize_usage_request(config, headers)
-    if denied_status is not None:
-        error = "not_found" if denied_status == 404 else "unauthorized"
-        return _json_response(denied_status, {"error": error})
+    if normalized_path not in ("/usage/report", "/usage/events"):
+        return _json_response(404, {"error": "not_found"})
+    # Authorize before anything else on the data paths, so a wrong method cannot
+    # confirm that they exist.
+    if authorize_usage_request(config, headers) is not None:
+        return _json_response(401, {"error": "unauthorized"})
+    if method != "GET":
+        return _method_not_allowed()
     query = parse_qs(urlsplit(raw_path).query)
     try:
         period = resolve_usage_period((query.get("period") or [""])[0])
     except ValueError:
         return _json_response(400, {"error": "invalid_period"})
-    if normalized_path == "/usage/report":
-        try:
-            return _json_response(200, build_usage_report_payload(config=config, period=period))
-        except (OSError, RuntimeError, ValueError) as exc:
-            return _json_response(503, {"error": f"usage_unavailable: {exc}"})
-    if normalized_path != "/usage/events":
-        return _json_response(404, {"error": "not_found"})
-    return _usage_events_response(config=config, query=query, period=period)
+    if normalized_path == "/usage/events":
+        return _usage_events_response(config=config, query=query, period=period)
+    return _usage_report_response(config=config, period=period)
+
+
+def _method_not_allowed() -> EdgeProxyResponse:
+    return _json_response(405, {"error": "method_not_allowed"})
+
+
+def _usage_log_size(config: EdgeProxyConfig, log_path: Path | None) -> int | None:
+    """Size of a usage log, or None when the path is not configured."""
+    if log_path is None:
+        return None
+    try:
+        return log_path.stat().st_size
+    except OSError:
+        return None
+
+
+def _usage_report_response(*, config: EdgeProxyConfig, period: str) -> EdgeProxyResponse:
+    if period == "all" and (size := _usage_log_size(config, config.usage_access_log_path)) is not None:
+        if size > USAGE_EVENTS_MAX_BYTES:
+            # Aggregating every retained day reads the whole file into memory.
+            return _json_response(413, {"error": "usage_report_too_large"})
+    try:
+        return _json_response(200, build_usage_report_payload(config=config, period=period))
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _json_response(503, {"error": f"usage_unavailable: {exc}"})
 
 
 def _usage_events_response(
@@ -759,16 +783,17 @@ def _usage_events_response(
     if period == "all":
         # Buffering every retained day would spike the process that serves inference.
         return _json_response(400, {"error": "period_too_broad"})
+    size = _usage_log_size(config, log_path)
+    if size is None:
+        return _json_response(503, {"error": "usage_unavailable: log is unreadable"})
+    if size > USAGE_EVENTS_MAX_BYTES:
+        # The body is built in memory, so refuse before reading the file.
+        return _json_response(413, {"error": "usage_events_too_large"})
     try:
-        # Check the file size first: the body is built in memory, so a post-hoc cap is too late.
-        if log_path.stat().st_size > USAGE_EVENTS_MAX_BYTES:
-            return _json_response(413, {"error": "usage_events_too_large"})
         records = select_usage_events(log_path, period=period)
     except OSError as exc:
         return _json_response(503, {"error": f"usage_unavailable: {exc}"})
     body = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
-    if len(body) > USAGE_EVENTS_MAX_BYTES:
-        return _json_response(413, {"error": "usage_events_too_large"})
     return _bytes_response(
         200,
         body.encode(),
@@ -847,7 +872,6 @@ def build_usage_report_payload(*, config: EdgeProxyConfig, period: str) -> dict[
         exclude_unauthenticated=usage_settings.exclude_unauthenticated,
     )
     return summary.to_json_dict()
-
 
 
 def _extract_version_token(raw_output: str) -> str:

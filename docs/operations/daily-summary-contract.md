@@ -105,8 +105,13 @@ edge environment. Without the token all three paths answer `404 not_found`, so t
 endpoints stay invisible. With the token, `GET /usage` is anonymous (the page holds no
 data, and browser navigation cannot send an `Authorization` header), while
 `/usage/report` and `/usage/events` answer `401 unauthorized` to a wrong or missing token.
-`/usage/events` answers `400 period_too_broad` for `period=all` and `413 usage_events_too_large` when the
-log file exceeds 32 MiB, checked before the file is read.
+Response codes on the data paths: `401 unauthorized` without a valid token, `400 invalid_period` for a
+malformed `period`, `400 invalid_source` for an unknown `source`, `400 period_too_broad` for `period=all`
+on `/usage/events`, `413 usage_events_too_large` / `413 usage_report_too_large` when the log exceeds 32 MiB
+(checked before the file is read), `405 method_not_allowed` for a non-GET request that carries a valid
+token, and `503` when the log is missing or unreadable. Authentication is checked before the method on the
+data paths, so an unauthenticated request cannot confirm that they exist. `/usage` and `/usage/assets/*`
+are anonymous and GET-only.
 
 | Path | Response |
 |---|---|

@@ -49,6 +49,10 @@ const el = (id) => document.getElementById(id);
 const colors = ["#4c9aff", "#7ee787", "#ffa657", "#d2a8ff", "#ff7b72", "#56d4dd"];
 const charts = {};
 
+function currentPeriod() {
+  return el("period").value.trim() || "today";
+}
+
 function token() {
   let value = localStorage.getItem(storeKey);
   if (!value) {
@@ -86,7 +90,7 @@ const series = (entries) => entries.map(([name, values], i) => ({
 }));
 
 async function load() {
-  const period = el("period").value.trim() || "today";
+  const period = currentPeriod();
   const auth = token();
   const query = "?period=" + encodeURIComponent(period);
   const response = await fetch("/usage/report" + query, {
@@ -155,7 +159,7 @@ async function load() {
 
 el("reload").onclick = load;
 async function downloadEvents(source, prefix) {
-  const period = el("period").value.trim() || "today";
+  const period = currentPeriod();
   const query = "?period=" + encodeURIComponent(period) + "&source=" + source;
   const response = await fetch("/usage/events" + query, {
     headers: { Authorization: "Bearer " + token() },

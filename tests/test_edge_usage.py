@@ -230,8 +230,11 @@ def test_unknown_usage_paths_and_methods_stay_invisible(tmp_path: Path, get) -> 
     assert get(disabled, "/usage/report?period=2026-06-02", method="POST")[0] == 404
 
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
-    assert get(config, "/usage/report?period=2026-06-02", method="POST")[0] == 405
+    # Data paths authorize before checking the method, so POST cannot confirm they exist.
+    assert get(config, "/usage/report?period=2026-06-02", method="POST")[0] == 401
+    assert get(config, "/usage/report?period=2026-06-02", method="POST", token="admin-secret")[0] == 405
     assert get(config, "/usage/nope", token="admin-secret")[0] == 404
+    assert get(config, "/usage/nope?period=02-06-2026", token="admin-secret")[0] == 404
 
 
 def test_usage_events_can_download_node_samples(tmp_path: Path, get) -> None:

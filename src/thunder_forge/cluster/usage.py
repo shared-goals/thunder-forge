@@ -199,7 +199,7 @@ class DailyUsageSummary:
     node_metrics_present: bool = False
     node_hot_loaded_models: dict[str, list[str]] = field(default_factory=dict)
     node_hot_loaded_count: dict[str, int] = field(default_factory=dict)
-    node_load_by_hour: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    node_load_by_hour: dict[str, dict[str, dict[str, float | None]]] = field(default_factory=dict)
     node_model_memory: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     node_model_memory_sampled_at: dict[str, str] = field(default_factory=dict)
 
@@ -421,6 +421,9 @@ def summarize_daily_usage(
                     if idle_seconds is not None:
                         # Absent means the node never reported it; do not invent 0.
                         memory_per_node[model_id.strip()]["idle_seconds"] = idle_seconds
+                # A failed probe reports no models; it must not wipe a real footprint.
+                if payload.get("status_ok") is False:
+                    continue
                 # Ordering is already enforced by latest_node_metric_timestamp above.
                 # A newer sample with nothing loaded must clear the stale footprint.
                 if memory_per_node:
@@ -430,13 +433,13 @@ def summarize_daily_usage(
                     node_model_memory.pop(node_id, None)
                     node_model_memory_sampled_at.pop(node_id, None)
 
-    node_load_by_hour: dict[str, dict[str, dict[str, int]]] = {
+    node_load_by_hour: dict[str, dict[str, dict[str, float | None]]] = {
         hour: {
             node_id: {
                 "samples": len(values),
                 "active_max": max(values),
                 "active_avg": round(sum(values) / len(values), 2),
-                "waiting_max": node_load_waiting.get(hour, {}).get(node_id, 0),
+                "waiting_max": node_load_waiting.get(hour, {}).get(node_id),
             }
             for node_id, values in sorted(nodes.items())
         }
