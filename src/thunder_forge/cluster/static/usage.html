@@ -72,7 +72,7 @@ const options = {
   responsive: true,
   interaction: { mode: "index" },
   scales: {
-    x: { grid: { color: "#262b33" } },
+    x: { grid: { color: "#262b33" }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
     y: { grid: { color: "#262b33" }, beginAtZero: true },
   },
 };
@@ -118,7 +118,7 @@ async function load() {
   el("meta").textContent = [
     data.period,
     "requests " + data.requests.total,
-    "consumed " + Math.round(data.consumed_ms.total / 1000) + "s",
+    "consumed " + (data.consumed_ms.total / 3600000).toFixed(1) + " h",
     "nodes " + Object.keys(data.requests.by_node).length,
     data.period === "all" ? "all days merged into hour-of-day buckets" : "",
   ].filter(Boolean).join(" \u00b7 ");
@@ -152,8 +152,10 @@ async function load() {
   }
   const head = "<tr><th>node</th><th>model</th><th>GiB</th><th>idle s</th></tr>";
   const body = rows.map((row) => "<tr><td>" + row.map(esc).join("</td><td>") + "</td></tr>").join("");
-  const sampledAt = Object.keys(nodeMetrics.model_memory_sampled_at || {}).sort().pop() || "";
-  const note = sampledAt ? "<div class=muted>last node sample " + esc(sampledAt) + "</div>" : "";
+  const sampledAt = Object.values(nodeMetrics.model_memory_sampled_at || {}).sort().pop() || "";
+  const note = sampledAt
+    ? "<div class=muted>last node sample " + esc(sampledAt.slice(11, 19)) + " " + esc(sampledAt.slice(19)) + "</div>"
+    : "";
   el("memory").innerHTML = "<table>" + head + body + "</table>" + note;
 }
 
