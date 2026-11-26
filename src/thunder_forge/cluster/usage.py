@@ -36,8 +36,6 @@ def _in_period(timestamp: datetime | None, period: str | None) -> bool:
 def select_usage_events(access_log_path: Path, *, period: str | None = None) -> list[dict[str, object]]:
     """Return raw log records for one period, preserving log order."""
     records, _ = _load_jsonl_lines(access_log_path)
-    if period is None or period == "all":
-        return records
     return [payload for payload in records if _in_period(_parse_timestamp(payload.get("timestamp")), period)]
 
 
@@ -356,7 +354,6 @@ def summarize_daily_usage(
     node_load_waiting: dict[str, dict[str, int]] = defaultdict(dict)
     node_model_memory: dict[str, dict[str, dict[str, int]]] = {}
     node_model_memory_sampled_at: dict[str, str] = {}
-    latest_node_memory_timestamp: dict[str, datetime | None] = {}
     latest_node_metric_timestamp: dict[str, datetime | None] = {}
     if node_metrics_path is not None:
         node_metrics_path_str = str(node_metrics_path)
@@ -419,23 +416,19 @@ def summarize_daily_usage(
                         continue
                     if not _include_model_in_usage(model_id, excluded_model_names):
                         continue
-                    idle_seconds = _as_non_negative_int(item.get("idle_seconds")) or 0
-                    memory_per_node[model_id.strip()] = {
-                        "actual_size": actual_size,
-                        "idle_seconds": idle_seconds,
-                    }
-                previous_memory_timestamp = latest_node_memory_timestamp.get(node_id)
-                if previous_memory_timestamp is None or timestamp is None or timestamp >= previous_memory_timestamp:
-                    # A newer sample with nothing loaded must clear the stale footprint.
-                    if memory_per_node:
-                        node_model_memory[node_id] = dict(sorted(memory_per_node.items()))
-                        node_model_memory_sampled_at[node_id] = (
-                            timestamp.isoformat() if timestamp is not None else ""
-                        )
-                    else:
-                        node_model_memory.pop(node_id, None)
-                        node_model_memory_sampled_at.pop(node_id, None)
-                    latest_node_memory_timestamp[node_id] = timestamp
+                    memory_per_node[model_id.strip()] = {"actual_size": actual_size}
+                    idle_seconds = _as_non_negative_int(item.get("idle_seconds"))
+                    if idle_seconds is not None:
+                        # Absent means the node never reported it; do not invent 0.
+                        memory_per_node[model_id.strip()]["idle_seconds"] = idle_seconds
+                # Ordering is already enforced by latest_node_metric_timestamp above.
+                # A newer sample with nothing loaded must clear the stale footprint.
+                if memory_per_node:
+                    node_model_memory[node_id] = dict(sorted(memory_per_node.items()))
+                    node_model_memory_sampled_at[node_id] = timestamp.isoformat() if timestamp is not None else ""
+                else:
+                    node_model_memory.pop(node_id, None)
+                    node_model_memory_sampled_at.pop(node_id, None)
 
     node_load_by_hour: dict[str, dict[str, dict[str, int]]] = {
         hour: {
@@ -443,7 +436,7 @@ def summarize_daily_usage(
                 "samples": len(values),
                 "active_max": max(values),
                 "active_avg": round(sum(values) / len(values), 2),
-                "waiting_max": node_load_waiting[hour].get(node_id, 0),
+                "waiting_max": node_load_waiting.get(hour, {}).get(node_id, 0),
             }
             for node_id, values in sorted(nodes.items())
         }

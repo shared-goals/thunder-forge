@@ -49,7 +49,14 @@ const el = (id) => document.getElementById(id);
 const colors = ["#4c9aff", "#7ee787", "#ffa657", "#d2a8ff", "#ff7b72", "#56d4dd"];
 const charts = {};
 
-const token = () => localStorage.getItem(storeKey) || prompt("TF admin token") || "";
+function token() {
+  let value = localStorage.getItem(storeKey);
+  if (!value) {
+    value = prompt("TF admin token") || "";
+    if (value) localStorage.setItem(storeKey, value);
+  }
+  return value;
+}
 const esc = (value) => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 function draw(id, config) {
@@ -109,7 +116,8 @@ async function load() {
     "requests " + data.requests.total,
     "consumed " + Math.round(data.consumed_ms.total / 1000) + "s",
     "nodes " + Object.keys(data.requests.by_node).length,
-  ].join(" \\u00b7 ");
+    data.period === "all" ? "all days merged into hour-of-day buckets" : "",
+  ].filter(Boolean).join(" \u00b7 ");
 
   draw("nodeChart", line(series(nodeIds.map((node) => [
     node, hours.map((hour) => (byNodeHour[node] || {})[hour] || 0),
@@ -133,7 +141,7 @@ async function load() {
     "requests", colors[5] + "99"));
 
   const rows = Object.entries(memory).flatMap(([node, models]) => Object.entries(models)
-    .map(([model, item]) => [node, model, (item.actual_size / 2 ** 30).toFixed(1), item.idle_seconds]));
+    .map(([model, item]) => [node, model, (item.actual_size / 2 ** 30).toFixed(1), item.idle_seconds ?? "\u2013"]));
   if (!rows.length) {
     el("memory").innerHTML = "<span class=muted>no node samples for this period</span>";
     return;

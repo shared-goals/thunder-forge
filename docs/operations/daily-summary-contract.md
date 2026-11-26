@@ -105,13 +105,15 @@ edge environment. Without the token all three paths answer `404 not_found`, so t
 endpoints stay invisible. With the token, `GET /usage` is anonymous (the page holds no
 data, and browser navigation cannot send an `Authorization` header), while
 `/usage/report` and `/usage/events` answer `401 unauthorized` to a wrong or missing token.
+`/usage/events` answers `400 period_too_broad` for `period=all` and `413 usage_events_too_large` when the
+log file exceeds 32 MiB, checked before the file is read.
 
 | Path | Response |
 |---|---|
 | `GET /usage` | HTML dashboard rendering the report below; Chart.js is served from `/usage/assets/chart.umd.min.js`, not a CDN |
 | `GET /usage/report?period=<YYYY-MM-DD\|today\|all>` | `usage report --json` payload |
 | `GET /usage/events?period=...&source=access\|node-metrics` | matching JSONL lines (`source` defaults to `access`), `Content-Disposition: attachment`; `period=all` is refused with `400 period_too_broad` |
-| `GET /usage/assets/<file>` | vendored dashboard assets (`chart.umd.min.js`); `404` for anything else |
+| `GET /usage/assets/<file>` | vendored dashboard assets (`usage.html`, `chart.umd.min.js`); `404` for anything else |
 
 `period` defaults to the edge host's local date. Authentication accepts only
 `Authorization: Bearer <token>`: a `?token=` query would be recorded by the Caddy/gost
@@ -156,7 +158,8 @@ The SQL script emits daily tables for:
 
 ## Guardrails
 
-- no PostgreSQL, no queue, no separate metrics backend for MVP
+- no PostgreSQL, no queue, no dashboard for MVP; the read-only usage page is the exception recorded in
+  ADR 0002 (see its MVP guardrails)
 - the edge dashboard is a read-only view over the same JSONL files, not a second store
 - edge traffic is the request source of truth for now
 - token fields are optional and consumed only when present

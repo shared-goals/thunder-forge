@@ -707,6 +707,76 @@ def _json_response(status_code: int, payload: dict[str, object]) -> EdgeProxyRes
     )
 
 
+def build_usage_response(
+    *,
+    config: EdgeProxyConfig,
+    method: str,
+    raw_path: str,
+    headers: dict[str, str],
+) -> EdgeProxyResponse:
+    """Answer one /usage request: page, assets, report or raw log download."""
+    normalized_path = urlsplit(raw_path).path
+    if not usage_endpoints_enabled(config):
+        # Invisible until configured, whatever the method or path.
+        return _json_response(404, {"error": "not_found"})
+    if method != "GET":
+        return _json_response(405, {"error": "method_not_allowed"})
+    if normalized_path == "/usage":
+        return build_usage_asset_response("usage.html")
+    if normalized_path.startswith("/usage/assets/"):
+        return build_usage_asset_response(normalized_path.removeprefix("/usage/assets/"))
+    denied_status = authorize_usage_request(config, headers)
+    if denied_status is not None:
+        error = "not_found" if denied_status == 404 else "unauthorized"
+        return _json_response(denied_status, {"error": error})
+    query = parse_qs(urlsplit(raw_path).query)
+    try:
+        period = resolve_usage_period((query.get("period") or [""])[0])
+    except ValueError:
+        return _json_response(400, {"error": "invalid_period"})
+    if normalized_path == "/usage/report":
+        try:
+            return _json_response(200, build_usage_report_payload(config=config, period=period))
+        except (OSError, RuntimeError, ValueError) as exc:
+            return _json_response(503, {"error": f"usage_unavailable: {exc}"})
+    if normalized_path != "/usage/events":
+        return _json_response(404, {"error": "not_found"})
+    return _usage_events_response(config=config, query=query, period=period)
+
+
+def _usage_events_response(
+    *,
+    config: EdgeProxyConfig,
+    query: dict[str, list[str]],
+    period: str,
+) -> EdgeProxyResponse:
+    source = (query.get("source") or ["access"])[0].strip() or "access"
+    if source not in USAGE_EVENT_SOURCES:
+        return _json_response(400, {"error": "invalid_source"})
+    log_path = config.usage_access_log_path if source == "access" else config.usage_node_metrics_path
+    if log_path is None:
+        return _json_response(503, {"error": f"usage_{source.replace('-', '_')}_log_unavailable"})
+    if period == "all":
+        # Buffering every retained day would spike the process that serves inference.
+        return _json_response(400, {"error": "period_too_broad"})
+    try:
+        # Check the file size first: the body is built in memory, so a post-hoc cap is too late.
+        if log_path.stat().st_size > USAGE_EVENTS_MAX_BYTES:
+            return _json_response(413, {"error": "usage_events_too_large"})
+        records = select_usage_events(log_path, period=period)
+    except OSError as exc:
+        return _json_response(503, {"error": f"usage_unavailable: {exc}"})
+    body = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
+    if len(body) > USAGE_EVENTS_MAX_BYTES:
+        return _json_response(413, {"error": "usage_events_too_large"})
+    return _bytes_response(
+        200,
+        body.encode(),
+        content_type="application/x-ndjson; charset=utf-8",
+        filename=f"{USAGE_EVENT_SOURCES[source]}-{period}.jsonl",
+    )
+
+
 def _bytes_response(
     status_code: int,
     body: bytes,
@@ -742,11 +812,10 @@ def usage_endpoints_enabled(config: EdgeProxyConfig) -> bool:
 def authorize_usage_request(config: EdgeProxyConfig, headers: dict[str, str]) -> int | None:
     """Return None when the usage request is allowed, otherwise the status code to send.
 
+    Callers check `usage_endpoints_enabled` first, so this only answers 401 or None.
     The token is accepted only as a bearer header: a query token would end up in proxy
     access logs, browser history, and pasted links.
     """
-    if not usage_endpoints_enabled(config):
-        return 404
     provided = _bearer_token(_header_value(headers, "Authorization"))
     if not provided:
         return 401
@@ -778,7 +847,6 @@ def build_usage_report_payload(*, config: EdgeProxyConfig, period: str) -> dict[
         exclude_unauthenticated=usage_settings.exclude_unauthenticated,
     )
     return summary.to_json_dict()
-
 
 
 
@@ -1557,70 +1625,12 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 self._send_edge_response(_json_response(status_code, payload))
                 return
             if normalized_path == "/usage" or normalized_path.startswith("/usage/"):
-                # Invisible until configured, whatever the method or path.
-                if not usage_endpoints_enabled(config):
-                    self._send_edge_response(_json_response(404, {"error": "not_found"}))
-                    return
-                if self.command != "GET":
-                    self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
-                    return
-                if normalized_path in ("/usage", "/usage/assets"):
-                    self._send_edge_response(build_usage_asset_response("usage.html"))
-                    return
-                if normalized_path.startswith("/usage/assets/"):
-                    self._send_edge_response(
-                        build_usage_asset_response(normalized_path.removeprefix("/usage/assets/"))
-                    )
-                    return
-                denied_status = authorize_usage_request(config, dict(self.headers.items()))
-                if denied_status is not None:
-                    error = "not_found" if denied_status == 404 else "unauthorized"
-                    self._send_edge_response(_json_response(denied_status, {"error": error}))
-                    return
-                query = parse_qs(urlsplit(self.path).query)
-                try:
-                    period = resolve_usage_period((query.get("period") or [""])[0])
-                except ValueError:
-                    self._send_edge_response(_json_response(400, {"error": "invalid_period"}))
-                    return
-                if normalized_path == "/usage/report":
-                    try:
-                        payload = build_usage_report_payload(config=config, period=period)
-                    except (OSError, RuntimeError, ValueError) as exc:
-                        self._send_edge_response(_json_response(503, {"error": f"usage_unavailable: {exc}"}))
-                        return
-                    self._send_edge_response(_json_response(200, payload))
-                    return
-                if normalized_path != "/usage/events":
-                    self._send_edge_response(_json_response(404, {"error": "not_found"}))
-                    return
-                source = (query.get("source") or ["access"])[0].strip() or "access"
-                if source not in USAGE_EVENT_SOURCES:
-                    self._send_edge_response(_json_response(400, {"error": "invalid_source"}))
-                    return
-                log_path = config.usage_access_log_path if source == "access" else config.usage_node_metrics_path
-                if log_path is None:
-                    self._send_edge_response(_json_response(503, {"error": f"usage_{source}_log_unavailable"}))
-                    return
-                if period == "all":
-                    # Downloading every retained day would build the whole file in memory.
-                    self._send_edge_response(_json_response(400, {"error": "period_too_broad"}))
-                    return
-                try:
-                    records = select_usage_events(log_path, period=period)
-                except OSError as exc:
-                    self._send_edge_response(_json_response(503, {"error": f"usage_unavailable: {exc}"}))
-                    return
-                body = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
-                if len(body) > USAGE_EVENTS_MAX_BYTES:
-                    self._send_edge_response(_json_response(413, {"error": "usage_events_too_large"}))
-                    return
                 self._send_edge_response(
-                    _bytes_response(
-                        200,
-                        body.encode(),
-                        content_type="application/x-ndjson; charset=utf-8",
-                        filename=f"{USAGE_EVENT_SOURCES[source]}-{period}.jsonl",
+                    build_usage_response(
+                        config=config,
+                        method=self.command,
+                        raw_path=self.path,
+                        headers=dict(self.headers.items()),
                     )
                 )
                 return

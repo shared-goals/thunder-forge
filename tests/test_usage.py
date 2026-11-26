@@ -285,6 +285,35 @@ def test_summarize_daily_usage_accepts_float_sizes_and_clears_unloaded_nodes(tmp
     summary = summarize_daily_usage(access_log, period="2026-06-02", node_metrics_path=node_metrics)
 
     assert summary.node_model_memory["msm1"]["agent"]["actual_size"] == 1073741824
+    # idle_seconds is reported here, so it must survive aggregation.
+    assert summary.node_model_memory["msm1"]["agent"]["idle_seconds"] == 5
     assert summary.node_model_memory_sampled_at["msm1"] == "2026-06-02T08:00:00+00:00"
     # The later msm2 sample has nothing loaded, so its footprint must not survive.
     assert "msm2" not in summary.node_model_memory
+
+
+def test_summarize_daily_usage_does_not_invent_idle_time(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text("")
+    node_metrics = tmp_path / "tf-node-metrics.jsonl"
+    node_metrics.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-02T08:00:00+00:00",
+                "node_id": "msm1",
+                "health_ok": True,
+                "models_ok": True,
+                "status_ok": True,
+                "hot_loaded_models": ["agent"],
+                "hot_loaded_count": 1,
+                "loaded_models": [{"id": "agent", "actual_size": 2048}],
+                "errors": [],
+            }
+        )
+        + "\n"
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", node_metrics_path=node_metrics)
+
+    # The node reported no idle time, so the aggregate must not claim 0 seconds.
+    assert summary.node_model_memory["msm1"]["agent"] == {"actual_size": 2048}

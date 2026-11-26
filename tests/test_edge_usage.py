@@ -252,3 +252,20 @@ def test_usage_report_survives_a_non_ascii_token(tmp_path: Path, get) -> None:
 
     # hmac.compare_digest raises TypeError on non-ASCII str, so it must compare bytes.
     assert get(config, "/usage/report?period=2026-06-02", token="\u00fcber-token")[0] == 401
+
+def test_usage_events_refuse_an_oversized_log_before_reading_it(tmp_path: Path, get, monkeypatch) -> None:
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+    monkeypatch.setattr(edge, "USAGE_EVENTS_MAX_BYTES", 16)
+
+    status, _, body = get(config, "/usage/events?period=2026-06-02", token="admin-secret")
+
+    assert status == 413
+    assert json.loads(body) == {"error": "usage_events_too_large"}
+
+
+def test_usage_has_no_bare_assets_alias(tmp_path: Path, get) -> None:
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+
+    # Only the documented /usage and /usage/assets/<file> routes exist.
+    status, _, _ = get(config, "/usage/assets", token="admin-secret")
+    assert status == 404
