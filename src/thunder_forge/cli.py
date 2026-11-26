@@ -64,7 +64,7 @@ from thunder_forge.cluster.edge import (
 from thunder_forge.cluster.fabric import TransportPlan, build_transport_plan
 from thunder_forge.cluster.gateway import GatewayDaemonSetupResult, run_gateway_daemon_setup
 from thunder_forge.cluster.log_retention import trim_local_logs
-from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases
+from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases, runtime_model_aliases
 from thunder_forge.cluster.olla import dev_smoke_olla, run_olla_service_restart, smoke_olla_router
 from thunder_forge.cluster.omlx import (
     OMLX_API_KEY_ENV,
@@ -109,6 +109,7 @@ from thunder_forge.cluster.remote_cache import (
 from thunder_forge.cluster.ssh import ssh_run
 from thunder_forge.cluster.status import normalize_model_statuses
 from thunder_forge.cluster.usage import (
+    _as_non_negative_int,
     _parse_timestamp,
     extract_hot_loaded_models,
     resolve_usage_period,
@@ -343,16 +344,16 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         health = check_omlx_health(base_url, timeout=timeout, include_models=True)
         hot_loaded_runtime_ids = extract_hot_loaded_models(health.model_statuses)
         hot_loaded_models = map_runtime_models_to_aliases(config, node, hot_loaded_runtime_ids)
+        aliases_by_runtime = runtime_model_aliases(config, node)
         loaded_models: list[dict[str, object]] = []
         sampled_at = time.time()
         for runtime_id, status in sorted(health.model_statuses.items()):
             if not isinstance(status, dict) or status.get("loaded") is not True:
                 continue
-            aliases = map_runtime_models_to_aliases(config, node, [runtime_id])
-            entry: dict[str, object] = {"id": aliases[0] if aliases else runtime_id}
-            actual_size = status.get("actual_size")
-            if isinstance(actual_size, (int, float)) and not isinstance(actual_size, bool):
-                entry["actual_size"] = int(actual_size)
+            entry: dict[str, object] = {"id": (aliases_by_runtime.get(runtime_id) or [runtime_id])[0]}
+            actual_size = _as_non_negative_int(status.get("actual_size"))
+            if actual_size is not None:
+                entry["actual_size"] = actual_size
             # oMLX reports last_access; idle time is derived, never sent by the node.
             last_access = status.get("last_access")
             if isinstance(last_access, (int, float)) and not isinstance(last_access, bool):
@@ -3664,7 +3665,7 @@ def usage_report(
     try:
         period = resolve_usage_period(period or "")
     except ValueError:
-        typer.echo(f"Error: invalid period {period!r}, expected YYYY-MM-DD or all", err=True)
+        typer.echo(f"Error: invalid period {period!r}, expected YYYY-MM-DD, today, or all", err=True)
         raise typer.Exit(1)
     summary = summarize_daily_usage(
         access_log_path,

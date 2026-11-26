@@ -26,17 +26,19 @@ def resolve_usage_period(raw: str) -> str:
     return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
 
 
+def _in_period(timestamp: datetime | None, period: str | None) -> bool:
+    """True when a record belongs to the requested period; 'all' accepts everything."""
+    if period is None or period == "all":
+        return True
+    return timestamp is not None and timestamp.date().isoformat() == period
+
+
 def select_usage_events(access_log_path: Path, *, period: str | None = None) -> list[dict[str, object]]:
-    """Return raw access-log records for one period, preserving log order."""
+    """Return raw log records for one period, preserving log order."""
     records, _ = _load_jsonl_lines(access_log_path)
     if period is None or period == "all":
         return records
-    selected: list[dict[str, object]] = []
-    for payload in records:
-        timestamp = _parse_timestamp(payload.get("timestamp"))
-        if timestamp is not None and timestamp.date().isoformat() == period:
-            selected.append(payload)
-    return selected
+    return [payload for payload in records if _in_period(_parse_timestamp(payload.get("timestamp")), period)]
 
 
 def _parse_timestamp(raw: object) -> datetime | None:
@@ -201,6 +203,7 @@ class DailyUsageSummary:
     node_hot_loaded_count: dict[str, int] = field(default_factory=dict)
     node_load_by_hour: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     node_model_memory: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    node_model_memory_sampled_at: dict[str, str] = field(default_factory=dict)
 
     def to_json_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -235,6 +238,7 @@ class DailyUsageSummary:
                 "hot_loaded_count": self.node_hot_loaded_count,
                 "load_by_hour": self.node_load_by_hour,
                 "model_memory": self.node_model_memory,
+                "model_memory_sampled_at": self.node_model_memory_sampled_at,
             }
         return payload
 
@@ -274,7 +278,7 @@ def summarize_daily_usage(
     invalid_lines += invalid
     for payload in records:
         timestamp = _parse_timestamp(payload.get("timestamp"))
-        if period is not None and (timestamp is None or timestamp.date().isoformat() != period):
+        if not _in_period(timestamp, period):
             continue
 
         client_id = payload.get("client_id")
@@ -351,6 +355,7 @@ def summarize_daily_usage(
     node_load_active: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     node_load_waiting: dict[str, dict[str, int]] = defaultdict(dict)
     node_model_memory: dict[str, dict[str, dict[str, int]]] = {}
+    node_model_memory_sampled_at: dict[str, str] = {}
     latest_node_memory_timestamp: dict[str, datetime | None] = {}
     latest_node_metric_timestamp: dict[str, datetime | None] = {}
     if node_metrics_path is not None:
@@ -359,7 +364,7 @@ def summarize_daily_usage(
         invalid_lines += invalid_node_lines
         for payload in node_records:
             timestamp = _parse_timestamp(payload.get("timestamp"))
-            if period is not None and (timestamp is None or timestamp.date().isoformat() != period):
+            if not _in_period(timestamp, period):
                 continue
             node_id = payload.get("node_id")
             if not isinstance(node_id, str) or not node_id.strip():
@@ -424,8 +429,12 @@ def summarize_daily_usage(
                     # A newer sample with nothing loaded must clear the stale footprint.
                     if memory_per_node:
                         node_model_memory[node_id] = dict(sorted(memory_per_node.items()))
+                        node_model_memory_sampled_at[node_id] = (
+                            timestamp.isoformat() if timestamp is not None else ""
+                        )
                     else:
                         node_model_memory.pop(node_id, None)
+                        node_model_memory_sampled_at.pop(node_id, None)
                     latest_node_memory_timestamp[node_id] = timestamp
 
     node_load_by_hour: dict[str, dict[str, dict[str, int]]] = {
@@ -465,4 +474,5 @@ def summarize_daily_usage(
         node_hot_loaded_count=dict(sorted(node_hot_loaded_count.items())),
         node_load_by_hour=node_load_by_hour,
         node_model_memory=dict(sorted(node_model_memory.items())),
+        node_model_memory_sampled_at=dict(sorted(node_model_memory_sampled_at.items())),
     )

@@ -285,5 +285,6 @@ def test_summarize_daily_usage_accepts_float_sizes_and_clears_unloaded_nodes(tmp
     summary = summarize_daily_usage(access_log, period="2026-06-02", node_metrics_path=node_metrics)
 
     assert summary.node_model_memory["msm1"]["agent"]["actual_size"] == 1073741824
+    assert summary.node_model_memory_sampled_at["msm1"] == "2026-06-02T08:00:00+00:00"
     # The later msm2 sample has nothing loaded, so its footprint must not survive.
     assert "msm2" not in summary.node_model_memory

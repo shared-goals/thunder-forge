@@ -83,7 +83,9 @@ def _edge_config(tmp_path: Path, *, token: str | None) -> tuple[edge.EdgeProxyCo
 
 @pytest.fixture
 def get(monkeypatch):
-    def run(config: edge.EdgeProxyConfig, path: str, *, token: str | None = None) -> tuple[int, str, str]:
+    def run(
+        config: edge.EdgeProxyConfig, path: str, *, token: str | None = None, method: str = "GET"
+    ) -> tuple[int, str, str]:
         handlers: list[object] = []
 
         def server(_address, handler):
@@ -98,7 +100,7 @@ def get(monkeypatch):
         )
         edge.serve_edge_proxy(host="127.0.0.1", port=0, config=config)
         auth = f"Authorization: Bearer {token}\r\n" if token else ""
-        request = f"GET {path} HTTP/1.0\r\n{auth}\r\n".encode()
+        request = f"{method} {path} HTTP/1.0\r\n{auth}\r\n".encode()
         client, connection = socket.socketpair()
         errors: list[BaseException] = []
 
@@ -220,3 +222,33 @@ def test_usage_assets_are_hidden_and_not_traversable(tmp_path: Path, get) -> Non
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
     assert get(config, "/usage/assets/..%2Fedge.py")[0] == 404
     assert get(config, "/usage/assets/missing.js")[0] == 404
+
+def test_unknown_usage_paths_and_methods_stay_invisible(tmp_path: Path, get) -> None:
+    disabled, _, _ = _edge_config(tmp_path, token=None)
+    # A wrong method must not reveal that the endpoints exist.
+    assert get(disabled, "/usage", method="POST")[0] == 404
+    assert get(disabled, "/usage/report?period=2026-06-02", method="POST")[0] == 404
+
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+    assert get(config, "/usage/report?period=2026-06-02", method="POST")[0] == 405
+    assert get(config, "/usage/nope", token="admin-secret")[0] == 404
+
+
+def test_usage_events_can_download_node_samples(tmp_path: Path, get) -> None:
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+
+    status, head, body = get(config, "/usage/events?period=2026-06-02&source=node-metrics", token="admin-secret")
+
+    assert status == 200
+    assert 'attachment; filename="tf-node-metrics-2026-06-02.jsonl"' in head
+    assert json.loads(body.splitlines()[0])["node_id"] == "msm1"
+    assert get(config, "/usage/events?period=2026-06-02&source=logs", token="admin-secret")[0] == 400
+    # Downloading every retained day at once would buffer the whole file.
+    assert get(config, "/usage/events?period=all", token="admin-secret")[0] == 400
+
+
+def test_usage_report_survives_a_non_ascii_token(tmp_path: Path, get) -> None:
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+
+    # hmac.compare_digest raises TypeError on non-ASCII str, so it must compare bytes.
+    assert get(config, "/usage/report?period=2026-06-02", token="\u00fcber-token")[0] == 401

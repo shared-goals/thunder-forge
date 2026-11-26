@@ -86,12 +86,14 @@ Expected keys:
 - `tokens.by_user` (when available)
 - `tokens.by_node` (when available)
 - `tokens.by_model` (when available)
-- `latency_ms.by_hour` (nearest-rank `p50`, `p95`, `max`, and `count` per 0-23 bucket)
+- `latency_ms.by_hour` (nearest-rank `p50`, `p95`, `max`, and `count` per 0-23 bucket; with
+  `period=all` the buckets are hour-of-day across every retained day, not distinct days)
 - `concurrency.peak_by_hour` (maximum overlapping request intervals per 0-23 bucket; an
   interval belongs to the hour the request finished in)
 - `node_metrics.load_by_hour` (per hour and node: `samples`, `active_max`, `active_avg`,
   `waiting_max`, taken from node snapshots)
 - `node_metrics.model_memory` (latest snapshot per node: `{model: {actual_size, idle_seconds}}`)
+- `node_metrics.model_memory_sampled_at` (snapshot `timestamp` behind each node's memory numbers)
 - `invalid_lines`
 
 `consumed_ms` is defined as sum of edge-observed `latency_ms`.
@@ -108,7 +110,7 @@ data, and browser navigation cannot send an `Authorization` header), while
 |---|---|
 | `GET /usage` | HTML dashboard rendering the report below; Chart.js is served from `/usage/assets/chart.umd.min.js`, not a CDN |
 | `GET /usage/report?period=<YYYY-MM-DD\|today\|all>` | `usage report --json` payload |
-| `GET /usage/events?period=...` | matching `tf-edge-access.jsonl` lines, `Content-Disposition: attachment` |
+| `GET /usage/events?period=...&source=access\|node-metrics` | matching JSONL lines (`source` defaults to `access`), `Content-Disposition: attachment`; `period=all` is refused with `400 period_too_broad` |
 | `GET /usage/assets/<file>` | vendored dashboard assets (`chart.umd.min.js`); `404` for anything else |
 
 `period` defaults to the edge host's local date. Authentication accepts only
