@@ -857,12 +857,16 @@ async function load() {
     return;
   }
   const data = await response.json();
-  const hours = Object.keys(data.requests.by_hour || {}).sort();
   const lat = data.latency_ms.by_hour || {};
   const conc = data.concurrency.peak_by_hour || {};
   const byNodeHour = data.requests.by_node_hour || {};
   const nodeMetrics = data.node_metrics || {};
   const loadByHour = nodeMetrics.load_by_hour || {};
+  // Node samples exist for hours with no edge traffic, so the axis is the union.
+  const hours = [...new Set([
+    ...Object.keys(data.requests.by_hour || {}),
+    ...Object.keys(loadByHour),
+  ])].sort();
   const memory = nodeMetrics.model_memory || {};
   const nodeIds = [...new Set(Object.keys(byNodeHour))].sort();
   const loadNodes = [...new Set(Object.values(loadByHour).flatMap((v) => Object.keys(v)))].sort();
