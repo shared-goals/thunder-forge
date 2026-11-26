@@ -329,6 +329,8 @@ make edge-keys EDGE_CLIENTS="opencode hindsight"
 
 `edge serve` loads all `TF_USER_<CLIENT>` entries and accepts requests with `Authorization: Bearer <api-key>`. The access log records the mapped `client_id`, model, endpoint, status, and latency, but never the API key. `edge smoke --client-id hindsight` reads that client's key from `TF_USER_HINDSIGHT`; `make edge-usage` summarizes the JSONL access log.
 
+Read-only usage endpoints stay disabled until `TF_EDGE_ADMIN_TOKEN` is set in the environment of `edge serve` (launchd `EnvironmentVariables` or the shell that started it). With a token, `GET /usage` serves the browser dashboard, `GET /usage/report?period=<YYYY-MM-DD|today|all>` returns the aggregated JSON, and `GET /usage/events?period=...` downloads the matching access-log lines as ndjson. All three accept `Authorization: Bearer <token>` or `?token=<token>` and answer 404 while the token is unset.
+
 ## Daily Usage Reporting
 
 Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/YAGNI operation:
@@ -460,7 +462,10 @@ The following sources are the first places to look when debugging routing or bui
 | Source | What it tells us | How to query it |
 |---|---|---|
 | `logs/tf-edge-access.jsonl` | Per-request client, model, node, and latency timing | Read JSONL directly or summarize with `make usage` |
-| `logs/tf-node-metrics.jsonl` | Node health plus hot-loaded model sets | Read JSONL directly or collect via `usage collect-node-metrics` |
+| `logs/tf-node-metrics.jsonl` | Node health, hot-loaded model sets, active/waiting requests, and per-model memory footprint | Read JSONL directly, collect via `usage collect-node-metrics`, or fetch `GET /usage/report` from the edge |
+| `GET /usage` on TF edge | Browser dashboard: requests by node/hour, latency percentiles, peak parallel requests, node load, model memory | Open `https://<edge>/usage?token=<TF_EDGE_ADMIN_TOKEN>` |
+| `GET /usage/report` on TF edge | Same aggregates as `usage report --json` over HTTP | `curl -H 'Authorization: Bearer <token>' '<edge>/usage/report?period=today'` |
+| `GET /usage/events` on TF edge | Raw access-log lines for one period | `curl -OJ -H 'Authorization: Bearer <token>' '<edge>/usage/events?period=2026-06-02'` |
 | `logs/olla-40115.stdout.log` | Olla startup config, discovered endpoints, model filters, sticky-session settings, and routed request decisions | Read the log directly if available; it is a useful operational trace |
 | `GET /internal/health` | Olla liveness/ready status | Probe Olla directly |
 | `GET /internal/status/endpoints` | Which endpoints are healthy/routable | Probe Olla directly |

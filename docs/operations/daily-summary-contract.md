@@ -63,6 +63,9 @@ Expected keys:
 - `status_ok`
 - `hot_loaded_models` (status entries where `loaded=true`, ordered by latest access)
 - `hot_loaded_count`
+- `active_requests` (oMLX status value, `null` when unavailable)
+- `waiting_requests` (oMLX status value, `null` when unavailable)
+- `loaded_models` (`id`, `actual_size` bytes, `idle_seconds` per loaded model)
 - `errors`
 
 ## Summary Contract
@@ -83,9 +86,32 @@ Expected keys:
 - `tokens.by_user` (when available)
 - `tokens.by_node` (when available)
 - `tokens.by_model` (when available)
+- `latency_ms.by_hour` (nearest-rank `p50`, `p95`, `max`, and `count` per 0-23 bucket)
+- `concurrency.peak_by_hour` (maximum overlapping request intervals per 0-23 bucket; an
+  interval belongs to the hour the request finished in)
+- `node_metrics.load_by_hour` (per hour and node: `samples`, `active_max`, `active_avg`,
+  `waiting_max`, taken from node snapshots)
+- `node_metrics.model_memory` (latest snapshot per node: `{model: {actual_size, idle_seconds}}`)
 - `invalid_lines`
 
 `consumed_ms` is defined as sum of edge-observed `latency_ms`.
+
+## HTTP Contract
+
+The edge serves the same aggregates read-only when `TF_EDGE_ADMIN_TOKEN` is set in the
+edge environment. Without the token all three paths answer `404 not_found`, so the
+endpoints stay invisible; a wrong or missing token answers `401 unauthorized`.
+
+| Path | Response |
+|---|---|
+| `GET /usage` | HTML dashboard (Chart.js from CDN) rendering the report below |
+| `GET /usage/report?period=<YYYY-MM-DD\|today\|all>` | `usage report --json` payload |
+| `GET /usage/events?period=...` | matching `tf-edge-access.jsonl` lines, `Content-Disposition: attachment` |
+
+`period` defaults to the edge host's local date. Authentication accepts
+`Authorization: Bearer <token>` or, for browser links, `?token=<token>`.
+Aggregation honours `operations.usage.exclude_models` and
+`operations.usage.exclude_unauthenticated`, like the CLI.
 
 ## Retention Contract
 
@@ -124,7 +150,8 @@ The SQL script emits daily tables for:
 
 ## Guardrails
 
-- no PostgreSQL, no queue, no dashboard for MVP
+- no PostgreSQL, no queue, no separate metrics backend for MVP
+- the edge dashboard is a read-only view over the same JSONL files, not a second store
 - edge traffic is the request source of truth for now
 - token fields are optional and consumed only when present
 - hot-loaded model sets come from oMLX model status snapshots

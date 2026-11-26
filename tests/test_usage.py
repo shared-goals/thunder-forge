@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from thunder_forge.cluster.usage import extract_hot_loaded_models, summarize_daily_usage
+import pytest
+
+from thunder_forge.cluster.usage import (
+    extract_hot_loaded_models,
+    nearest_rank_percentile,
+    peak_concurrency,
+    resolve_usage_period,
+    select_usage_events,
+    summarize_daily_usage,
+)
 
 
 def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path) -> None:
@@ -189,3 +199,40 @@ def test_summarize_daily_usage_excludes_unauthenticated_when_configured(tmp_path
     assert summary.requests_total == 1
     assert summary.requests_by_user == {"alice": 1}
     assert summary.consumed_ms_total == 120
+
+
+def test_percentile_and_peak_concurrency_helpers() -> None:
+    assert nearest_rank_percentile([], 95) == 0
+    assert nearest_rank_percentile([10, 20, 30, 40], 50) == 20
+    assert nearest_rank_percentile([10, 20, 30, 40], 95) == 40
+
+    start = datetime(2026, 6, 2, 8, 0, tzinfo=UTC)
+    intervals = [
+        (start, start + timedelta(seconds=30)),
+        (start + timedelta(seconds=10), start + timedelta(seconds=40)),
+        (start + timedelta(seconds=35), start + timedelta(seconds=50)),
+    ]
+    assert peak_concurrency(intervals) == 2
+    assert peak_concurrency([]) == 0
+
+
+def test_resolve_usage_period_and_select_usage_events(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "latency_ms": 10}),
+                json.dumps({"timestamp": "2026-06-03T09:00:00+00:00", "client_id": "bob", "latency_ms": 20}),
+            ]
+        )
+        + "\n"
+    )
+
+    assert resolve_usage_period("all") == "all"
+    assert resolve_usage_period("2026-06-02") == "2026-06-02"
+    with pytest.raises(ValueError):
+        resolve_usage_period("02.06.2026")
+
+    selected = select_usage_events(access_log, period="2026-06-02")
+    assert [record["client_id"] for record in selected] == ["alice"]
+    assert len(select_usage_events(access_log, period="all")) == 2

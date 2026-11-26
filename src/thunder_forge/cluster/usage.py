@@ -7,12 +7,36 @@ summarize usage with the Thunder Forge CLI or a downstream CLI like DuckDB.
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _DEFAULT_MODELS_EXCLUDED_FROM_USAGE = {"markitdown"}
+
+
+def resolve_usage_period(raw: str) -> str:
+    """Normalize a usage period argument to a local date or 'all'."""
+    value = (raw or "").strip()
+    if not value or value == "today":
+        return datetime.now().astimezone().date().isoformat()
+    if value == "all":
+        return "all"
+    return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+
+
+def select_usage_events(access_log_path: Path, *, period: str | None = None) -> list[dict[str, object]]:
+    """Return raw access-log records for one period, preserving log order."""
+    records, _ = _load_jsonl_lines(access_log_path)
+    if period is None or period == "all":
+        return records
+    selected: list[dict[str, object]] = []
+    for payload in records:
+        timestamp = _parse_timestamp(payload.get("timestamp"))
+        if timestamp is not None and timestamp.date().isoformat() == period:
+            selected.append(payload)
+    return selected
 
 
 def _parse_timestamp(raw: object) -> datetime | None:
@@ -82,6 +106,30 @@ def _ordered_counter_by_weight(counter: Counter[str], weights: dict[str, int]) -
     return dict(sorted(counter.items(), key=lambda item: (-weights.get(item[0], item[1]), item[0])))
 
 
+def nearest_rank_percentile(values: list[int], percentile: float) -> int:
+    """Return the nearest-rank percentile of integer samples."""
+    if not values:
+        return 0
+    ordered = sorted(values)
+    rank = max(1, math.ceil((percentile / 100) * len(ordered)))
+    return ordered[rank - 1]
+
+
+def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
+    """Return the maximum number of overlapping request intervals."""
+    events: list[tuple[datetime, int]] = []
+    for started, finished in intervals:
+        events.append((started, 1))
+        events.append((finished, -1))
+    events.sort()
+    current = 0
+    peak = 0
+    for _, delta in events:
+        current += delta
+        peak = max(peak, current)
+    return peak
+
+
 def _as_non_negative_int(raw: object) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int):
         return None
@@ -142,9 +190,13 @@ class DailyUsageSummary:
     consumed_ms_by_model: dict[str, int] = field(default_factory=dict)
     requests_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
+    latency_ms_by_hour: dict[str, dict[str, int]] = field(default_factory=dict)
+    peak_concurrency_by_hour: dict[str, int] = field(default_factory=dict)
     node_metrics_present: bool = False
     node_hot_loaded_models: dict[str, list[str]] = field(default_factory=dict)
     node_hot_loaded_count: dict[str, int] = field(default_factory=dict)
+    node_load_by_hour: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    node_model_memory: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
 
     def to_json_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -167,12 +219,18 @@ class DailyUsageSummary:
                 "by_node": self.consumed_ms_by_node,
                 "by_model": self.consumed_ms_by_model,
             },
+            "latency_ms": {
+                "by_hour": self.latency_ms_by_hour,
+            },
+            "concurrency": {"peak_by_hour": self.peak_concurrency_by_hour},
             "invalid_lines": self.invalid_lines,
         }
         if self.node_metrics_present:
             payload["node_metrics"] = {
                 "hot_loaded_models": self.node_hot_loaded_models,
                 "hot_loaded_count": self.node_hot_loaded_count,
+                "load_by_hour": self.node_load_by_hour,
+                "model_memory": self.node_model_memory,
             }
         return payload
 
@@ -204,6 +262,8 @@ def summarize_daily_usage(
     requests_total = 0
     invalid_lines = 0
     consumed_ms_total = 0
+    latency_values_by_hour: dict[str, list[int]] = defaultdict(list)
+    intervals_by_hour: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
     excluded_model_names = _normalize_excluded_models(excluded_models)
 
     records, invalid = _load_jsonl_lines(access_log_path)
@@ -233,6 +293,10 @@ def summarize_daily_usage(
         model = payload.get("model")
         model_name = model.strip() if isinstance(model, str) else ""
         hour_bucket = _hour_bucket(timestamp)
+        latency_values_by_hour[hour_bucket].append(latency_ms)
+        if timestamp is not None:
+            # An interval belongs to the hour the request finished in.
+            intervals_by_hour[hour_bucket].append((timestamp - timedelta(milliseconds=latency_ms), timestamp))
 
         requests_by_user[client_id] += 1
         consumed_ms_by_user[client_id] += latency_ms
@@ -263,10 +327,27 @@ def summarize_daily_usage(
         for hour, count in requests_by_hour.items()
     }
 
+    latency_ms_by_hour: dict[str, dict[str, int]] = {
+        hour: {
+            "count": len(values),
+            "p50": nearest_rank_percentile(values, 50),
+            "p95": nearest_rank_percentile(values, 95),
+            "max": max(values),
+        }
+        for hour, values in sorted(latency_values_by_hour.items())
+    }
+    peak_concurrency_by_hour: dict[str, int] = {
+        hour: peak_concurrency(intervals) for hour, intervals in sorted(intervals_by_hour.items())
+    }
+
     node_metrics_path_str = ""
     node_metrics_present = False
     node_hot_loaded_models: dict[str, list[str]] = {}
     node_hot_loaded_count: dict[str, int] = {}
+    node_load_active: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    node_load_waiting: dict[str, dict[str, int]] = defaultdict(dict)
+    node_model_memory: dict[str, dict[str, dict[str, int]]] = {}
+    latest_node_memory_timestamp: dict[str, datetime | None] = {}
     latest_node_metric_timestamp: dict[str, datetime | None] = {}
     if node_metrics_path is not None:
         node_metrics_path_str = str(node_metrics_path)
@@ -309,6 +390,50 @@ def summarize_daily_usage(
             if hot_loaded_count is not None:
                 node_hot_loaded_count[node_id] = hot_loaded_count
 
+            active_requests = _as_non_negative_int(payload.get("active_requests"))
+            if active_requests is not None:
+                node_load_active[_hour_bucket(timestamp)][node_id].append(active_requests)
+            waiting_requests = _as_non_negative_int(payload.get("waiting_requests"))
+            if waiting_requests is not None:
+                waiting_per_node = node_load_waiting[_hour_bucket(timestamp)]
+                waiting_per_node[node_id] = max(waiting_per_node.get(node_id, 0), waiting_requests)
+
+            raw_memory = payload.get("loaded_models")
+            if isinstance(raw_memory, list):
+                memory_per_node: dict[str, dict[str, int]] = {}
+                for item in raw_memory:
+                    if not isinstance(item, dict):
+                        continue
+                    model_id = item.get("id")
+                    actual_size = _as_non_negative_int(item.get("actual_size"))
+                    if not isinstance(model_id, str) or not model_id.strip() or actual_size is None:
+                        continue
+                    if not _include_model_in_usage(model_id, excluded_model_names):
+                        continue
+                    idle_seconds = _as_non_negative_int(item.get("idle_seconds")) or 0
+                    memory_per_node[model_id.strip()] = {
+                        "actual_size": actual_size,
+                        "idle_seconds": idle_seconds,
+                    }
+                if memory_per_node:
+                    previous_memory_timestamp = latest_node_memory_timestamp.get(node_id)
+                    if previous_memory_timestamp is None or timestamp is None or timestamp >= previous_memory_timestamp:
+                        node_model_memory[node_id] = dict(sorted(memory_per_node.items()))
+                        latest_node_memory_timestamp[node_id] = timestamp
+
+    node_load_by_hour: dict[str, dict[str, dict[str, int]]] = {
+        hour: {
+            node_id: {
+                "samples": len(values),
+                "active_max": max(values),
+                "active_avg": round(sum(values) / len(values), 2),
+                "waiting_max": node_load_waiting[hour].get(node_id, 0),
+            }
+            for node_id, values in sorted(nodes.items())
+        }
+        for hour, nodes in sorted(node_load_active.items())
+    }
+
     return DailyUsageSummary(
         period=period or "all",
         generated_at=datetime.now(UTC).isoformat(),
@@ -326,7 +451,11 @@ def summarize_daily_usage(
         consumed_ms_by_model=_ordered_counter(consumed_ms_by_model),
         requests_by_hour=requests_by_hour_payload,
         requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
+        latency_ms_by_hour=latency_ms_by_hour,
+        peak_concurrency_by_hour=peak_concurrency_by_hour,
         node_metrics_present=node_metrics_present,
         node_hot_loaded_models=_ordered_list_map(node_hot_loaded_models),
         node_hot_loaded_count=dict(sorted(node_hot_loaded_count.items())),
+        node_load_by_hour=node_load_by_hour,
+        node_model_memory=dict(sorted(node_model_memory.items())),
     )

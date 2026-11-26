@@ -337,6 +337,18 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         health = check_omlx_health(base_url, timeout=timeout, include_models=True)
         hot_loaded_runtime_ids = extract_hot_loaded_models(health.model_statuses)
         hot_loaded_models = map_runtime_models_to_aliases(config, node, hot_loaded_runtime_ids)
+        loaded_models: list[dict[str, object]] = []
+        for runtime_id, status in sorted(health.model_statuses.items()):
+            if not isinstance(status, dict) or status.get("loaded") is not True:
+                continue
+            aliases = map_runtime_models_to_aliases(config, node, [runtime_id])
+            loaded_models.append(
+                {
+                    "id": aliases[0] if aliases else runtime_id,
+                    "actual_size": status.get("actual_size", 0),
+                    "idle_seconds": int(status.get("idle_seconds") or 0),
+                }
+            )
         snapshots.append(
             {
                 "timestamp": datetime.now().astimezone().isoformat(),
@@ -346,6 +358,9 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
                 "status_ok": health.status_ok,
                 "hot_loaded_models": hot_loaded_models,
                 "hot_loaded_count": len(hot_loaded_models),
+                "active_requests": health.active_requests,
+                "waiting_requests": health.waiting_requests,
+                "loaded_models": loaded_models,
                 "errors": health.errors,
             }
         )
@@ -3964,6 +3979,7 @@ def edge_serve(
             handle.write(f"{line}\n")
 
     client_ids = sorted({client.client_id for client in clients_by_key.values()})
+    usage_admin_token = os.environ.get("TF_EDGE_ADMIN_TOKEN", "").strip() or None
 
     edge_proxy_config = EdgeProxyConfig(
         olla_base_url=resolved_olla_base_url,
@@ -3972,6 +3988,9 @@ def edge_serve(
         repo_root=repo_root,
         access_log_sink=log_sink,
         model_catalog=_edge_model_catalog_from_config(cluster_config),
+        usage_admin_token=usage_admin_token,
+        usage_access_log_path=access_log_path,
+        usage_node_metrics_path=metrics_path,
         inspector=EdgeInspectorConfig(
             enabled=cluster_config.services.edge_inspector_enabled,
             output_dir=(
@@ -3986,6 +4005,10 @@ def edge_serve(
     typer.echo(f"clients: {', '.join(client_ids)}")
     typer.echo(f"api_key_count: {len(clients_by_key)}")
     typer.echo(f"access_log: {access_log_path}")
+    if usage_admin_token:
+        typer.echo("usage_endpoints: enabled paths=/usage,/usage/report,/usage/events")
+    else:
+        typer.echo("usage_endpoints: disabled (set TF_EDGE_ADMIN_TOKEN to enable)")
     if edge_proxy_config.inspector is not None and edge_proxy_config.inspector.enabled:
         typer.echo(f"edge_inspector: enabled output_dir={edge_proxy_config.inspector.output_dir}")
     else:

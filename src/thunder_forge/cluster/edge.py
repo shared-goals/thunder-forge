@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import hmac
 import json
-import math
 import os
 import platform
 import re
@@ -52,7 +51,13 @@ from thunder_forge.cluster.services import (
 )
 from thunder_forge.cluster.ssh import ssh_run
 from thunder_forge.cluster.status import normalize_model_statuses
-from thunder_forge.cluster.usage import extract_hot_loaded_models
+from thunder_forge.cluster.usage import (
+    extract_hot_loaded_models,
+    nearest_rank_percentile,
+    resolve_usage_period,
+    select_usage_events,
+    summarize_daily_usage,
+)
 
 STATUS_RECENT_IDLE_SECONDS = 60
 
@@ -112,6 +117,10 @@ class EdgeProxyConfig:
     status_timeout: float = 8.0
     max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
     inspector: EdgeInspectorConfig | None = None
+    # Usage endpoints stay disabled (404) until an admin token is configured.
+    usage_admin_token: str | None = None
+    usage_access_log_path: Path | None = None
+    usage_node_metrics_path: Path | None = None
 
 
 @dataclass
@@ -491,14 +500,6 @@ def _active_request_payload(config: EdgeProxyConfig) -> list[dict[str, str]]:
     return [{"client_id": client_id, "model": model} for client_id, model in requests if model]
 
 
-def _nearest_rank_percentile(values: list[int], percentile: float) -> int:
-    if not values:
-        return 0
-    sorted_values = sorted(values)
-    rank = max(1, math.ceil((percentile / 100) * len(sorted_values)))
-    return sorted_values[rank - 1]
-
-
 def summarize_edge_usage(access_log_path: Path) -> EdgeUsageSummary:
     """Summarize TF edge JSONL access logs by authenticated client id."""
     records: dict[str, dict[str, object]] = defaultdict(
@@ -578,8 +579,8 @@ def summarize_edge_usage(access_log_path: Path) -> EdgeUsageSummary:
                 failures=int(record["failures"]),
                 models=dict(models.most_common()),
                 endpoints=dict(endpoints.most_common()),
-                latency_ms_p50=_nearest_rank_percentile(latencies, 50),
-                latency_ms_p95=_nearest_rank_percentile(latencies, 95),
+                latency_ms_p50=nearest_rank_percentile(latencies, 50),
+                latency_ms_p95=nearest_rank_percentile(latencies, 95),
             )
         )
 
@@ -710,6 +711,221 @@ def _json_response(status_code: int, payload: dict[str, object]) -> EdgeProxyRes
         headers={"Content-Type": "application/json"},
         body=json.dumps(payload, separators=(",", ":")).encode(),
     )
+
+
+def _html_response(status_code: int, body: str) -> EdgeProxyResponse:
+    return EdgeProxyResponse(
+        status_code=status_code,
+        headers={"Content-Type": "text/html; charset=utf-8"},
+        body=body.encode(),
+    )
+
+
+def _download_response(status_code: int, body: str, *, filename: str) -> EdgeProxyResponse:
+    return EdgeProxyResponse(
+        status_code=status_code,
+        headers={
+            "Content-Type": "application/x-ndjson; charset=utf-8",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+        body=body.encode(),
+    )
+
+
+USAGE_TOKEN_ENV = "TF_EDGE_ADMIN_TOKEN"
+
+
+def _usage_token(headers: dict[str, str], query: dict[str, list[str]]) -> str:
+    token = _bearer_token(_header_value(headers, "Authorization"))
+    if token:
+        return token
+    return (query.get("token") or [""])[0].strip()
+
+
+def authorize_usage_request(
+    config: EdgeProxyConfig,
+    headers: dict[str, str],
+    query: dict[str, list[str]],
+) -> int | None:
+    """Return None when the usage request is allowed, otherwise the status code to send."""
+    expected = (config.usage_admin_token or "").strip()
+    if not expected:
+        return 404
+    provided = _usage_token(headers, query)
+    if not provided:
+        return 401
+    return None if hmac.compare_digest(provided, expected) else 401
+
+
+def build_usage_report_payload(*, config: EdgeProxyConfig, period: str) -> dict[str, object]:
+    """Aggregate the edge logs into the payload the usage dashboard renders."""
+    if config.usage_access_log_path is None:
+        raise RuntimeError("usage access log is not configured")
+    usage_settings = getattr(config.cluster_config.operations, "usage", None) if config.cluster_config else None
+    summary = summarize_daily_usage(
+        config.usage_access_log_path,
+        period=None if period == "all" else period,
+        node_metrics_path=config.usage_node_metrics_path,
+        excluded_models=getattr(usage_settings, "exclude_models", None),
+        exclude_unauthenticated=bool(getattr(usage_settings, "exclude_unauthenticated", False)),
+    )
+    return summary.to_json_dict()
+
+
+USAGE_PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Thunder Forge usage</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  body { background:#14161a; color:#e8eaed; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         margin:0; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:16px 0 24px; }
+  input,button { background:#1e2126; color:#e8eaed; border:1px solid #333941; border-radius:6px;
+                 padding:6px 10px; font:inherit; }
+  button { cursor:pointer; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:20px; }
+  .card { background:#1a1d22; border:1px solid #262b33; border-radius:10px; padding:14px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:#9aa4b2;
+             margin:0 0 10px; }
+  canvas { max-height:260px; }
+  .muted { color:#8b95a3; font-size:12px; }
+  .error { color:#ff8a80; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td,th { text-align:left; padding:3px 6px; border-bottom:1px solid #262b33; }
+  th { color:#9aa4b2; font-weight:500; }
+</style>
+</head>
+<body>
+<h1>Thunder Forge usage</h1>
+<div class="muted" id="meta">loading...</div>
+<div class="bar">
+  <input id="period" size="12" placeholder="YYYY-MM-DD / all">
+  <button id="reload">Load</button>
+  <a class="muted" id="download" href="#">download raw events (ndjson)</a>
+  <button id="forget" title="Drop the stored token">sign out</button>
+</div>
+<div class="grid">
+  <div class="card"><h2>Requests per hour by node</h2><canvas id="nodeChart"></canvas></div>
+  <div class="card"><h2>Latency p50 / p95 / max per hour</h2><canvas id="latencyChart"></canvas></div>
+  <div class="card"><h2>Peak parallel requests per hour</h2><canvas id="concurrencyChart"></canvas></div>
+  <div class="card"><h2>Node load: max active requests per hour</h2><canvas id="loadChart"></canvas></div>
+  <div class="card"><h2>Requests by model</h2><canvas id="modelChart"></canvas></div>
+  <div class="card"><h2>Loaded model memory</h2><div id="memory"></div></div>
+</div>
+<script>
+const storeKey = "tf-usage-token";
+const params = new URLSearchParams(location.search);
+const el = (id) => document.getElementById(id);
+const colors = ["#4c9aff", "#7ee787", "#ffa657", "#d2a8ff", "#ff7b72", "#56d4dd"];
+const charts = {};
+
+if (params.get("token")) {
+  localStorage.setItem(storeKey, params.get("token"));
+  history.replaceState({}, "", location.pathname);
+}
+
+const token = () => localStorage.getItem(storeKey) || prompt("TF admin token") || "";
+
+function draw(id, config) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(el(id), config);
+}
+
+const options = {
+  responsive: true,
+  interaction: { mode: "index" },
+  scales: {
+    x: { grid: { color: "#262b33" } },
+    y: { grid: { color: "#262b33" }, beginAtZero: true },
+  },
+};
+const line = (datasets, labels) => ({ type: "line", data: { labels, datasets }, options });
+const bar = (labels, values, label, color) => ({
+  type: "bar",
+  data: { labels, datasets: [{ label, data: values, backgroundColor: color }] },
+  options,
+});
+const series = (entries) => entries.map(([name, values], i) => ({
+  label: name,
+  data: values,
+  borderColor: colors[i % colors.length],
+  tension: 0.2,
+}));
+
+async function load() {
+  const period = el("period").value.trim() || "today";
+  const auth = token();
+  const query = "?period=" + encodeURIComponent(period);
+  el("download").href = "/usage/events" + query + "&token=" + encodeURIComponent(auth);
+  const response = await fetch("/usage/report" + query, {
+    headers: { Authorization: "Bearer " + auth },
+  });
+  if (!response.ok) {
+    el("meta").innerHTML = "<span class=error>HTTP " + response.status + "</span>";
+    return;
+  }
+  const data = await response.json();
+  const hours = Object.keys(data.requests.by_hour || {}).sort();
+  const lat = data.latency_ms.by_hour || {};
+  const conc = data.concurrency.peak_by_hour || {};
+  const byNodeHour = data.requests.by_node_hour || {};
+  const nodeMetrics = data.node_metrics || {};
+  const loadByHour = nodeMetrics.load_by_hour || {};
+  const memory = nodeMetrics.model_memory || {};
+  const nodeIds = [...new Set(Object.keys(byNodeHour))].sort();
+  const loadNodes = [...new Set(Object.values(loadByHour).flatMap((v) => Object.keys(v)))].sort();
+
+  el("meta").textContent = [
+    data.period,
+    "requests " + data.requests.total,
+    "consumed " + Math.round(data.consumed_ms.total / 1000) + "s",
+    "nodes " + Object.keys(data.requests.by_node).length,
+  ].join(" \\u00b7 ");
+
+  draw("nodeChart", line(series(nodeIds.map((node) => [
+    node, hours.map((hour) => (byNodeHour[node] || {})[hour] || 0),
+  ])), hours));
+
+  draw("latencyChart", line(series([
+    ["p50 ms", hours.map((hour) => (lat[hour] || {}).p50 ?? null)],
+    ["p95 ms", hours.map((hour) => (lat[hour] || {}).p95 ?? null)],
+    ["max ms", hours.map((hour) => (lat[hour] || {}).max ?? null)],
+  ]), hours));
+
+  draw("concurrencyChart", bar(hours, hours.map((hour) => conc[hour] ?? 0),
+    "peak parallel", colors[3] + "99"));
+
+  draw("loadChart", line(series(loadNodes.map((node) => [
+    node, hours.map((hour) => ((loadByHour[hour] || {})[node] || {}).active_max || 0),
+  ])), hours));
+
+  const byModel = data.requests.by_model || {};
+  draw("modelChart", bar(Object.keys(byModel), Object.values(byModel),
+    "requests", colors[5] + "99"));
+
+  const rows = Object.entries(memory).flatMap(([node, models]) => Object.entries(models)
+    .map(([model, item]) => [node, model, (item.actual_size / 2 ** 30).toFixed(1), item.idle_seconds]));
+  if (!rows.length) {
+    el("memory").innerHTML = "<span class=muted>no node samples for this period</span>";
+    return;
+  }
+  const head = "<tr><th>node</th><th>model</th><th>GiB</th><th>idle s</th></tr>";
+  const body = rows.map((row) => "<tr><td>" + row.join("</td><td>") + "</td></tr>").join("");
+  el("memory").innerHTML = "<table>" + head + body + "</table>";
+}
+
+el("reload").onclick = load;
+el("forget").onclick = () => { localStorage.removeItem(storeKey); location.reload(); };
+const initial = params.get("period");
+if (initial) el("period").value = initial;
+load();
+</script>
+</body>
+</html>
+"""
 
 
 def _extract_version_token(raw_output: str) -> str:
@@ -1485,6 +1701,39 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     return
                 status_code = 200 if payload.get("ok") else 503
                 self._send_edge_response(_json_response(status_code, payload))
+                return
+            if normalized_path in ("/usage", "/usage/report", "/usage/events"):
+                if self.command != "GET":
+                    self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
+                    return
+                query = parse_qs(urlsplit(self.path).query)
+                denied_status = authorize_usage_request(config, dict(self.headers.items()), query)
+                if denied_status is not None:
+                    error = "not_found" if denied_status == 404 else "unauthorized"
+                    self._send_edge_response(_json_response(denied_status, {"error": error}))
+                    return
+                try:
+                    period = resolve_usage_period((query.get("period") or [""])[0])
+                except ValueError:
+                    self._send_edge_response(_json_response(400, {"error": "invalid_period"}))
+                    return
+                try:
+                    if normalized_path == "/usage/report":
+                        self._send_edge_response(
+                            _json_response(200, build_usage_report_payload(config=config, period=period))
+                        )
+                    elif normalized_path == "/usage/events":
+                        if config.usage_access_log_path is None:
+                            raise RuntimeError("usage access log is not configured")
+                        records = select_usage_events(config.usage_access_log_path, period=period)
+                        body = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
+                        self._send_edge_response(
+                            _download_response(200, body, filename=f"tf-edge-access-{period}.jsonl")
+                        )
+                    else:
+                        self._send_edge_response(_html_response(200, USAGE_PAGE_HTML))
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._send_edge_response(_json_response(503, {"error": f"usage_unavailable: {exc}"}))
                 return
             headers = dict(self.headers.items())
             try:
