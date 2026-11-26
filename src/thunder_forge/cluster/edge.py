@@ -740,7 +740,7 @@ def build_usage_response(
         return _json_response(400, {"error": "invalid_period"})
     if normalized_path == "/usage/events":
         return _usage_events_response(config=config, query=query, period=period)
-    return _usage_report_response(config=config, period=period)
+    return _usage_report_response(config=config, period=period, client_ids=resolve_usage_clients(query))
 
 
 def _method_not_allowed() -> EdgeProxyResponse:
@@ -757,13 +757,29 @@ def _usage_log_size(config: EdgeProxyConfig, log_path: Path | None) -> int | Non
         return None
 
 
-def _usage_report_response(*, config: EdgeProxyConfig, period: str) -> EdgeProxyResponse:
+def resolve_usage_clients(query: dict[str, list[str]]) -> list[str]:
+    """Read `?user=` filters; repeated and comma-separated values are both accepted."""
+    clients: list[str] = []
+    for value in query.get("user", []):
+        clients.extend(item.strip() for item in value.split(",") if item.strip())
+    return clients
+
+
+def _usage_report_response(
+    *,
+    config: EdgeProxyConfig,
+    period: str,
+    client_ids: list[str],
+) -> EdgeProxyResponse:
     if period == "all" and (size := _usage_log_size(config, config.usage_access_log_path)) is not None:
         if size > USAGE_EVENTS_MAX_BYTES:
             # Aggregating every retained day reads the whole file into memory.
             return _json_response(413, {"error": "usage_report_too_large"})
     try:
-        return _json_response(200, build_usage_report_payload(config=config, period=period))
+        return _json_response(
+            200,
+            build_usage_report_payload(config=config, period=period, client_ids=client_ids),
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         return _json_response(503, {"error": f"usage_unavailable: {exc}"})
 
@@ -857,8 +873,16 @@ def build_usage_asset_response(name: str) -> EdgeProxyResponse:
     return _bytes_response(200, asset.read_bytes(), content_type=content_type)
 
 
-def build_usage_report_payload(*, config: EdgeProxyConfig, period: str) -> dict[str, object]:
-    """Aggregate the edge logs into the payload the usage dashboard renders."""
+def build_usage_report_payload(
+    *,
+    config: EdgeProxyConfig,
+    period: str,
+    client_ids: list[str] | None = None,
+) -> dict[str, object]:
+    """Aggregate the edge logs into the payload the usage dashboard renders.
+
+    `client_ids` filters by authenticated client identity; API keys are never part of the log.
+    """
     if config.usage_access_log_path is None:
         raise RuntimeError("usage access log is not configured")
     if config.cluster_config is None:
@@ -870,6 +894,7 @@ def build_usage_report_payload(*, config: EdgeProxyConfig, period: str) -> dict[
         node_metrics_path=config.usage_node_metrics_path,
         excluded_models=usage_settings.exclude_models,
         exclude_unauthenticated=usage_settings.exclude_unauthenticated,
+        client_ids=client_ids,
     )
     return summary.to_json_dict()
 

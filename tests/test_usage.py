@@ -373,3 +373,33 @@ def test_summarize_daily_usage_keeps_memory_when_the_node_probe_failed(tmp_path:
     # A node that never reports a queue must read as unknown, not as an empty queue.
     assert summary.node_load_by_hour["09"]["msm2"]["active_max"] == 3
     assert summary.node_load_by_hour["09"]["msm2"]["waiting_max"] is None
+
+
+def test_summarize_daily_usage_filters_by_client_id(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "gnezim", "model": "agent", "latency_ms": 1000},
+                {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "hermes", "model": "agent", "latency_ms": 9000},
+                {"timestamp": "2026-06-02T08:20:00+00:00", "client_id": "dirge", "model": "coder", "latency_ms": 3000},
+            )
+        )
+        + "\n"
+    )
+
+    everyone = summarize_daily_usage(access_log, period="2026-06-02")
+    only_hermes = summarize_daily_usage(access_log, period="2026-06-02", client_ids=["hermes"])
+
+    assert everyone.available_users == ["dirge", "gnezim", "hermes"]
+    assert everyone.selected_users == []
+    assert everyone.requests_total == 3
+
+    # The filter narrows the numbers but never hides who else exists in the period.
+    assert only_hermes.selected_users == ["hermes"]
+    assert only_hermes.available_users == ["dirge", "gnezim", "hermes"]
+    assert only_hermes.requests_total == 1
+    assert only_hermes.consumed_ms_total == 9000
+    assert only_hermes.latency_ms_by_hour["08"] == {"count": 1, "p50": 9000, "p95": 9000, "max": 9000}
+    assert only_hermes.requests_by_user == {"hermes": 1}

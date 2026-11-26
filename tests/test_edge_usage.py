@@ -272,3 +272,28 @@ def test_usage_has_no_bare_assets_alias(tmp_path: Path, get) -> None:
     # Only the documented /usage and /usage/assets/<file> routes exist.
     status, _, _ = get(config, "/usage/assets", token="admin-secret")
     assert status == 404
+
+def test_usage_report_filters_by_user_without_exposing_keys(tmp_path: Path, get) -> None:
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+
+    status, _, body = get(config, "/usage/report?period=2026-06-02&user=alice", token="admin-secret")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["users"] == {"available": ["alice", "bob"], "selected": ["alice"]}
+    assert payload["requests"]["total"] == 1
+    assert payload["requests"]["by_user"] == {"alice": 1}
+    # Client identities only: the admin token and any key material stay out of the payload.
+    assert config.usage_admin_token not in body
+
+    # Repeated and comma-separated values are both accepted.
+    both = json.loads(get(config, "/usage/report?period=2026-06-02&user=alice,bob", token="admin-secret")[2])
+    assert both["users"]["selected"] == ["alice", "bob"]
+    assert both["requests"]["total"] == 2
+    repeated = json.loads(
+        get(config, "/usage/report?period=2026-06-02&user=alice&user=bob", token="admin-secret")[2]
+    )
+    assert repeated["requests"]["total"] == 2
+
+    unknown = json.loads(get(config, "/usage/report?period=2026-06-02&user=nobody", token="admin-secret")[2])
+    assert unknown["requests"]["total"] == 0
+    assert unknown["users"]["available"] == ["alice", "bob"]

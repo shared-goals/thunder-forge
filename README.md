@@ -470,7 +470,7 @@ The following sources are the first places to look when debugging routing or bui
 | `logs/tf-edge-access.jsonl` | Per-request client, model, node, and latency timing | Read JSONL directly or summarize with `make usage` |
 | `logs/tf-node-metrics.jsonl` | Node health, hot-loaded model sets, active/waiting requests, and per-model memory footprint | Read JSONL directly, collect via `usage collect-node-metrics`, or fetch `GET /usage/report` from the edge |
 | `GET /usage` on TF edge | Browser dashboard: requests by node/hour, latency percentiles, peak parallel requests, node load, model memory (Chart.js served by the edge, no CDN) | Open `https://<edge>/usage` and paste `TF_EDGE_ADMIN_TOKEN` once |
-| `GET /usage/report` on TF edge | Same aggregates as `usage report --json` over HTTP | `curl -H 'Authorization: Bearer <token>' '<edge>/usage/report?period=today'` |
+| `GET /usage/report` on TF edge | Same aggregates as `usage report --json` over HTTP, optional `?user=<client>` filter | `curl -H 'Authorization: Bearer <token>' '<edge>/usage/report?period=today&user=hermes'` |
 | `GET /usage/events` on TF edge | Raw log lines for one period: `source=access` (default) or `source=node-metrics` | `curl -OJ -H 'Authorization: Bearer <token>' '<edge>/usage/events?period=2026-06-02&source=node-metrics'` |
 | `logs/olla-40115.stdout.log` | Olla startup config, discovered endpoints, model filters, sticky-session settings, and routed request decisions | Read the log directly if available; it is a useful operational trace |
 | `GET /internal/health` | Olla liveness/ready status | Probe Olla directly |

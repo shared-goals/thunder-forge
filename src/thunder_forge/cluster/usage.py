@@ -202,6 +202,8 @@ class DailyUsageSummary:
     node_load_by_hour: dict[str, dict[str, dict[str, float | None]]] = field(default_factory=dict)
     node_model_memory: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     node_model_memory_sampled_at: dict[str, str] = field(default_factory=dict)
+    available_users: list[str] = field(default_factory=list)
+    selected_users: list[str] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -223,6 +225,10 @@ class DailyUsageSummary:
                 "by_user": self.consumed_ms_by_user,
                 "by_node": self.consumed_ms_by_node,
                 "by_model": self.consumed_ms_by_model,
+            },
+            "users": {
+                "available": self.available_users,
+                "selected": self.selected_users,
             },
             "latency_ms": {
                 "by_hour": self.latency_ms_by_hour,
@@ -248,6 +254,7 @@ def summarize_daily_usage(
     node_metrics_path: Path | None = None,
     excluded_models: list[str] | set[str] | None = None,
     exclude_unauthenticated: bool = False,
+    client_ids: list[str] | set[str] | None = None,
 ) -> DailyUsageSummary:
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
     if period == "all":
@@ -271,6 +278,8 @@ def summarize_daily_usage(
     latency_values_by_hour: dict[str, list[int]] = defaultdict(list)
     intervals_by_hour: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
     excluded_model_names = _normalize_excluded_models(excluded_models)
+    selected_clients = {item.strip() for item in client_ids or [] if item and item.strip()} or None
+    seen_clients: set[str] = set()
 
     records, invalid = _load_jsonl_lines(access_log_path)
     invalid_lines += invalid
@@ -290,6 +299,9 @@ def summarize_daily_usage(
         latency_ms = payload.get("latency_ms")
         if not isinstance(latency_ms, int):
             invalid_lines += 1
+            continue
+        seen_clients.add(client_id)
+        if selected_clients is not None and client_id not in selected_clients:
             continue
 
         requests_total += 1
@@ -471,4 +483,6 @@ def summarize_daily_usage(
         node_load_by_hour=node_load_by_hour,
         node_model_memory=dict(sorted(node_model_memory.items())),
         node_model_memory_sampled_at=dict(sorted(node_model_memory_sampled_at.items())),
+        available_users=sorted(seen_clients),
+        selected_users=sorted(selected_clients or []),
     )

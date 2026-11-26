@@ -29,6 +29,7 @@
 <div class="muted" id="meta">loading...</div>
 <div class="bar">
   <input id="period" size="12" placeholder="YYYY-MM-DD / all">
+  <select id="user"><option value="">all users</option></select>
   <button id="reload">Load</button>
   <button id="download">download access log</button>
   <button id="downloadNode">download node samples</button>
@@ -92,7 +93,10 @@ const series = (entries) => entries.map(([name, values], i) => ({
 async function load() {
   const period = currentPeriod();
   const auth = token();
-  const query = "?period=" + encodeURIComponent(period);
+  // ?user=<client> makes a filtered view linkable; afterwards the select is the source.
+  const selectedUser = el("user").value || (params.get("user") || "");
+  const query = "?period=" + encodeURIComponent(period)
+    + (selectedUser ? "&user=" + encodeURIComponent(selectedUser) : "");
   const response = await fetch("/usage/report" + query, {
     headers: { Authorization: "Bearer " + auth },
   });
@@ -115,13 +119,23 @@ async function load() {
   const nodeIds = [...new Set(Object.keys(byNodeHour))].sort();
   const loadNodes = [...new Set(Object.values(loadByHour).flatMap((v) => Object.keys(v)))].sort();
 
+  const selected = data.users.selected || [];
   el("meta").textContent = [
     data.period,
     "requests " + data.requests.total,
     "consumed " + (data.consumed_ms.total / 3600000).toFixed(1) + " h",
     "nodes " + Object.keys(data.requests.by_node).length,
+    selected.length ? "user " + selected.join(", ") : "",
     data.period === "all" ? "all days merged into hour-of-day buckets" : "",
+    selected.length ? "node load and memory stay cluster-wide" : "",
   ].filter(Boolean).join(" \u00b7 ");
+
+  const userSelect = el("user");
+  const users = ["", ...(data.users.available || [])];
+  userSelect.innerHTML = users.map((name) => (
+    "<option value=\"" + esc(name) + "\">" + esc(name || "all users") + "</option>"
+  )).join("");
+  userSelect.value = users.includes(selectedUser) ? selectedUser : "";
 
   draw("nodeChart", line(series(nodeIds.map((node) => [
     node, hours.map((hour) => (byNodeHour[node] || {})[hour] || 0),
@@ -160,6 +174,7 @@ async function load() {
 }
 
 el("reload").onclick = load;
+el("user").onchange = load;
 async function downloadEvents(source, prefix) {
   const period = currentPeriod();
   const query = "?period=" + encodeURIComponent(period) + "&source=" + source;

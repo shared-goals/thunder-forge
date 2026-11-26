@@ -72,6 +72,9 @@ Expected keys:
 
 `usage report --json` returns a summary with:
 
+- `users.available` (every client identity seen in the period, regardless of the filter) and
+  `users.selected` (the applied `?user=` filter); API keys are never logged, so only the
+  client identity is ever exposed
 - `requests.total`
 - `requests.by_user`
 - `requests.by_node`
@@ -116,9 +119,13 @@ are anonymous and GET-only.
 | Path | Response |
 |---|---|
 | `GET /usage` | HTML dashboard rendering the report below; Chart.js is served from `/usage/assets/chart.umd.min.js`, not a CDN |
-| `GET /usage/report?period=<YYYY-MM-DD\|today\|all>` | `usage report --json` payload |
+| `GET /usage/report?period=<YYYY-MM-DD\|today\|all>[&user=<client>[,<client>]]` | `usage report --json` payload, optionally narrowed to authenticated client identities |
 | `GET /usage/events?period=...&source=access\|node-metrics` | matching JSONL lines (`source` defaults to `access`), `Content-Disposition: attachment`; `period=all` is refused with `400 period_too_broad` |
 | `GET /usage/assets/<file>` | vendored dashboard assets (`usage.html`, `chart.umd.min.js`); `404` for anything else |
+
+`?user=` accepts a client identity, repeated or comma-separated; it narrows requests, consumed time,
+latency and concurrency. Node load and model memory come from node snapshots, which have no client
+dimension, so they stay cluster-wide - the dashboard says so when a filter is active.
 
 `period` defaults to the edge host's local date. Authentication accepts only
 `Authorization: Bearer <token>`: a `?token=` query would be recorded by the Caddy/gost
