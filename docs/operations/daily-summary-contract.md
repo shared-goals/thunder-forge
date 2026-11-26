@@ -72,9 +72,10 @@ Expected keys:
 
 `usage report --json` returns a summary with:
 
-- `users.available` (every client identity seen in the period, regardless of the filter) and
-  `users.selected` (the applied `?user=` filter); API keys are never logged, so only the
-  client identity is ever exposed
+- `users.available` (every client identity seen in the period, regardless of the filter),
+  `users.selected` (the applied `?user=` filter) and `users.known` (every configured
+  `TF_USER_<NAME>` identity, so a client with no traffic today is still selectable). API keys
+  are never logged, so only the client identity is ever exposed
 - `requests.total`
 - `requests.by_user`
 - `requests.by_node`
@@ -111,8 +112,9 @@ data, and browser navigation cannot send an `Authorization` header), while
 Response codes on the data paths: `401 unauthorized` without a valid token, `400 invalid_period` for a
 malformed `period`, `400 invalid_source` for an unknown `source`, `400 period_too_broad` for `period=all`
 on `/usage/events`, `413 usage_events_too_large` / `413 usage_report_too_large` when the log exceeds 32 MiB
-(checked before the file is read), `405 method_not_allowed` for a non-GET request that carries a valid
-token, and `503` when the log is missing or unreadable. Authentication is checked before the method on the
+(checked before the file is read), and `503 usage_access_log_unavailable` when the access log is
+missing or unreadable for any period, `405 method_not_allowed` for a non-GET request that carries a valid
+token, and `503` when a log is missing or unreadable. Authentication is checked before the method on the
 data paths, so an unauthenticated request cannot confirm that they exist. `/usage` and `/usage/assets/*`
 are anonymous and GET-only.
 

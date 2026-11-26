@@ -201,6 +201,7 @@ def test_usage_page_is_anonymous_but_data_is_not(tmp_path: Path, get) -> None:
     assert status == 400
     assert json.loads(body) == {"error": "invalid_period"}
 
+
 def test_usage_page_uses_the_vendored_chart_asset(tmp_path: Path, get) -> None:
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
 
@@ -222,6 +223,7 @@ def test_usage_assets_are_hidden_and_not_traversable(tmp_path: Path, get) -> Non
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
     assert get(config, "/usage/assets/..%2Fedge.py")[0] == 404
     assert get(config, "/usage/assets/missing.js")[0] == 404
+
 
 def test_unknown_usage_paths_and_methods_stay_invisible(tmp_path: Path, get) -> None:
     disabled, _, _ = _edge_config(tmp_path, token=None)
@@ -256,9 +258,10 @@ def test_usage_report_survives_a_non_ascii_token(tmp_path: Path, get) -> None:
     # hmac.compare_digest raises TypeError on non-ASCII str, so it must compare bytes.
     assert get(config, "/usage/report?period=2026-06-02", token="\u00fcber-token")[0] == 401
 
+
 def test_usage_events_refuse_an_oversized_log_before_reading_it(tmp_path: Path, get, monkeypatch) -> None:
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
-    monkeypatch.setattr(edge, "USAGE_EVENTS_MAX_BYTES", 16)
+    monkeypatch.setattr(edge, "USAGE_LOG_MAX_BYTES", 16)
 
     status, _, body = get(config, "/usage/events?period=2026-06-02", token="admin-secret")
 
@@ -272,6 +275,7 @@ def test_usage_has_no_bare_assets_alias(tmp_path: Path, get) -> None:
     # Only the documented /usage and /usage/assets/<file> routes exist.
     status, _, _ = get(config, "/usage/assets", token="admin-secret")
     assert status == 404
+
 
 def test_usage_report_filters_by_user_without_exposing_keys(tmp_path: Path, get) -> None:
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
@@ -301,6 +305,7 @@ def test_usage_report_filters_by_user_without_exposing_keys(tmp_path: Path, get)
     assert unknown["requests"]["total"] == 0
     assert unknown["users"]["available"] == ["alice", "bob"]
 
+
 def test_usage_report_lists_configured_clients_without_traffic(tmp_path: Path, get) -> None:
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
     config.clients_by_key = {
@@ -315,3 +320,13 @@ def test_usage_report_lists_configured_clients_without_traffic(tmp_path: Path, g
     assert payload["users"]["available"] == ["alice", "bob"]
     # Keys themselves never leave the edge.
     assert "key-alice" not in json.dumps(payload)
+
+
+def test_usage_report_reports_a_missing_access_log(tmp_path: Path, get) -> None:
+    config, access_log, _ = _edge_config(tmp_path, token="admin-secret")
+    access_log.unlink()
+
+    status, _, body = get(config, "/usage/report?period=2026-06-02", token="admin-secret")
+
+    assert status == 503
+    assert json.loads(body) == {"error": "usage_access_log_unavailable"}

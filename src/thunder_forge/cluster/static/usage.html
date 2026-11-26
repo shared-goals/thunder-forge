@@ -94,11 +94,13 @@ const series = (entries) => entries.map(([name, values], i) => ({
   tension: 0.2,
 }));
 
+let pendingUser = params.get("user") || "";
+
 async function load() {
   const period = currentPeriod();
   const auth = token();
-  // ?user=<client> makes a filtered view linkable; afterwards the select is the source.
-  const selectedUser = el("user").value || (params.get("user") || "");
+  // ?user=<client> makes a filtered view linkable, and applies only to the first load.
+  const selectedUser = el("user").value || pendingUser;
   const query = "?period=" + encodeURIComponent(period)
     + (selectedUser ? "&user=" + encodeURIComponent(selectedUser) : "");
   const response = await fetch("/usage/report" + query, {
@@ -138,6 +140,7 @@ async function load() {
     "<option value=\"" + esc(name) + "\">" + esc(name || "all users") + "</option>"
   )).join("");
   userSelect.value = users.includes(selectedUser) ? selectedUser : "";
+  pendingUser = "";
 
   draw("nodeChart", line(series(nodeIds.map((node) => [
     node, hours.map((hour) => (byNodeHour[node] || {})[hour] || 0),

@@ -3673,6 +3673,8 @@ def usage_report(
         node_metrics_path=node_metrics_path,
         excluded_models=config.operations.usage.exclude_models,
         exclude_unauthenticated=config.operations.usage.exclude_unauthenticated,
+        # Same configured roster the HTTP report carries, so both views agree.
+        known_client_ids=sorted({client.client_id for client in build_edge_clients_from_env().values()}),
     )
 
     if json_output:

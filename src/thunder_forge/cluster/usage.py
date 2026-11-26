@@ -33,9 +33,9 @@ def _in_period(timestamp: datetime | None, period: str | None) -> bool:
     return timestamp is not None and timestamp.date().isoformat() == period
 
 
-def select_usage_events(access_log_path: Path, *, period: str | None = None) -> list[dict[str, object]]:
+def select_usage_events(log_path: Path, *, period: str | None = None) -> list[dict[str, object]]:
     """Return raw log records for one period, preserving log order."""
-    records, _ = _load_jsonl_lines(access_log_path)
+    records, _ = _load_jsonl_lines(log_path)
     return [payload for payload in records if _in_period(_parse_timestamp(payload.get("timestamp")), period)]
 
 
@@ -204,6 +204,7 @@ class DailyUsageSummary:
     node_model_memory_sampled_at: dict[str, str] = field(default_factory=dict)
     available_users: list[str] = field(default_factory=list)
     selected_users: list[str] = field(default_factory=list)
+    known_users: list[str] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -229,6 +230,7 @@ class DailyUsageSummary:
             "users": {
                 "available": self.available_users,
                 "selected": self.selected_users,
+                "known": self.known_users,
             },
             "latency_ms": {
                 "by_hour": self.latency_ms_by_hour,
@@ -255,6 +257,7 @@ def summarize_daily_usage(
     excluded_models: list[str] | set[str] | None = None,
     exclude_unauthenticated: bool = False,
     client_ids: list[str] | set[str] | None = None,
+    known_client_ids: list[str] | None = None,
 ) -> DailyUsageSummary:
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
     if period == "all":
@@ -485,4 +488,5 @@ def summarize_daily_usage(
         node_model_memory_sampled_at=dict(sorted(node_model_memory_sampled_at.items())),
         available_users=sorted(seen_clients),
         selected_users=sorted(selected_clients or []),
+        known_users=sorted(set(known_client_ids or [])),
     )

@@ -729,7 +729,7 @@ def build_usage_response(
         return _json_response(404, {"error": "not_found"})
     # Authorize before anything else on the data paths, so a wrong method cannot
     # confirm that they exist.
-    if authorize_usage_request(config, headers) is not None:
+    if not usage_request_authorized(config, headers):
         return _json_response(401, {"error": "unauthorized"})
     if method != "GET":
         return _method_not_allowed()
@@ -771,10 +771,12 @@ def _usage_report_response(
     period: str,
     client_ids: list[str],
 ) -> EdgeProxyResponse:
-    if period == "all" and (size := _usage_log_size(config, config.usage_access_log_path)) is not None:
-        if size > USAGE_EVENTS_MAX_BYTES:
-            # Aggregating every retained day reads the whole file into memory.
-            return _json_response(413, {"error": "usage_report_too_large"})
+    size = _usage_log_size(config, config.usage_access_log_path)
+    if size is None:
+        return _json_response(503, {"error": "usage_access_log_unavailable"})
+    if period == "all" and size > USAGE_LOG_MAX_BYTES:
+        # Aggregating every retained day reads the whole file into memory.
+        return _json_response(413, {"error": "usage_report_too_large"})
     try:
         return _json_response(
             200,
@@ -802,7 +804,7 @@ def _usage_events_response(
     size = _usage_log_size(config, log_path)
     if size is None:
         return _json_response(503, {"error": "usage_unavailable: log is unreadable"})
-    if size > USAGE_EVENTS_MAX_BYTES:
+    if size > USAGE_LOG_MAX_BYTES:
         # The body is built in memory, so refuse before reading the file.
         return _json_response(413, {"error": "usage_events_too_large"})
     try:
@@ -838,7 +840,7 @@ USAGE_ASSET_CONTENT_TYPES = {
     ".js": "application/javascript",
     ".txt": "text/plain; charset=utf-8",
 }
-USAGE_EVENTS_MAX_BYTES = 32 * 1024 * 1024
+USAGE_LOG_MAX_BYTES = 32 * 1024 * 1024
 USAGE_EVENT_SOURCES = {
     "access": "tf-edge-access",
     "node-metrics": "tf-node-metrics",
@@ -847,21 +849,21 @@ USAGE_EVENT_SOURCES = {
 
 def usage_endpoints_enabled(config: EdgeProxyConfig) -> bool:
     """Usage endpoints stay invisible until an admin token is configured."""
-    return bool((config.usage_admin_token or "").strip())
+    return bool(config.usage_admin_token)
 
 
-def authorize_usage_request(config: EdgeProxyConfig, headers: dict[str, str]) -> int | None:
-    """Return None when the usage request is allowed, otherwise the status code to send.
+def usage_request_authorized(config: EdgeProxyConfig, headers: dict[str, str]) -> bool:
+    """True when the request carries the configured admin token.
 
-    Callers check `usage_endpoints_enabled` first, so this only answers 401 or None.
-    The token is accepted only as a bearer header: a query token would end up in proxy
-    access logs, browser history, and pasted links.
+    Callers check `usage_endpoints_enabled` first. The token is accepted only as a bearer
+    header: a query token would end up in proxy access logs, browser history, and links.
     """
     provided = _bearer_token(_header_value(headers, "Authorization"))
-    if not provided:
-        return 401
+    expected = config.usage_admin_token or ""
+    if not provided or not expected:
+        return False
     # compare_digest rejects non-ASCII str arguments, so compare bytes.
-    return None if hmac.compare_digest(provided.encode(), (config.usage_admin_token or "").strip().encode()) else 401
+    return hmac.compare_digest(provided.encode(), expected.encode())
 
 
 def build_usage_asset_response(name: str) -> EdgeProxyResponse:
@@ -895,13 +897,10 @@ def build_usage_report_payload(
         excluded_models=usage_settings.exclude_models,
         exclude_unauthenticated=usage_settings.exclude_unauthenticated,
         client_ids=client_ids,
-    )
-    payload = summary.to_json_dict()
-    users = payload.get("users")
-    if isinstance(users, dict):
         # Configured identities, whether or not they sent anything in this period.
-        users["known"] = sorted({client.client_id for client in config.clients_by_key.values()})
-    return payload
+        known_client_ids=sorted({client.client_id for client in config.clients_by_key.values()}),
+    )
+    return summary.to_json_dict()
 
 
 def _extract_version_token(raw_output: str) -> str:
