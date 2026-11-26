@@ -168,6 +168,10 @@ Trade-offs:
 - Keep tracing off by default.
 - Prefer structured JSON logs for accounting before adding a database.
 - Do not add PostgreSQL, a web UI, dynamic key management, or quota products until file/log-backed accounting proves insufficient.
+  - Exception agreed 2026-11-26 at the operator's request: `GET /usage` on the TF edge serves one read-only
+    HTML page over the aggregates already derived from `logs/tf-edge-access.jsonl` and
+    `logs/tf-node-metrics.jsonl`. It adds no store, no writes, and no charting backend; charts render in the
+    browser from the same JSON that `usage report --json` returns.
 - Smoke direct oMLX first, then Olla, then TF edge, then Caddy routing.
 
 ## Acceptance criteria

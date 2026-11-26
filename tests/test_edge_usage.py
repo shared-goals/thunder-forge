@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from thunder_forge.cluster import edge
+from thunder_forge.cluster.config import OperationConfig
 
 
 def _edge_config(tmp_path: Path, *, token: str | None) -> tuple[edge.EdgeProxyConfig, Path, Path]:
@@ -72,6 +73,7 @@ def _edge_config(tmp_path: Path, *, token: str | None) -> tuple[edge.EdgeProxyCo
     config = edge.EdgeProxyConfig(
         olla_base_url="http://olla.test",
         clients_by_key={},
+        cluster_config=SimpleNamespace(operations=OperationConfig()),
         usage_admin_token=token,
         usage_access_log_path=access_log,
         usage_node_metrics_path=node_metrics,
@@ -131,10 +133,10 @@ def get(monkeypatch):
 def test_usage_endpoints_stay_hidden_without_admin_token(tmp_path: Path, get) -> None:
     config, _, _ = _edge_config(tmp_path, token=None)
 
-    status, _, body = get(config, "/usage/report?period=2026-06-02")
-
-    assert status == 404
-    assert json.loads(body) == {"error": "not_found"}
+    for path in ("/usage", "/usage/report?period=2026-06-02", "/usage/events?period=2026-06-02"):
+        status, _, body = get(config, path)
+        assert status == 404
+        assert json.loads(body) == {"error": "not_found"}
 
 
 def test_usage_endpoints_reject_missing_and_wrong_token(tmp_path: Path, get) -> None:
@@ -181,13 +183,17 @@ def test_usage_events_download_is_period_scoped(tmp_path: Path, get) -> None:
     assert [record["client_id"] for record in records] == ["alice", "bob"]
 
 
-def test_usage_page_and_period_validation(tmp_path: Path, get) -> None:
+def test_usage_page_is_anonymous_but_data_is_not(tmp_path: Path, get) -> None:
     config, _, _ = _edge_config(tmp_path, token="admin-secret")
 
-    status, head, body = get(config, "/usage", token="admin-secret")
+    # A browser navigation cannot send an Authorization header, so the page itself is public.
+    status, head, body = get(config, "/usage")
     assert status == 200
     assert "text/html" in head
     assert "Thunder Forge usage" in body
+
+    assert get(config, "/usage/report?period=2026-06-02")[0] == 401
+    assert get(config, "/usage/events?period=2026-06-02")[0] == 401
 
     status, _, body = get(config, "/usage/report?period=02-06-2026", token="admin-secret")
     assert status == 400

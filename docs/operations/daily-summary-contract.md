@@ -100,7 +100,9 @@ Expected keys:
 
 The edge serves the same aggregates read-only when `TF_EDGE_ADMIN_TOKEN` is set in the
 edge environment. Without the token all three paths answer `404 not_found`, so the
-endpoints stay invisible; a wrong or missing token answers `401 unauthorized`.
+endpoints stay invisible. With the token, `GET /usage` is anonymous (the page holds no
+data, and browser navigation cannot send an `Authorization` header), while
+`/usage/report` and `/usage/events` answer `401 unauthorized` to a wrong or missing token.
 
 | Path | Response |
 |---|---|

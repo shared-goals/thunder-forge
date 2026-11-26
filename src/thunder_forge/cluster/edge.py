@@ -692,12 +692,6 @@ def _catalog_alias_ids(model_catalog: list[EdgeModelCatalogEntry]) -> set[str]:
     return {entry.id for entry in model_catalog}
 
 
-def _as_non_negative_int(raw: object) -> int | None:
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return None
-    return raw if raw >= 0 else None
-
-
 def _requests_streaming_response(method: str, body: bytes) -> bool:
     if method.upper() != "POST":
         return False
@@ -754,13 +748,15 @@ def build_usage_report_payload(*, config: EdgeProxyConfig, period: str) -> dict[
     """Aggregate the edge logs into the payload the usage dashboard renders."""
     if config.usage_access_log_path is None:
         raise RuntimeError("usage access log is not configured")
-    usage_settings = getattr(config.cluster_config.operations, "usage", None) if config.cluster_config else None
+    if config.cluster_config is None:
+        raise RuntimeError("usage report requires a cluster config")
+    usage_settings = config.cluster_config.operations.usage
     summary = summarize_daily_usage(
         config.usage_access_log_path,
-        period=None if period == "all" else period,
+        period=period,
         node_metrics_path=config.usage_node_metrics_path,
-        excluded_models=getattr(usage_settings, "exclude_models", None),
-        exclude_unauthenticated=bool(getattr(usage_settings, "exclude_unauthenticated", False)),
+        excluded_models=usage_settings.exclude_models,
+        exclude_unauthenticated=usage_settings.exclude_unauthenticated,
     )
     return summary.to_json_dict()
 
@@ -816,6 +812,7 @@ const colors = ["#4c9aff", "#7ee787", "#ffa657", "#d2a8ff", "#ff7b72", "#56d4dd"
 const charts = {};
 
 const token = () => localStorage.getItem(storeKey) || prompt("TF admin token") || "";
+const esc = (value) => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 function draw(id, config) {
   if (charts[id]) charts[id].destroy();
@@ -900,7 +897,7 @@ async function load() {
     return;
   }
   const head = "<tr><th>node</th><th>model</th><th>GiB</th><th>idle s</th></tr>";
-  const body = rows.map((row) => "<tr><td>" + row.join("</td><td>") + "</td></tr>").join("");
+  const body = rows.map((row) => "<tr><td>" + row.map(esc).join("</td><td>") + "</td></tr>").join("");
   el("memory").innerHTML = "<table>" + head + body + "</table>";
 }
 
@@ -1704,7 +1701,18 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 status_code = 200 if payload.get("ok") else 503
                 self._send_edge_response(_json_response(status_code, payload))
                 return
-            if normalized_path in ("/usage", "/usage/report", "/usage/events"):
+            if normalized_path == "/usage":
+                if self.command != "GET":
+                    self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
+                    return
+                # The page carries no data; only its fetches need the admin token, and a
+                # browser navigation cannot send an Authorization header.
+                if not (config.usage_admin_token or "").strip():
+                    self._send_edge_response(_json_response(404, {"error": "not_found"}))
+                    return
+                self._send_edge_response(_html_response(200, USAGE_PAGE_HTML))
+                return
+            if normalized_path in ("/usage/report", "/usage/events"):
                 if self.command != "GET":
                     self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
                     return
@@ -1724,7 +1732,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         self._send_edge_response(
                             _json_response(200, build_usage_report_payload(config=config, period=period))
                         )
-                    elif normalized_path == "/usage/events":
+                    else:
                         if config.usage_access_log_path is None:
                             raise RuntimeError("usage access log is not configured")
                         records = select_usage_events(config.usage_access_log_path, period=period)
@@ -1732,8 +1740,6 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         self._send_edge_response(
                             _download_response(200, body, filename=f"tf-edge-access-{period}.jsonl")
                         )
-                    else:
-                        self._send_edge_response(_html_response(200, USAGE_PAGE_HTML))
                 except (OSError, RuntimeError, ValueError) as exc:
                     self._send_edge_response(_json_response(503, {"error": f"usage_unavailable: {exc}"}))
                 return
