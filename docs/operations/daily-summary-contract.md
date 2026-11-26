@@ -108,8 +108,9 @@ endpoints stay invisible; a wrong or missing token answers `401 unauthorized`.
 | `GET /usage/report?period=<YYYY-MM-DD\|today\|all>` | `usage report --json` payload |
 | `GET /usage/events?period=...` | matching `tf-edge-access.jsonl` lines, `Content-Disposition: attachment` |
 
-`period` defaults to the edge host's local date. Authentication accepts
-`Authorization: Bearer <token>` or, for browser links, `?token=<token>`.
+`period` defaults to the edge host's local date. Authentication accepts only
+`Authorization: Bearer <token>`: a `?token=` query would be recorded by the Caddy/gost
+access logs, browser history, and any pasted link.
 Aggregation honours `operations.usage.exclude_models` and
 `operations.usage.exclude_unauthenticated`, like the CLI.
 

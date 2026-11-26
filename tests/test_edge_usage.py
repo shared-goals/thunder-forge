@@ -142,6 +142,8 @@ def test_usage_endpoints_reject_missing_and_wrong_token(tmp_path: Path, get) -> 
 
     assert get(config, "/usage/report?period=2026-06-02")[0] == 401
     assert get(config, "/usage/report?period=2026-06-02", token="wrong")[0] == 401
+    # A query token would leak into proxy logs, so it is not accepted at all.
+    assert get(config, "/usage/report?period=2026-06-02&token=admin-secret")[0] == 401
 
 
 def test_usage_report_returns_latency_concurrency_and_node_metrics(tmp_path: Path, get) -> None:

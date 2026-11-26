@@ -735,23 +735,16 @@ def _download_response(status_code: int, body: str, *, filename: str) -> EdgePro
 USAGE_TOKEN_ENV = "TF_EDGE_ADMIN_TOKEN"
 
 
-def _usage_token(headers: dict[str, str], query: dict[str, list[str]]) -> str:
-    token = _bearer_token(_header_value(headers, "Authorization"))
-    if token:
-        return token
-    return (query.get("token") or [""])[0].strip()
+def authorize_usage_request(config: EdgeProxyConfig, headers: dict[str, str]) -> int | None:
+    """Return None when the usage request is allowed, otherwise the status code to send.
 
-
-def authorize_usage_request(
-    config: EdgeProxyConfig,
-    headers: dict[str, str],
-    query: dict[str, list[str]],
-) -> int | None:
-    """Return None when the usage request is allowed, otherwise the status code to send."""
+    The token is accepted only as a bearer header: a query token would end up in proxy
+    access logs, browser history, and pasted links.
+    """
     expected = (config.usage_admin_token or "").strip()
     if not expected:
         return 404
-    provided = _usage_token(headers, query)
+    provided = _bearer_token(_header_value(headers, "Authorization"))
     if not provided:
         return 401
     return None if hmac.compare_digest(provided, expected) else 401
@@ -804,7 +797,7 @@ USAGE_PAGE_HTML = """<!doctype html>
 <div class="bar">
   <input id="period" size="12" placeholder="YYYY-MM-DD / all">
   <button id="reload">Load</button>
-  <a class="muted" id="download" href="#">download raw events (ndjson)</a>
+  <button id="download">download raw events (ndjson)</button>
   <button id="forget" title="Drop the stored token">sign out</button>
 </div>
 <div class="grid">
@@ -821,11 +814,6 @@ const params = new URLSearchParams(location.search);
 const el = (id) => document.getElementById(id);
 const colors = ["#4c9aff", "#7ee787", "#ffa657", "#d2a8ff", "#ff7b72", "#56d4dd"];
 const charts = {};
-
-if (params.get("token")) {
-  localStorage.setItem(storeKey, params.get("token"));
-  history.replaceState({}, "", location.pathname);
-}
 
 const token = () => localStorage.getItem(storeKey) || prompt("TF admin token") || "";
 
@@ -859,7 +847,6 @@ async function load() {
   const period = el("period").value.trim() || "today";
   const auth = token();
   const query = "?period=" + encodeURIComponent(period);
-  el("download").href = "/usage/events" + query + "&token=" + encodeURIComponent(auth);
   const response = await fetch("/usage/report" + query, {
     headers: { Authorization: "Bearer " + auth },
   });
@@ -918,6 +905,21 @@ async function load() {
 }
 
 el("reload").onclick = load;
+el("download").onclick = async () => {
+  const period = el("period").value.trim() || "today";
+  const response = await fetch("/usage/events?period=" + encodeURIComponent(period), {
+    headers: { Authorization: "Bearer " + token() },
+  });
+  if (!response.ok) {
+    el("meta").innerHTML = "<span class=error>HTTP " + response.status + "</span>";
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(await response.blob());
+  link.download = "tf-edge-access-" + period + ".jsonl";
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
 el("forget").onclick = () => { localStorage.removeItem(storeKey); location.reload(); };
 const initial = params.get("period");
 if (initial) el("period").value = initial;
@@ -1707,7 +1709,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
                     return
                 query = parse_qs(urlsplit(self.path).query)
-                denied_status = authorize_usage_request(config, dict(self.headers.items()), query)
+                denied_status = authorize_usage_request(config, dict(self.headers.items()))
                 if denied_status is not None:
                     error = "not_found" if denied_status == 404 else "unauthorized"
                     self._send_edge_response(_json_response(denied_status, {"error": error}))
