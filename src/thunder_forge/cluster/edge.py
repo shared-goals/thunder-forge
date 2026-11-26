@@ -715,6 +715,10 @@ def _html_response(status_code: int, body: str) -> EdgeProxyResponse:
     )
 
 
+def _bytes_response(status_code: int, body: bytes, *, content_type: str) -> EdgeProxyResponse:
+    return EdgeProxyResponse(status_code=status_code, headers={"Content-Type": content_type}, body=body)
+
+
 def _download_response(status_code: int, body: str, *, filename: str) -> EdgeProxyResponse:
     return EdgeProxyResponse(
         status_code=status_code,
@@ -727,6 +731,7 @@ def _download_response(status_code: int, body: str, *, filename: str) -> EdgePro
 
 
 USAGE_TOKEN_ENV = "TF_EDGE_ADMIN_TOKEN"
+USAGE_ASSETS_DIR = Path(__file__).resolve().parent / "static"
 
 
 def authorize_usage_request(config: EdgeProxyConfig, headers: dict[str, str]) -> int | None:
@@ -766,7 +771,7 @@ USAGE_PAGE_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>Thunder Forge usage</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/usage/assets/chart.umd.min.js"></script>
 <style>
   body { background:#14161a; color:#e8eaed; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
          margin:0; padding:24px; }
@@ -1700,6 +1705,20 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     return
                 status_code = 200 if payload.get("ok") else 503
                 self._send_edge_response(_json_response(status_code, payload))
+                return
+            if normalized_path.startswith("/usage/assets/"):
+                name = normalized_path.removeprefix("/usage/assets/")
+                asset = USAGE_ASSETS_DIR / name
+                if (
+                    self.command != "GET"
+                    or not (config.usage_admin_token or "").strip()
+                    or name != asset.name
+                    or not asset.is_file()
+                ):
+                    self._send_edge_response(_json_response(404, {"error": "not_found"}))
+                    return
+                content_type = "application/javascript" if asset.suffix == ".js" else "text/plain"
+                self._send_edge_response(_bytes_response(200, asset.read_bytes(), content_type=content_type))
                 return
             if normalized_path == "/usage":
                 if self.command != "GET":

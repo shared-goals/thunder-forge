@@ -131,9 +131,13 @@ def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
 
 
 def _as_non_negative_int(raw: object) -> int | None:
-    if isinstance(raw, bool) or not isinstance(raw, int):
+    """Accept ints and finite floats; oMLX reports sizes as either."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return None
-    return raw if raw >= 0 else None
+    if isinstance(raw, float) and not math.isfinite(raw):
+        return None
+    value = int(raw)
+    return value if value >= 0 else None
 
 
 def _ordered_list_map(values: dict[str, list[str]]) -> dict[str, list[str]]:
@@ -415,11 +419,14 @@ def summarize_daily_usage(
                         "actual_size": actual_size,
                         "idle_seconds": idle_seconds,
                     }
-                if memory_per_node:
-                    previous_memory_timestamp = latest_node_memory_timestamp.get(node_id)
-                    if previous_memory_timestamp is None or timestamp is None or timestamp >= previous_memory_timestamp:
+                previous_memory_timestamp = latest_node_memory_timestamp.get(node_id)
+                if previous_memory_timestamp is None or timestamp is None or timestamp >= previous_memory_timestamp:
+                    # A newer sample with nothing loaded must clear the stale footprint.
+                    if memory_per_node:
                         node_model_memory[node_id] = dict(sorted(memory_per_node.items()))
-                        latest_node_memory_timestamp[node_id] = timestamp
+                    else:
+                        node_model_memory.pop(node_id, None)
+                    latest_node_memory_timestamp[node_id] = timestamp
 
     node_load_by_hour: dict[str, dict[str, dict[str, int]]] = {
         hour: {

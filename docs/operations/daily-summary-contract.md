@@ -106,9 +106,10 @@ data, and browser navigation cannot send an `Authorization` header), while
 
 | Path | Response |
 |---|---|
-| `GET /usage` | HTML dashboard (Chart.js from CDN) rendering the report below |
+| `GET /usage` | HTML dashboard rendering the report below; Chart.js is served from `/usage/assets/chart.umd.min.js`, not a CDN |
 | `GET /usage/report?period=<YYYY-MM-DD\|today\|all>` | `usage report --json` payload |
 | `GET /usage/events?period=...` | matching `tf-edge-access.jsonl` lines, `Content-Disposition: attachment` |
+| `GET /usage/assets/<file>` | vendored dashboard assets (`chart.umd.min.js`); `404` for anything else |
 
 `period` defaults to the edge host's local date. Authentication accepts only
 `Authorization: Bearer <token>`: a `?token=` query would be recorded by the Caddy/gost

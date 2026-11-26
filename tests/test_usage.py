@@ -236,3 +236,54 @@ def test_resolve_usage_period_and_select_usage_events(tmp_path: Path) -> None:
     selected = select_usage_events(access_log, period="2026-06-02")
     assert [record["client_id"] for record in selected] == ["alice"]
     assert len(select_usage_events(access_log, period="all")) == 2
+
+
+def test_summarize_daily_usage_accepts_float_sizes_and_clears_unloaded_nodes(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text("")
+    node_metrics = tmp_path / "tf-node-metrics.jsonl"
+    base = {"health_ok": True, "models_ok": True, "status_ok": True, "errors": []}
+    node_metrics.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        **base,
+                        "timestamp": "2026-06-02T08:00:00+00:00",
+                        "node_id": "msm1",
+                        "hot_loaded_models": ["agent"],
+                        "hot_loaded_count": 1,
+                        # oMLX may report the footprint as a float.
+                        "loaded_models": [{"id": "agent", "actual_size": 1073741824.9, "idle_seconds": 5}],
+                    }
+                ),
+                json.dumps(
+                    {
+                        **base,
+                        "timestamp": "2026-06-02T08:00:00+00:00",
+                        "node_id": "msm2",
+                        "hot_loaded_models": ["agent"],
+                        "hot_loaded_count": 1,
+                        "loaded_models": [{"id": "agent", "actual_size": 2048, "idle_seconds": 1}],
+                    }
+                ),
+                json.dumps(
+                    {
+                        **base,
+                        "timestamp": "2026-06-02T09:00:00+00:00",
+                        "node_id": "msm2",
+                        "hot_loaded_models": [],
+                        "hot_loaded_count": 0,
+                        "loaded_models": [],
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", node_metrics_path=node_metrics)
+
+    assert summary.node_model_memory["msm1"]["agent"]["actual_size"] == 1073741824
+    # The later msm2 sample has nothing loaded, so its footprint must not survive.
+    assert "msm2" not in summary.node_model_memory

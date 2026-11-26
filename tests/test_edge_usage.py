@@ -198,3 +198,25 @@ def test_usage_page_is_anonymous_but_data_is_not(tmp_path: Path, get) -> None:
     status, _, body = get(config, "/usage/report?period=02-06-2026", token="admin-secret")
     assert status == 400
     assert json.loads(body) == {"error": "invalid_period"}
+
+def test_usage_page_uses_the_vendored_chart_asset(tmp_path: Path, get) -> None:
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+
+    status, _, body = get(config, "/usage")
+    assert status == 200
+    assert "cdn.jsdelivr" not in body
+    assert 'src="/usage/assets/chart.umd.min.js"' in body
+
+    status, head, script = get(config, "/usage/assets/chart.umd.min.js")
+    assert status == 200
+    assert "application/javascript" in head
+    assert "Chart" in script
+
+
+def test_usage_assets_are_hidden_and_not_traversable(tmp_path: Path, get) -> None:
+    hidden, _, _ = _edge_config(tmp_path, token=None)
+    assert get(hidden, "/usage/assets/chart.umd.min.js")[0] == 404
+
+    config, _, _ = _edge_config(tmp_path, token="admin-secret")
+    assert get(config, "/usage/assets/..%2Fedge.py")[0] == 404
+    assert get(config, "/usage/assets/missing.js")[0] == 404

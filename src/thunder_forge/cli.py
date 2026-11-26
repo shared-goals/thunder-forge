@@ -48,6 +48,7 @@ from thunder_forge.cluster.bootstrap import (
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig
 from thunder_forge.cluster.edge import (
     EDGE_USER_PREFIX,
+    USAGE_TOKEN_ENV,
     EdgeInspectorConfig,
     EdgeModelCatalogEntry,
     EdgeProxyConfig,
@@ -107,7 +108,12 @@ from thunder_forge.cluster.remote_cache import (
 )
 from thunder_forge.cluster.ssh import ssh_run
 from thunder_forge.cluster.status import normalize_model_statuses
-from thunder_forge.cluster.usage import _parse_timestamp, extract_hot_loaded_models, summarize_daily_usage
+from thunder_forge.cluster.usage import (
+    _parse_timestamp,
+    extract_hot_loaded_models,
+    resolve_usage_period,
+    summarize_daily_usage,
+)
 
 app = typer.Typer(
     name="thunder-forge",
@@ -338,17 +344,20 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         hot_loaded_runtime_ids = extract_hot_loaded_models(health.model_statuses)
         hot_loaded_models = map_runtime_models_to_aliases(config, node, hot_loaded_runtime_ids)
         loaded_models: list[dict[str, object]] = []
+        sampled_at = time.time()
         for runtime_id, status in sorted(health.model_statuses.items()):
             if not isinstance(status, dict) or status.get("loaded") is not True:
                 continue
             aliases = map_runtime_models_to_aliases(config, node, [runtime_id])
-            loaded_models.append(
-                {
-                    "id": aliases[0] if aliases else runtime_id,
-                    "actual_size": status.get("actual_size", 0),
-                    "idle_seconds": int(status.get("idle_seconds") or 0),
-                }
-            )
+            entry: dict[str, object] = {"id": aliases[0] if aliases else runtime_id}
+            actual_size = status.get("actual_size")
+            if isinstance(actual_size, (int, float)) and not isinstance(actual_size, bool):
+                entry["actual_size"] = int(actual_size)
+            # oMLX reports last_access; idle time is derived, never sent by the node.
+            last_access = status.get("last_access")
+            if isinstance(last_access, (int, float)) and not isinstance(last_access, bool):
+                entry["idle_seconds"] = max(0, int(sampled_at - float(last_access)))
+            loaded_models.append(entry)
         snapshots.append(
             {
                 "timestamp": datetime.now().astimezone().isoformat(),
@@ -2416,10 +2425,6 @@ def _print_cluster_status_payload(
                 for error in errors:
                     typer.echo(f"Error: {node.get('name', 'node')}: {error}", err=True)
 
-def _usage_report_default_period() -> str:
-    return datetime.now().date().isoformat()
-
-
 def _extract_version_token(raw_output: str) -> str:
     semver_pattern = re.compile(r"^v?\d+(?:\.\d+)*(?:\.[A-Za-z0-9]+)*(?:[-+][A-Za-z0-9.-]+)?$")
     fallback = ""
@@ -3656,8 +3661,11 @@ def usage_report(
     config, repo_root = _load_config()
     access_log_path = _edge_access_log_path(repo_root, config, access_log)
     node_metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
-    if period is None:
-        period = _usage_report_default_period()
+    try:
+        period = resolve_usage_period(period or "")
+    except ValueError:
+        typer.echo(f"Error: invalid period {period!r}, expected YYYY-MM-DD or all", err=True)
+        raise typer.Exit(1)
     summary = summarize_daily_usage(
         access_log_path,
         period=period,
@@ -3979,7 +3987,7 @@ def edge_serve(
             handle.write(f"{line}\n")
 
     client_ids = sorted({client.client_id for client in clients_by_key.values()})
-    usage_admin_token = os.environ.get("TF_EDGE_ADMIN_TOKEN", "").strip() or None
+    usage_admin_token = os.environ.get(USAGE_TOKEN_ENV, "").strip() or None
 
     edge_proxy_config = EdgeProxyConfig(
         olla_base_url=resolved_olla_base_url,
@@ -4008,7 +4016,7 @@ def edge_serve(
     if usage_admin_token:
         typer.echo("usage_endpoints: enabled paths=/usage,/usage/report,/usage/events")
     else:
-        typer.echo("usage_endpoints: disabled (set TF_EDGE_ADMIN_TOKEN to enable)")
+        typer.echo(f"usage_endpoints: disabled (set {USAGE_TOKEN_ENV} to enable)")
     if edge_proxy_config.inspector is not None and edge_proxy_config.inspector.enabled:
         typer.echo(f"edge_inspector: enabled output_dir={edge_proxy_config.inspector.output_dir}")
     else:
