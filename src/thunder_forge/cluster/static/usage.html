@@ -190,8 +190,10 @@ async function load() {
       },
     },
   });
+  // A page newer than the running edge sees no cache section; name the TTL only when it is known.
   el("coldNote").textContent = "cold share of edge-log requests, not a count \u00b7 cold: no session id, "
-    + "first turn, or idle gap > " + (cache.ttl_seconds ?? "?") + " s \u00b7 node load and memory stay cluster-wide";
+    + "first turn, or idle gap" + (cache.ttl_seconds ? " > " + cache.ttl_seconds + " s" : "")
+    + " \u00b7 node load and memory stay cluster-wide";
 
   draw("loadChart", line(series(loadNodes.map((node) => [
     node, hours.map((hour) => ((loadByHour[hour] || {})[node] || {}).active_max || 0),
