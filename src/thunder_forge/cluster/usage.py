@@ -549,11 +549,14 @@ def summarize_daily_usage(
         # may start mid-day; only that day can be silently truncated.
         partial=bool(
             period
-            and oldest_day == period
-            and first_record_at is not None
-            # Minute granularity on purpose: a cut landing inside the first minute is the
-            # only truncation retention can produce that close to midnight.
-            and (first_record_at.hour, first_record_at.minute) != (0, 0)
+            # A period wholly older than the retained log is missing, not empty.
+            and ((oldest_day is not None and period < oldest_day) or (
+                oldest_day == period
+                and first_record_at is not None
+                # Minute granularity on purpose: a cut landing inside the first minute is the
+                # only truncation retention can produce that close to midnight.
+                and (first_record_at.hour, first_record_at.minute) != (0, 0)
+            ))
         ),
         coverage_first_record_at=first_record_at.isoformat() if first_record_at is not None else None,
         coverage_last_record_at=last_record_at.isoformat() if last_record_at is not None else None,

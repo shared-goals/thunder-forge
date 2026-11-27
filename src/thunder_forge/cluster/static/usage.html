@@ -120,7 +120,8 @@ async function load() {
   // Node samples exist for hours with no edge traffic, so the axis is the union.
   const hours = [...new Set([...Object.keys(byHour), ...Object.keys(loadByHour)])].sort();
   const memory = nodeMetrics.model_memory || {};
-  const nodeIds = [...new Set(Object.keys(byNodeHour))].sort();
+  // "unknown" is the residual attribution bucket, not a node to draw a series for.
+  const nodeIds = [...new Set(Object.keys(byNodeHour))].filter((node) => node !== "unknown").sort();
   const loadNodes = [...new Set(Object.values(loadByHour).flatMap((v) => Object.keys(v)))].sort();
 
   const selected = data.users.selected || [];

@@ -573,3 +573,20 @@ def test_summary_counts_a_record_without_a_timestamp_in_the_unknown_hour(tmp_pat
     assert summary.requests_by_node_hour["msm1"]["unknown"] == 1
 
 
+
+
+def test_summary_flags_a_period_older_than_the_retained_log(tmp_path: Path) -> None:
+    """A day entirely outside retention is missing, not a quiet day with zero traffic."""
+    access_log = tmp_path / "access.jsonl"
+    access_log.write_text(
+        json.dumps({"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "memory",
+                    "latency_ms": 5, "olla_endpoint": "msm1-omlx-live", "status_code": 200}) + "\n"
+    )
+
+    stale = summarize_daily_usage(access_log, period="2026-05-01", excluded_models=[])
+    present = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=[])
+
+    assert stale.requests_total == 0
+    assert stale.partial is True
+    assert stale.coverage_first_record_at is None
+    assert present.partial is False

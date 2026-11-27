@@ -115,9 +115,9 @@ Expected keys:
 - `coverage.first_record_at` / `coverage.last_record_at` (first and last timestamp among the
   retained records of the period, `null` when the period holds none; they ignore the `?user=`
   filter and describe the log, not the filtered view)
-- `partial` (true only when the period is the oldest day present in the log **and** its first
-  record starts after 00:00:59 — minute granularity, so a cut inside the first minute is not
-  flagged. Retention cuts the file at an absolute `now - N days` instant, so the
+- `partial` (true when the requested period is older than the oldest day in the log — the period
+  is missing, not empty — or when it is the oldest day **and** its first record starts after
+  00:00:59; minute granularity, so a cut inside the first minute is not flagged) Retention cuts the file at an absolute `now - N days` instant, so the
   oldest day is the only one it can truncate. The flag is a warning, not proof: an idle morning
   looks the same as a truncated morning)
 - `invalid_lines`
