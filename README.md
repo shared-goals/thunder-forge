@@ -428,14 +428,16 @@ Failure and coverage signals in the same summary:
 - `requests.by_status`: histogram of `status_code` responses, and `failures_total` for `status_code >= 400`
 - residual buckets keep the breakdowns honest: `requests.by_node["unknown"]` (no endpoint attribution),
   `requests.by_model["unknown"]` (empty model, for example `/v1/models`), and
-  `requests.unauthenticated` (records carrying the unauthenticated marker)
+  `requests.unauthenticated` (records carrying the unauthenticated marker, non-zero only while
+  `operations.usage.exclude_unauthenticated` is off)
+- every breakdown sums to `requests.total` except the model ones, which still omit models listed in
+  `operations.usage.exclude_models` by design
 - `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, so an idle hour reads
-  as a zero instead of vanishing from the day
+  as a zero instead of vanishing from the day; a record with no parsable timestamp lands in an extra
+  `"unknown"` bucket instead of being dropped
 - `coverage.first_record_at` / `coverage.last_record_at` and `partial: true` when the report period
-  is the oldest day in the log and its first record starts after midnight, which is the day retention
-  can truncate
-- a missing or mistyped access log is an error (`exit 2`, naming the resolved path), never a
-  green zero-request day
+  is the oldest day in the log and its first record starts after the first minute of that day
+  (minute granularity), which is the day retention can truncate
 
 ### Minimal Metric Strategy
 

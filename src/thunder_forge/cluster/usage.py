@@ -397,8 +397,9 @@ def summarize_daily_usage(
 
         requests_by_node[node_id] += 1
         consumed_ms_by_node[node_id] += latency_ms
-        if timestamp is not None:
-            requests_by_node_hour[node_id][hour_bucket] += 1
+        # Counted for every row, so by_node_hour reconciles with by_hour. A row without a
+        # parsable timestamp lands in the "unknown" bucket of both.
+        requests_by_node_hour[node_id][hour_bucket] += 1
 
         if model_key:
             requests_by_user_model[client_id][model_key] += 1
@@ -550,6 +551,8 @@ def summarize_daily_usage(
             period
             and oldest_day == period
             and first_record_at is not None
+            # Minute granularity on purpose: a cut landing inside the first minute is the
+            # only truncation retention can produce that close to midnight.
             and (first_record_at.hour, first_record_at.minute) != (0, 0)
         ),
         coverage_first_record_at=first_record_at.isoformat() if first_record_at is not None else None,

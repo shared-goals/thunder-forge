@@ -93,7 +93,9 @@ Expected keys:
 - `requests.by_hour` (all 24 hour buckets 00-23, each bucket carries `requests`, `consumed_ms`,
   `by_model`, and `by_user` so one view answers when/what/who; hours without traffic are present
   with zeros, so a silent hour is visible)
-- `requests.by_node_hour` (same 24 hour buckets per node, zero-filled the same way)
+- `requests.by_node_hour` (same 24 hour buckets per node, zero-filled the same way; a record with
+  no parsable timestamp lands in an extra `"unknown"` bucket in both hour breakdowns, so
+  `by_node_hour` still sums to `requests.total`)
 - `failures_total` (top level: records with `status_code >= 400`)
 - `consumed_ms.total`
 - `consumed_ms.by_user`
@@ -114,7 +116,8 @@ Expected keys:
   retained records of the period, `null` when the period holds none; they ignore the `?user=`
   filter and describe the log, not the filtered view)
 - `partial` (true only when the period is the oldest day present in the log **and** its first
-  record starts after 00:00. Retention cuts the file at an absolute `now - N days` instant, so the
+  record starts after 00:00:59 — minute granularity, so a cut inside the first minute is not
+  flagged. Retention cuts the file at an absolute `now - N days` instant, so the
   oldest day is the only one it can truncate. The flag is a warning, not proof: an idle morning
   looks the same as a truncated morning)
 - `invalid_lines`
