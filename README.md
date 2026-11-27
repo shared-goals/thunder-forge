@@ -159,7 +159,7 @@ When `services.olla.version` is omitted inside an explicit `services.olla` block
 
 After changing model placement or node topology in `tfconfig.yaml`, run `make restart gateway-cache-01` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
 
-TF edge defaults to a 180-second upstream I/O timeout (`edge serve --timeout <seconds>`), leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. An upstream timeout answers `504`, an unreachable Olla answers `502`, and the access log tells them apart through `error_kind`. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records `stream: true`, `headers_sent: true`, `error_kind: "stream_aborted"` instead of pretending the whole request failed; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
+TF edge defaults to a 180-second upstream I/O timeout (`edge serve --timeout <seconds>`), leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. An upstream timeout answers `504` and an unreachable Olla answers `502`; the access-log fields below tell them apart. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records the partial answer instead of pretending the whole request failed; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
 
 ### GPU memory ceiling on inference nodes
 
@@ -378,14 +378,14 @@ Every `logs/tf-edge-access.jsonl` row records `timestamp`, `request_id`, `client
 |---|---|
 | `stream` | `true` when the request reached the streaming response path (a rejected request never gets far enough to be known as streaming) |
 | `headers_sent` | `true` only when a failure came after the response status and headers reached the client, so the client holds a partial answer; a successful record stays `false` |
-| `error_kind` | Empty on success, otherwise one value from the closed vocabulary below |
+| `error_kind` | Empty when nothing upstream failed, otherwise one value from the closed vocabulary below |
 
 `error_kind` vocabulary:
 
 - `edge_timeout` — Olla did not answer within the edge timeout (`status_code: 504`).
 - `edge_connect` — Olla was unreachable or the connection dropped before headers (`status_code: 502`).
 - `upstream_error` — any other upstream transport or protocol failure (`status_code: 502`).
-- `stream_aborted` — the stream died after `headers_sent: true`; the client saw a truncated `200` response.
+- `stream_aborted` — the stream died after `headers_sent: true`. `status_code` keeps the cause (`502` or `504`) and this value says the client holds a partial answer.
 - `client_aborted` — the client disconnected mid-stream (best effort).
 
 A timeout that happens after the headers were sent keeps `status_code: 504` with `error_kind: "stream_aborted"`: the status names the cause, `error_kind` names what the client received.

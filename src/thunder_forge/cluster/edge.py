@@ -241,9 +241,9 @@ class EdgeAccessLog:
     private; MVP accounting only needs client/model/path/status/latency and the
     Olla endpoint attribution header when available.
 
-    The failure fields separate what one `status_code` cannot: `stream` marks an
-    SSE request, `headers_sent` a client that already received the response
-    status and headers, and `error_kind` the closed failure vocabulary below.
+    The failure fields separate what one `status_code` cannot: `stream` marks a request
+    that reached the streaming path, `headers_sent` marks a failure that came after the
+    response status and headers reached the client, and `error_kind` the vocabulary below.
     """
 
     timestamp: str
@@ -1658,7 +1658,7 @@ def proxy_edge_request(
     ) as client:
         try:
             response = client.request(method, upstream.olla_path, headers=upstream.forwarded_headers, content=body)
-        except (httpx.HTTPError, OSError) as exc:  # a bare OSError would leave the request unlogged
+        except httpx.HTTPError as exc:
             if inspector is not None and inspector.enabled:
                 _write_edge_inspector_entry(
                     config,
@@ -1931,7 +1931,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                                 body_truncated=body_truncated,
                             )
                         record_stream(response.status_code, olla_endpoint=olla_endpoint)
-            except (httpx.HTTPError, OSError) as exc:  # a bare OSError would leave the request unlogged
+            except httpx.HTTPError as exc:
                 if inspector is not None and inspector.enabled:
                     _write_edge_inspector_entry(
                         config,

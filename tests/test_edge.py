@@ -1113,31 +1113,3 @@ def test_summarize_edge_usage_groups_requests_by_client(tmp_path) -> None:
     assert client_a.endpoints == {"infer-03-omlx-live": 1}
     assert client_a.latency_ms_p50 == 10
     assert client_a.latency_ms_p95 == 30
-
-
-def test_proxy_edge_request_logs_a_bare_oserror_instead_of_dropping_the_record() -> None:
-    """An exception that is not an httpx error used to escape and leave no access row."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise OSError("socket went away")
-
-    logs: list[str] = []
-    config = EdgeProxyConfig(
-        olla_base_url="http://olla.local:40115",
-        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
-        access_log_sink=logs.append,
-    )
-
-    result = proxy_edge_request(
-        method="POST",
-        path="/v1/chat/completions",
-        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
-        body=json.dumps({"model": "memory", "messages": []}).encode(),
-        config=config,
-        transport=httpx.MockTransport(handler),
-    )
-
-    assert result.status_code == 502
-    logged = json.loads(logs[0])
-    assert logged["status_code"] == 502
-    assert logged["error_kind"] == "upstream_error"

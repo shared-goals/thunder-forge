@@ -51,7 +51,7 @@ Expected keys:
 - `stream` (bool, `true` when the request reached the streaming response path)
 - `headers_sent` (bool, `true` only when a failure came after the status and headers reached the client; a
   successful record stays `false`)
-- `error_kind` (empty on success; otherwise `edge_timeout`, `edge_connect`, `upstream_error`, `stream_aborted` or `client_aborted`)
+- `error_kind` (empty when nothing upstream failed, including a rejected request; otherwise `edge_timeout`, `edge_connect`, `upstream_error`, `stream_aborted` or `client_aborted`)
 - optional token fields: `prompt_tokens`, `completion_tokens`, `total_tokens`
 
 ### Node Snapshot JSONL
