@@ -348,9 +348,10 @@ leak into proxy logs) and answer `401` without it.
 - `ok`, `target`, `build` (version, commit, dirty — see below)
 - `summary` with `inference_total`, `inference_healthy`, `loaded_models`, `loading_models`,
   `readiness`, `latest_omlx_version` and `omlx_upgrade_hint`
-- per node `name`, `health`, `models`, `omlx_version`, `macos_version`, `served_models` and
-  `hot_loaded_models` (alias names only, no sizes or access times); the gateway keeps `name`,
-  `olla_version`, `latest_olla_version` and `upgrade`; cache nodes keep `name` and `macos_version`
+- per node `name`, `health`, `models`, `omlx_version`, `macos_version` and `served_models`; the
+  gateway keeps `name`, `olla_version`, `latest_olla_version` and `upgrade`; cache nodes keep `name`
+  and `macos_version`. No per-node model list: `hot_loaded_models` is ordered by `last_access`, so
+  it would carry alias-level activity
 
 An anonymous request also skips the probes only the full view needs: no SSH `sw_vers` per node and
 no upstream release lookups, so `macos_version`, `latest_olla_version`, `upgrade` and

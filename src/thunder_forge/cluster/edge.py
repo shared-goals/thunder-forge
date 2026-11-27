@@ -1303,7 +1303,6 @@ STATUS_PUBLIC_NODE_KEYS = (
     "omlx_version",
     "macos_version",
     "served_models",
-    "hot_loaded_models",
 )
 
 # The summary carries live load and memory turnover beside the readiness verdict; an anonymous

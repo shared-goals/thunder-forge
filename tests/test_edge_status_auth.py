@@ -41,6 +41,8 @@ FORBIDDEN_ANONYMOUS_KEYS = (
     "recently_used_models",
     "stale_loaded_models",
     "recent_idle_threshold_seconds",
+    # ordered by last_access, i.e. alias-level activity
+    "hot_loaded_models",
 )
 
 
