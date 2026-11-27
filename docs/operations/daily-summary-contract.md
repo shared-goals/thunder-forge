@@ -61,11 +61,16 @@ Expected keys:
 - `health_ok`
 - `models_ok`
 - `status_ok`
-- `hot_loaded_models` (status entries where `loaded=true`, ordered by latest access)
+- `hot_loaded_models` (aliases of the entries where `loaded=true`, ordered by latest access)
 - `hot_loaded_count`
 - `active_requests` (oMLX status value, `null` when unavailable)
 - `waiting_requests` (oMLX status value, `null` when unavailable)
-- `loaded_models` (`id`, `actual_size` bytes, `idle_seconds` per loaded model)
+- `loaded_models` (`id` alias, `actual_size` bytes, `idle_seconds` per loaded model)
+
+Only models declared in the cluster configuration are recorded. A runtime that reports extra
+entries — tool adapters such as `MarkItDown`, which carry no alias and report zero memory — has
+them dropped here, the same way `GET /status` already drops them, so `hot_loaded_count` counts
+models of this cluster and nothing else.
 - `errors`
 
 ## Summary Contract

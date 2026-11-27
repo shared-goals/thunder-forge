@@ -343,14 +343,21 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         base_url = f"http://{node.host}:{_runtime(node).port}"
         health = check_omlx_health(base_url, timeout=timeout, include_models=True)
         hot_loaded_runtime_ids = extract_hot_loaded_models(health.model_statuses)
-        hot_loaded_models = map_runtime_models_to_aliases(config, node, hot_loaded_runtime_ids)
+        hot_loaded_models = map_runtime_models_to_aliases(
+            config, node, hot_loaded_runtime_ids, include_unmanaged=False
+        )
         aliases_by_runtime = runtime_model_aliases(config, node)
         loaded_models: list[dict[str, object]] = []
         sampled_at = time.time()
         for runtime_id, status in sorted(health.model_statuses.items()):
             if not isinstance(status, dict) or status.get("loaded") is not True:
                 continue
-            entry: dict[str, object] = {"id": (aliases_by_runtime.get(runtime_id) or [runtime_id])[0]}
+            # Unmanaged runtime entries (tools such as MarkItDown) are not models of this cluster:
+            # they carry no alias and no memory, and they inflated hot_loaded_count.
+            aliases = aliases_by_runtime.get(runtime_id)
+            if not aliases:
+                continue
+            entry: dict[str, object] = {"id": aliases[0]}
             actual_size = _as_non_negative_int(status.get("actual_size"))
             if actual_size is not None:
                 entry["actual_size"] = actual_size

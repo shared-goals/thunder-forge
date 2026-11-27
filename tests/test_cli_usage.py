@@ -259,6 +259,12 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
 
     config = ClusterConfig(
         services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={
+            "coder": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.6-35B-A3B-4bit"),
+                runtime_model_id="coder",
+            ),
+        },
         nodes={
             "msm1": Node(
                 host="msm1-wifi.lan",
@@ -266,6 +272,7 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
                 roles=[NodeRole.INFERENCE],
                 user="shag",
                 runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["coder"],
             )
         },
     )
@@ -372,3 +379,59 @@ def test_usage_collect_node_metrics_maps_hot_loaded_runtime_ids_to_aliases(tmp_p
     payload = json.loads(lines[0])
     assert payload["hot_loaded_models"] == ["agent", "agent-better"]
     assert payload["hot_loaded_count"] == 2
+
+
+def test_usage_collect_node_metrics_skips_unmanaged_runtime_entries(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    logs_dir = repo / "logs"
+    logs_dir.mkdir()
+
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={
+            "agent": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.8-Flash-Next"),
+                runtime_model_id="Qwen3.8-Flash-Next-oQ3.5e-mtp",
+            ),
+        },
+        nodes={
+            "msm1": Node(
+                host="msm1-wifi.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["agent"],
+            )
+        },
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda *args, **kwargs: OmlxHealthResult(
+            base_url="http://msm1-wifi.lan:8018",
+            health_ok=True,
+            models_ok=True,
+            status_ok=True,
+            models=["Qwen3.8-Flash-Next-oQ3.5e-mtp", "MarkItDown"],
+            model_statuses={
+                "Qwen3.8-Flash-Next-oQ3.5e-mtp": {"loaded": True, "last_access": 100.0, "actual_size": 96680000000},
+                # MarkItDown is a tool entry the runtime reports with zero memory; it is not a
+                # model of this cluster and used to inflate hot_loaded_count.
+                "MarkItDown": {"loaded": True, "last_access": 100.0, "actual_size": 0},
+            },
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics"])
+
+    assert result.exit_code == 0
+    payload = json.loads((logs_dir / "tf-node-metrics.jsonl").read_text().splitlines()[0])
+    assert payload["hot_loaded_models"] == ["agent"]
+    assert payload["hot_loaded_count"] == 1
+    assert [entry["id"] for entry in payload["loaded_models"]] == ["agent"]
