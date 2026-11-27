@@ -133,6 +133,8 @@ Boundaries of the definition:
   `period=all`), so `cache.total` can be smaller than `requests.total`;
 - a client that never sends `X-Olla-Session-ID` reads as 100% cold, because every one of its requests
   falls under rule 1 - check `cache.by_client` before reading the aggregate share;
+- the window belongs to the `sticky_id`, not to the client: two clients behind one shared session id
+  share one window, so `cache.by_client` follows the session, not the caller;
 - the split measures affinity, not observed cache state: a session that fails over inside the TTL (node
   restart, dropped endpoint) keeps its id and therefore stays warm, even though the new node has no
   prefix for it - read the cold share as a lower bound on cache misses;
