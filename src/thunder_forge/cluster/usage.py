@@ -269,7 +269,8 @@ class DailyUsageSummary:
                 "first_record_at": self.coverage_first_record_at,
                 "last_record_at": self.coverage_last_record_at,
             },
-            # True when retention may have cut the start of the oldest day in the file.
+            # True when the period is older than the retained log, or when retention may have
+            # cut the start of the oldest day in it.
             "partial": self.partial,
             "consumed_ms": {
                 "total": self.consumed_ms_total,
