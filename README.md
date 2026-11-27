@@ -367,7 +367,7 @@ Edge serve flags for this behavior:
 ```bash
 uv run thunder-forge edge serve --metrics-interval-seconds 60
 uv run thunder-forge edge serve --no-collect-node-metrics
-uv run thunder-forge edge serve --timeout 300  # default 180; upstream Olla I/O timeout in seconds (flag only: no tfconfig key, and the generated LaunchAgent does not pass it)
+uv run thunder-forge edge serve --timeout 300  # default 180, minimum 125; upstream Olla I/O timeout in seconds. Flag only: there is no tfconfig key, the generated LaunchAgent does not pass it, and `make restart` rewrites the plist, so a hand edit is lost.
 ```
 
 ### Edge access log fields

@@ -30,7 +30,13 @@ from uuid import uuid4
 
 import httpx
 
-from thunder_forge.cluster.config import UNKNOWN_BUILD_INFO, ClusterConfig, Node, NodeRole
+from thunder_forge.cluster.config import (
+    OLLA_BACKEND_TIMEOUT_SECONDS,
+    UNKNOWN_BUILD_INFO,
+    ClusterConfig,
+    Node,
+    NodeRole,
+)
 from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases
 from thunder_forge.cluster.omlx import check_omlx_health
 from thunder_forge.cluster.ports import DEFAULT_EDGE_PORT, DEFAULT_OLLA_PORT, local_base_url, resolve_port
@@ -68,9 +74,9 @@ EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
 EDGE_DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 EDGE_MAX_STREAM_CAPTURE_BYTES = 1024 * 1024
 EDGE_DEFAULT_TIMEOUT_SECONDS = 180.0
-# The generated Olla config waits this long for a backend, so a shorter edge timeout answers 504
-# while Olla keeps generating and the client retries whatever the node is still working on.
-EDGE_MIN_TIMEOUT_SECONDS = 120.0
+# A shorter edge timeout answers 504 while Olla keeps generating, so the client retries work the
+# node is still doing. The floor is Olla's backend wait plus its own connect attempt.
+EDGE_MIN_TIMEOUT_SECONDS = OLLA_BACKEND_TIMEOUT_SECONDS + 5.0
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"

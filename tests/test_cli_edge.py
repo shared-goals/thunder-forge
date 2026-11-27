@@ -252,7 +252,7 @@ def test_edge_serve_cli_accepts_upstream_timeout_option(monkeypatch) -> None:
     assert isinstance(config, EdgeProxyConfig)
     assert config.timeout == 300.0
     assert invalid.exit_code == 1
-    assert "at least 120 seconds" in invalid.stderr
+    assert "at least 125 seconds" in invalid.stderr
 
 
 def test_edge_serve_cli_prints_one_build_line_for_an_unknown_build(monkeypatch) -> None:

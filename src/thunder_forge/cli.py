@@ -3960,8 +3960,8 @@ def edge_serve(
         raise typer.Exit(1)
     if upstream_timeout < EDGE_MIN_TIMEOUT_SECONDS:
         typer.echo(
-            f"Error: upstream timeout must be at least {EDGE_MIN_TIMEOUT_SECONDS:g} seconds, "
-            "the backend timeout of the generated Olla config",
+            f"Error: upstream timeout must be at least {EDGE_MIN_TIMEOUT_SECONDS:g} seconds: "
+            "Olla's backend timeout plus its connect attempt",
             err=True,
         )
         raise typer.Exit(1)
