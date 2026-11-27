@@ -357,6 +357,56 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
     assert payload["hot_loaded_count"] == 1
 
 
+def test_usage_trim_logs_warns_when_a_live_log_moved_under_it(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    from thunder_forge.cluster.log_retention import JsonlTrimResult, LogTrimSummary
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"), nodes={})
+    path = str(repo / "logs" / "tf-edge-access.jsonl")
+    summary = LogTrimSummary(
+        retention_days=3,
+        cutoff="2026-06-02T00:00:00+00:00",
+        jsonl_results=[JsonlTrimResult(path=path, before_lines=5, after_lines=5, removed_lines=0, skipped=True)],
+        file_results=[],
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(cli_module, "trim_local_logs", lambda **kwargs: summary)
+
+    result = runner.invoke(app, ["usage", "trim-logs"])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped_jsonl_files: 1" in result.stdout
+    assert "Warning: left these logs intact" in result.stderr
+    assert path in result.stderr
+
+
+def test_usage_collect_node_metrics_never_trims_logs(tmp_path: Path, monkeypatch) -> None:
+    """Retention has one entry point: the collector must not rewrite a log the edge writes."""
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        nodes={},
+    )
+
+    def fake_trim(*args: object, **kwargs: object) -> object:
+        raise AssertionError("usage collect-node-metrics must not trim logs")
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(cli_module, "trim_local_logs", fake_trim)
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics", "--once"])
+
+    assert result.exit_code == 0, result.output
+    assert "trimmed_jsonl_records" not in result.stdout
+    assert "retention_days" not in result.stdout
+
+
 def test_usage_collect_node_metrics_maps_hot_loaded_runtime_ids_to_aliases(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 

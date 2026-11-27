@@ -1251,6 +1251,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
             "omlx_upgrade_hint": "no (versions aligned)",
         },
         "active_edge_requests": [{"client_id": "shag", "model": "memory"}],
+        "build": {"version": "0.2.0", "commit": "abc1234", "dirty": "no"},
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -1258,6 +1259,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
 
     assert result.exit_code == 0
     assert "Thunder Forge cluster status" in result.stdout
+    assert "build: version=0.2.0 commit=abc1234 dirty=no" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "macos_version: 15.6.1" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
