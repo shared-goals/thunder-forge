@@ -3784,7 +3784,8 @@ def usage_trim_logs(
     if skipped:
         # A busy log makes the swap impossible; say so instead of reporting a quiet success.
         typer.echo(
-            "Warning: left these logs intact because they changed during the run: " + ", ".join(skipped),
+            "Warning: left these logs intact because they changed or could not be safely rewritten: "
+            + ", ".join(skipped),
             err=True,
         )
 

@@ -102,6 +102,44 @@ def test_prune_file_if_older_than_uses_mtime(tmp_path: Path) -> None:
     assert not path.exists()
 
 
+def test_trim_jsonl_by_age_follows_a_symlinked_log(tmp_path: Path) -> None:
+    real = tmp_path / "real.jsonl"
+    real.write_text(
+        json.dumps({"timestamp": "2026-06-01T00:00:00+00:00", "id": "old"})
+        + "\n"
+        + json.dumps({"timestamp": "2026-06-05T00:00:00+00:00", "id": "new"})
+        + "\n"
+    )
+    link = tmp_path / "logs" / "tf-edge-access.jsonl"
+    link.parent.mkdir()
+    link.symlink_to(real)
+
+    result = trim_jsonl_by_age(link, retention_days=3, now=datetime(2026, 6, 5, tzinfo=UTC))
+
+    assert result.removed_lines == 1
+    assert link.is_symlink()
+    assert json.loads(real.read_text().splitlines()[0])["id"] == "new"
+
+
+def test_trim_jsonl_by_age_leaves_the_log_when_it_cannot_keep_the_owner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import thunder_forge.cluster.log_retention as retention
+
+    path = tmp_path / "events.jsonl"
+    content = json.dumps({"timestamp": "2026-06-01T00:00:00+00:00", "id": "old"}) + "\n"
+    path.write_text(content)
+
+    def deny(*args: object, **kwargs: object) -> None:
+        raise PermissionError("not the owner")
+
+    monkeypatch.setattr(retention.os, "chown", deny)
+    result = trim_jsonl_by_age(path, retention_days=3, now=datetime(2026, 6, 5, tzinfo=UTC))
+
+    assert result.skipped is True
+    assert path.read_text() == content
+
+
 def test_trim_local_logs_covers_jsonl_and_service_logs(tmp_path: Path) -> None:
     repo = tmp_path
     logs = repo / "logs"

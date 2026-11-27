@@ -86,13 +86,16 @@ def trim_jsonl_by_age(
     retention_days: int,
     now: datetime | None = None,
 ) -> JsonlTrimResult:
-    if not path.exists():
-        return JsonlTrimResult(path=str(path), before_lines=0, after_lines=0, removed_lines=0)
-
+    # Follow a symlinked log, or the swap would replace the link and orphan the real file.
+    path = path.resolve()
     current_now = now or datetime.now(UTC)
     cutoff = current_now - timedelta(days=retention_days)
-    before_stat = path.stat()
-    original_lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        before_stat = path.stat()
+        # surrogateescape keeps a half-written record round-trippable instead of raising.
+        original_lines = path.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+    except OSError:
+        return JsonlTrimResult(path=str(path), before_lines=0, after_lines=0, removed_lines=0)
     kept_lines: list[str] = []
     before = 0
 
@@ -131,15 +134,22 @@ def _replace_if_unchanged(path: Path, kept_lines: list[str], *, before_stat: os.
     fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     temp_path = Path(temp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as handle:
             handle.write("\n".join(kept_lines) + ("\n" if kept_lines else ""))
             handle.flush()
-            os.fsync(handle.fileno())
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                # shortcut: some network/FUSE mounts refuse fsync; the log survives a crash
+                # at the cost of this durability guarantee, upgrade if a mount ever matters.
+                pass
         # The new inode must keep the log's owner and mode, or the serving process cannot append.
         try:
             os.chown(temp_path, before_stat.st_uid, before_stat.st_gid)
-        except (AttributeError, PermissionError):
+        except AttributeError:
             pass
+        except PermissionError:
+            return False
         os.chmod(temp_path, before_stat.st_mode & 0o777)
         try:
             current_stat = path.stat()
