@@ -20,7 +20,7 @@ Thunder Forge is the control plane for a private inference cluster, not a librar
 ## Status Endpoints
 
 - `/health` and `/status` stay anonymously accessible during pre-MVP, and an anonymous answer covers liveness only: node health, readiness and the gateway and runtime versions.
-- Everything past liveness needs `Authorization: Bearer $TF_EDGE_ADMIN_TOKEN`: live request identities and client ids, node hosts and admin URLs, model memory (`actual_size`, `idle_seconds`, `last_access`), probe errors and token-like material. An anonymous response that still carries any of those is a defect to fix, not a permission, and `cluster status` sends the token when the repo `.env` has one.
+- Everything past liveness needs `Authorization: Bearer $TF_EDGE_ADMIN_TOKEN`: live request identities and client ids, node hosts and admin URLs, model memory (`actual_size`, `idle_seconds`, `last_access`), probe errors and token-like material. An anonymous response that still carries any of those is a defect to fix, not a permission — the current edge still returns them anonymously, and `cluster status` sends no token yet.
 - Treat CLI status as an HTTP consumer of edge status APIs, not a secondary status implementation.
 - Usage endpoints (`/usage`, `/usage/report`, `/usage/events`) are disabled (404) until `TF_EDGE_ADMIN_TOKEN` is set, then the page is anonymous while data paths require the bearer token; client API keys (`TF_USER_*`) authorize inference only, never usage.
 
@@ -36,7 +36,7 @@ Thunder Forge is the control plane for a private inference cluster, not a librar
 These rules apply to any change on the running cluster (nodes, edge, Olla, tfconfig, deployment) as opposed to in-repo development.
 
 - The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `/usage/report` and `/usage/events` with the admin token, and reading `logs/*.jsonl`.
-- Mutating actions need an explicit instruction for that exact target, and these lists are examples, not the whole set: `make restart`, `make sync`, `make prune`, `make bootstrap`, `make model`, `make config`, `make edge-keys` (it mints a live API key), `make usage-trim` (it deletes log records past `services.log_retention_days`), installing or removing a runtime, changing `tfconfig.yaml` on a host, killing a process, changing model placement, deleting cached models. A mutating target without a node argument means every node — name the node. Propose options with trade-offs and wait for the operator's decision instead of executing them.
+- Mutating actions need an explicit instruction for that exact target, and these lists are examples, not the whole set: `make restart`, `make sync`, `make prune`, `make bootstrap`, `make model`, `make config`, `make edge-keys` (it mints a live API key), `make usage-trim` and the `usage collect-node-metrics` collector (both delete log records past `services.log_retention_days`), installing or removing a runtime, changing `tfconfig.yaml` on a host, killing a process, changing model placement, deleting cached models. A mutating target without a node argument means every node — name the node. Propose options with trade-offs and wait for the operator's decision instead of executing them.
 - Load the operational runbook or skill for this cluster before acting on live infrastructure; do not guess hosts, ports, paths or deployment conventions.
 - Diagnose before acting: read the file-backed evidence (`logs/tf-edge-access.jsonl`, `logs/tf-node-metrics.jsonl`, Olla logs) and attribute the failing layer before proposing a fix.
 - Prefer hostname conventions (`.lan` FQDNs) over raw IPs in configs and probes.
@@ -57,7 +57,7 @@ These rules apply to any change on the running cluster (nodes, edge, Olla, tfcon
 
 ## Deployment provenance
 
-- The edge must publish the build it executes: the package version and the git commit, visible in `/status` and in one startup log line. Removing, bypassing or defaulting that is a regression, and an empty value must read as a visible "unknown" rather than a plausible-looking string — a build that publishes neither has an unknown build, and that is the honest answer until it does.
+- The edge must publish the build it executes: the package version and the git commit, visible in `/status` and in one startup log line. Removing, bypassing or defaulting that is a regression, and an empty value must read as a visible "unknown" rather than a plausible-looking string. The current build publishes neither, so a deploy comparison today ends in "unknown".
 - After a deploy, compare the published commit with the merged commit. If it differs, deploy is not finished and the reason is unknown — say exactly that rather than assuming.
 
 ## Versioned publication
