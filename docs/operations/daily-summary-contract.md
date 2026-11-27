@@ -12,7 +12,7 @@ Thunder Forge daily usage reporting is file-backed and CLI-first:
 - node snapshots: `logs/tf-node-metrics.jsonl`
 - node snapshots are collected by `thunder-forge edge serve` in-process every 60s by default
 - summary command: `thunder-forge usage report`
-- shared retention command: `thunder-forge usage trim-logs`
+- shared retention command: `thunder-forge usage trim-logs` (operator-run; `edge serve` never trims)
 - ad hoc SQL: DuckDB CLI over JSONL
 
 This keeps operations simple and avoids a metrics backend while still supporting daily rollups by user, node, model, and hour.
@@ -48,6 +48,10 @@ Expected keys:
 - `status_code`
 - `latency_ms`
 - `olla_endpoint`
+- `stream` (bool, `true` when the request reached the streaming response path)
+- `headers_sent` (bool, `true` only when a failure came after the status and headers reached the client; a
+  successful record stays `false`)
+- `error_kind` (empty when nothing upstream failed, including a rejected request; otherwise `edge_timeout`, `edge_connect`, `upstream_error`, `stream_aborted` or `client_aborted`)
 - no token fields: the edge records neither prompt nor completion tokens, so no cost per record
 
 ### Node Snapshot JSONL
@@ -61,12 +65,24 @@ Expected keys:
 - `health_ok`
 - `models_ok`
 - `status_ok`
-- `hot_loaded_models` (status entries where `loaded=true`, ordered by latest access)
+- `hot_loaded_models` (aliases of the entries where `loaded=true`, ordered by latest access)
 - `hot_loaded_count`
 - `active_requests` (oMLX status value, `null` when unavailable)
 - `waiting_requests` (oMLX status value, `null` when unavailable)
-- `loaded_models` (`id`, `actual_size` bytes, `idle_seconds` per loaded model)
+- `loaded_models` (`id` alias, `actual_size` bytes, `idle_seconds` per loaded model)
 - `errors`
+
+`hot_loaded_models` lists only aliases declared for **this node** in the cluster configuration, the
+same membership rule `GET /status` uses. A runtime entry with no configured alias is dropped when it
+holds no memory — tool adapters such as `MarkItDown` report none — and kept under its raw runtime id
+in `loaded_models` when it does, so a hand-loaded model cannot hide its footprint. A kept entry is
+named in `errors` as `no configured alias for runtime model: <id>`, which is how a drifted
+`runtime_model_id` shows up; a dropped tool adapter adds nothing to `errors`.
+
+`hot_loaded_models` lists every configured alias of a loaded runtime model, while `loaded_models`
+carries one row per loaded runtime model, using its first alias, so the two counts agree only when
+a runtime model has a single alias. A node that lists no models and has nothing loaded writes `hot_loaded_count: 0` and
+`loaded_models: []`, which is indistinguishable from a probe that found nothing loaded.
 
 ## Summary Contract
 
@@ -77,12 +93,25 @@ Expected keys:
   `TF_USER_<NAME>` identity, so a client with no traffic today is still selectable). API keys
   are never logged, so only the client identity is ever exposed
 - `requests.total`
+- `requests.unauthenticated` (records whose `client_id` is the unauthenticated marker, e.g. a
+  rejected key or scanner traffic; counted even when `exclude_unauthenticated` keeps them out of
+  every other breakdown, so a scanner run stays visible)
 - `requests.by_user`
-- `requests.by_node`
-- `requests.by_model`
-- `requests.by_hour` (0-23 buckets, each bucket carries `requests`, `consumed_ms`,
-  `by_model`, and `by_user` so one view answers when/what/who)
-- `requests.by_node_hour` (0-23 buckets)
+- `requests.by_node` (`"unknown"` collects records with no `X-Olla-Endpoint` attribution, so the
+  bucket sums to `requests.total`)
+- `requests.by_model` (`"unknown"` collects records with an empty model, such as `/v1/models`
+  catalogue calls; models listed in `operations.usage.exclude_models` stay out of the breakdown)
+- `requests.by_status` (`status_code` -> count histogram; `"unknown"` when a record carries no
+  integer status)
+- `requests.by_hour` (all 24 hour buckets 00-23, each bucket carries `requests`, `consumed_ms`,
+  `by_model`, and `by_user` so one view answers when/what/who; hours without traffic are present
+  with zeros, so a silent hour is visible)
+- `requests.by_node_hour` (same 24 hour buckets per node, zero-filled the same way; a record with
+  no parsable timestamp lands in an extra `"unknown"` bucket in both hour breakdowns, so
+  `by_node_hour` still sums to `requests.total`)
+- `failures_total` (top level: records with `status_code >= 400`, plus any record whose
+  `error_kind` is a cluster failure — a stream that died after its headers keeps
+  `status_code: 200`; `client_aborted` is the client's own choice and is not counted)
 - `consumed_ms.total`
 - `consumed_ms.by_user`
 - `consumed_ms.by_node`
@@ -95,9 +124,23 @@ Expected keys:
   `waiting_max`, taken from node snapshots)
 - `node_metrics.model_memory` (latest snapshot per node: `{model: {actual_size, idle_seconds}}`)
 - `node_metrics.model_memory_sampled_at` (snapshot `timestamp` behind each node's memory numbers)
+- `coverage.first_record_at` / `coverage.last_record_at` (first and last timestamp among the
+  retained records of the period, `null` when the period holds none; they ignore the `?user=`
+  filter and describe the log, not the filtered view)
+- `partial` (true when the requested period is older than the oldest day in the log — the period
+  is missing, not empty — or when it is the oldest day **and** its first record starts after
+  00:00:59; minute granularity, so a cut inside the first minute is not flagged) Retention cuts the file at an absolute `now - N days` instant, so the
+  oldest day is the only one it can truncate. The flag is a warning, not proof: an idle morning
+  looks the same as a truncated morning)
 - `invalid_lines`
 
 `consumed_ms` is defined as sum of edge-observed `latency_ms`.
+
+## CLI Exit Codes
+
+`usage report` and `usage report --json` exit `2` and name the resolved path when the access log
+file is absent, instead of printing `requests_total: 0` for a mistyped path or a wrong checkout.
+An invalid `--period` stays `1`.
 
 ## HTTP Contract
 
@@ -136,14 +179,16 @@ Aggregation honours `operations.usage.exclude_models` and
 
 - Config key: `services.log_retention_days`
 - Default: `3`
+- Entry point: `thunder-forge usage trim-logs` only. Retention never runs inside `edge serve` or `usage collect-node-metrics` (including its `--continuous` mode), and that collector has no `--retention-days` flag any more; trimming a log that a live process appends to loses records.
 - Scope: local TF-managed logs
   - `logs/tf-edge-access.jsonl`
   - `logs/tf-node-metrics.jsonl`
-  - `logs/olla.log`
   - `logs/*.stdout.log`, `logs/*.stderr.log`, `logs/*.log.gz`
 - Behavior:
-  - JSONL files are trimmed by record `timestamp`
-  - plain/archive logs are pruned by file mtime
+  - JSONL files are trimmed by record `timestamp`; blank lines are not counted as removed records, and a file with no expired record is not rewritten at all (blank lines survive such a run, and are dropped as collateral when the file is rewritten)
+  - the trimmed file is written next to the original and swapped with `os.replace`, and only if size and mtime are unchanged since the read - a file that grew under a live writer is skipped and reported as `skipped_jsonl_files`. The size/mtime check and the swap are not atomic with respect to a writer that already holds the file open
+  - plain/archive logs are pruned whole by file mtime
+  - `logs/olla.log` is plain text without record timestamps, so it is not a retention target; this command never rewrites or deletes it
 
 ## DuckDB CLI Workflow
 

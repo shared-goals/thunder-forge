@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from thunder_forge import __version__
 from thunder_forge.cluster.ports import (
     DEFAULT_EDGE_PORT,
     DEFAULT_OLLA_PORT,
@@ -38,8 +39,14 @@ DEFAULT_SYNC_TRANSPORT = "auto"
 DEFAULT_SYNC_TIMEOUT = 7200
 DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
+# The generated Olla config's own limits: it connects to a backend, then waits for the answer.
+OLLA_CONNECT_TIMEOUT_SECONDS = 5.0
+OLLA_BACKEND_TIMEOUT_SECONDS = 120.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
+BUILD_INFO_GIT_TIMEOUT_SECONDS = 3.0
+# Published by a caller that has no build information at all: visible, never plausible.
+UNKNOWN_BUILD_INFO: dict[str, object] = {"version": "unknown", "commit": "unknown", "dirty": "unknown"}
 
 
 class RuntimeType(StrEnum):
@@ -844,9 +851,9 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
             "engine": "olla",
             "profile": "auto",
             "load_balancer": "least-connections",
-            "connection_timeout": "5s",
-            "response_timeout": "120s",
-            "read_timeout": "120s",
+            "connection_timeout": f"{OLLA_CONNECT_TIMEOUT_SECONDS:g}s",
+            "response_timeout": f"{OLLA_BACKEND_TIMEOUT_SECONDS:g}s",
+            "read_timeout": f"{OLLA_BACKEND_TIMEOUT_SECONDS:g}s",
             "sticky_sessions": {
                 "enabled": True,
                 "idle_ttl_seconds": 600,
@@ -1004,6 +1011,40 @@ def default_cluster_config_path(repo_root: Path) -> Path:
 
 def generated_olla_config_path(repo_root: Path) -> Path:
     return repo_root / GENERATED_CONFIG_DIR / GENERATED_OLLA_CONFIG_FILENAME
+
+
+def resolve_build_info(repo_root: Path) -> dict[str, object]:
+    """Provenance of the code being executed: package version, git commit and tree state.
+
+    One `git status --porcelain=v2 --branch` call answers both the commit and whether the tree
+    is dirty. `git -C` resolves the enclosing repository, so an edge installed inside an
+    unrelated clone reports that clone's HEAD. Anything unreadable stays visibly unknown.
+    """
+    unknown = dict(UNKNOWN_BUILD_INFO, version=__version__)
+    try:
+        # `-unormal` keeps untracked files visible: `status.showUntrackedFiles=no` in a user
+        # config would otherwise report a dirty tree as clean.
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain=v2", "--branch", "-unormal"],
+            capture_output=True,
+            text=True,
+            timeout=BUILD_INFO_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return unknown
+    if result.returncode != 0:
+        return unknown
+
+    commit = ""
+    dirty = "no"
+    for line in result.stdout.splitlines():
+        if line.startswith("# branch.oid "):
+            commit = line.removeprefix("# branch.oid ").strip()
+        elif line.strip() and not line.startswith("#"):
+            dirty = "yes"
+    if not commit or commit == "(initial)":
+        return unknown
+    return {"version": __version__, "commit": commit, "dirty": dirty}
 
 
 def find_repo_root() -> Path:
