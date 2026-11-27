@@ -349,6 +349,7 @@ Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/Y
 - Node snapshots (health + hot-loaded models) come from `logs/tf-node-metrics.jsonl`.
 - Daily rollups are produced by the TF CLI and can also be queried with DuckDB CLI.
 - Shared log retention is controlled by `services.log_retention_days` in `tfconfig.yaml` (default: `3`).
+- Retention is operator-only: neither `edge serve` nor `usage collect-node-metrics` (including `--continuous`) trims logs while requests are appended, so the command below is the single entry point. `edge serve` prints `log_retention: on_demand (thunder-forge usage trim-logs)` where it used to trim at startup, and `usage collect-node-metrics` lost its `--retention-days` flag along with the trim it used to run.
 
 TF edge now collects node metrics in-process every 60 seconds by default, so no separate metrics process is required.
 
@@ -375,6 +376,13 @@ uv run thunder-forge usage trim-logs
 # optional override
 uv run thunder-forge usage trim-logs --retention-days 7
 ```
+
+What the command touches:
+
+- `logs/tf-edge-access.jsonl` and `logs/tf-node-metrics.jsonl` are trimmed by record `timestamp`. The kept records go to a temp file that is swapped in with `os.replace`, and the swap is abandoned when the source changed since it was read: a file that grew under a live writer is left intact and reported as `skipped_jsonl_files`. The check and the swap are not one atomic step, so a writer that already holds the file open can still land a record in the replaced inode.
+- `logs/*.stdout.log`, `logs/*.stderr.log` and `logs/*.log.gz` are pruned whole once their mtime is older than the retention window.
+- A file that changed during the run is left alone and named in a `Warning:` line on stderr, so a scheduled trim that could not run says so instead of reporting a quiet zero.
+- `logs/olla.log` is plain text without record timestamps, so it is not a retention target and is never rewritten or deleted.
 
 Print daily summary from structured logs:
 
