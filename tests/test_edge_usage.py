@@ -197,6 +197,9 @@ def test_usage_page_is_anonymous_but_data_is_not(tmp_path: Path, get) -> None:
     assert status == 200
     assert "text/html" in head
     assert "Thunder Forge usage" in body
+    # The cold cache card is the reason this page changed; a silent removal must fail CI.
+    assert "Cold cache per hour" in body
+    assert 'id="coldChart"' in body
 
     assert get(config, "/usage/report?period=2026-06-02")[0] == 401
     assert get(config, "/usage/events?period=2026-06-02")[0] == 401
