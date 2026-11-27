@@ -367,7 +367,7 @@ Edge serve flags for this behavior:
 ```bash
 uv run thunder-forge edge serve --metrics-interval-seconds 60
 uv run thunder-forge edge serve --no-collect-node-metrics
-uv run thunder-forge edge serve --timeout 300  # default 180; upstream Olla I/O timeout in seconds
+uv run thunder-forge edge serve --timeout 300  # default 180; upstream Olla I/O timeout in seconds (flag only: no tfconfig key, and the generated LaunchAgent does not pass it)
 ```
 
 ### Edge access log fields
@@ -376,7 +376,7 @@ Every `logs/tf-edge-access.jsonl` row records `timestamp`, `request_id`, `client
 
 | Field | Meaning |
 |---|---|
-| `stream` | `true` for an SSE/streaming request |
+| `stream` | `true` when the request reached the streaming response path (a rejected request never gets far enough to be known as streaming) |
 | `headers_sent` | `true` only when a failure came after the response status and headers reached the client, so the client holds a partial answer; a successful record stays `false` |
 | `error_kind` | Empty on success, otherwise one value from the closed vocabulary below |
 

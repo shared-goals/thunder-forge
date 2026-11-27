@@ -48,7 +48,7 @@ Expected keys:
 - `status_code`
 - `latency_ms`
 - `olla_endpoint`
-- `stream` (bool, SSE request)
+- `stream` (bool, `true` when the request reached the streaming response path)
 - `headers_sent` (bool, `true` only when a failure came after the status and headers reached the client; a
   successful record stays `false`)
 - `error_kind` (empty on success; otherwise `edge_timeout`, `edge_connect`, `upstream_error`, `stream_aborted` or `client_aborted`)
