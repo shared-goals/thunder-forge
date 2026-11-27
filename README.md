@@ -443,8 +443,8 @@ Failure and coverage signals in the same summary:
 
 Two things the summary deliberately cannot answer. The access log carries no token counts and no
 first-token timestamp, so there is no cost per client and no "how long until the answer started"
-figure; [Minimal Metric Strategy](#minimal-metric-strategy) lists what would have to be collected
-first. And `consumed_ms` is wall time at the edge: for a streaming request it ends when the last
+figure; [Minimal Metric Strategy](#minimal-metric-strategy) lists the first-token timestamp still to
+collect, and nothing collects tokens at all. And `consumed_ms` is wall time at the edge: for a streaming request it ends when the last
 byte reaches the client, so it includes client backpressure and is not model service time.
 
 ### Minimal Metric Strategy

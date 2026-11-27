@@ -205,11 +205,14 @@ make usage-duckdb 2026-06-02
 
 The SQL script emits daily tables for:
 
-- by user: requests, consumed time, tokens
-- by node: requests, consumed time, tokens
+- by user: requests, consumed time
+- by node: requests, consumed time
 - by hour: requests with model and user split
 - by node/hour: request split
-- by model: requests, consumed time, tokens
+- by model: requests, consumed time
+
+No table carries a token count: the script projects a `tokens` column, but the access record has no
+token keys, so the column reads `0` for every row (not "unknown", not a measurement).
 - node hot-loaded summary from collected snapshots
 
 ## Guardrails
@@ -218,8 +221,9 @@ The SQL script emits daily tables for:
   ADR 0002 (see its MVP guardrails)
 - the edge dashboard is a read-only view over the same JSONL files, not a second store
 - edge traffic is the request source of truth for now
-- token fields exist nowhere in the log, so every `tokens.*` column the DuckDB script projects is
-  null until the edge collects them (README, Minimal Metric Strategy)
+- token fields exist nowhere in the log, so the `tokens` column the DuckDB script projects is `0`
+  for every row until the edge collects them (README, Minimal Metric Strategy). A `0` there means
+  "not collected", not "no tokens used".
 - hot-loaded model sets come from oMLX model status snapshots
 
 ## Evolution
