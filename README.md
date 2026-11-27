@@ -337,6 +337,8 @@ anonymously - it carries no data and a browser navigation cannot send an `Author
 `/usage/report` and `/usage/events` require `Authorization: Bearer <token>` (never a query token, which would
 leak into proxy logs) and answer `401` without it.
 
+![Thunder Forge usage dashboard](docs/images/usage-dashboard.png)
+
 ## Daily Usage Reporting
 
 Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/YAGNI operation:
