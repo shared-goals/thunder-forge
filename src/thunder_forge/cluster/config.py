@@ -42,6 +42,8 @@ DEFAULT_SMOKE_TIMEOUT = 30.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
 BUILD_INFO_GIT_TIMEOUT_SECONDS = 5.0
+# Published by a caller that has no build information at all: visible, never plausible.
+UNKNOWN_BUILD_INFO: dict[str, object] = {"version": "unknown", "commit": "unknown", "dirty": None}
 
 
 class RuntimeType(StrEnum):
@@ -1016,7 +1018,8 @@ def resolve_build_info(repo_root: Path) -> dict[str, object]:
     "unknown" and `dirty` is None when git or the checkout cannot be read.
     """
     commit = _git_stdout(repo_root, "rev-parse", "HEAD")
-    status = None if commit is None else _git_stdout(repo_root, "status", "--porcelain")
+    # An empty or missing answer leaves the tree state unknown, never "clean".
+    status = _git_stdout(repo_root, "status", "--porcelain") if commit else None
     dirty = None if status is None else bool(status)
     return {"version": __version__, "commit": commit or "unknown", "dirty": dirty}
 
