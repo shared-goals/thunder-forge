@@ -2,7 +2,7 @@
 
 ## What this repository is
 
-Thunder Forge is the control plane for a private inference cluster: TF edge (OpenAI-compatible HTTPS gateway), Olla (router) and oMLX runtimes on four Apple-Silicon nodes. Read `README.md` before changing behaviour; `docs/operations/` holds the runbooks; `tfconfig.example.yaml` is the committed config surface. The live `tfconfig.yaml`, `.env` and API keys never enter Git.
+Thunder Forge is the control plane for a private inference cluster, not a library: TF edge (OpenAI-compatible HTTPS gateway), Olla (router) and oMLX runtimes on four Apple-Silicon nodes. Read `README.md` before changing behaviour; `docs/operations/` holds the runbooks; `tfconfig.example.yaml` is the committed config surface. `tfconfig.yaml`, `.env` and `logs/` are gitignored, so the live config, the secrets and the logs stay out of Git.
 
 - Language / runtime: Python >= 3.12 (`pyproject.toml`); package manager `uv` (`.venv` in the repo; the edge systemd unit runs `.venv/bin/thunder-forge` directly).
 - Owner: shag (runtime), shared with gnezim; production lives on rock at `/mnt/samsung/thunder-forge`.
@@ -22,7 +22,7 @@ Local agents run against this cluster every day, so a broken main is not a theor
 ## Status Endpoints
 
 - Keep `/health` and `/status` anonymously accessible during pre-MVP.
-- Anonymous `/status` stays a liveness and version check: node health, readiness and the versions of the running services. Live request identities, client ids and token-like material belong behind `TF_EDGE_ADMIN_TOKEN`.
+- Anonymous `/status` must stay a liveness and version check: node health, readiness and the gateway and runtime versions. Live request identities, client ids and token-like material belong behind `TF_EDGE_ADMIN_TOKEN`.
 - Treat CLI status as an HTTP consumer of edge status APIs, not a secondary status implementation.
 - Usage endpoints (`/usage`, `/usage/report`, `/usage/events`) are disabled (404) until `TF_EDGE_ADMIN_TOKEN` is set, then the page is anonymous while data paths require the bearer token; client API keys (`TF_USER_*`) authorize inference only, never usage.
 
@@ -35,21 +35,23 @@ Local agents run against this cluster every day, so a broken main is not a theor
 
 ## Authority, safety and the live cluster
 
-- The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `usage report`, `usage events`.
-- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `config apply`, installing or removing a runtime, changing `tfconfig.yaml` on a host, restarting edge/Olla/oMLX, deleting cached models. Propose options with trade-offs and wait for the operator's decision instead of executing them.
+These rules apply to any change on the running cluster (nodes, edge, Olla, tfconfig, deployment) as opposed to in-repo development.
+
+- The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `usage report`, `usage collect-node-metrics`, `usage trim-logs`, and the `/usage/report` and `/usage/events` endpoints.
+- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `make config`, installing or removing a runtime, changing `tfconfig.yaml` on a host, restarting edge/Olla/oMLX, killing a process, changing model placement, deleting cached models. Propose options with trade-offs and wait for the operator's decision instead of executing them.
 - Load the operational runbook or skill for this cluster before acting on live infrastructure; do not guess hosts, ports, paths or deployment conventions.
 - Diagnose before acting: read the file-backed evidence (`logs/tf-edge-access.jsonl`, `logs/tf-node-metrics.jsonl`, Olla logs) and attribute the failing layer before proposing a fix.
 - Prefer hostname conventions (`.lan` FQDNs) over raw IPs in configs and probes.
 - After a cluster change, verify through the real path: `cluster smoke`, one alias chat through the edge, and a live `cluster status`. Self-reported success is not verification.
 - Keep rollback cheap: leave old config entries as comments for a one-edit rollback, and copy a node settings file before editing it.
 - Merged code is not a deployed cluster. Keep four separate statements: implemented, published (PR merged), deployed (which commit is running), observed (what the logs and `/status` show). Never report the first as evidence of the last.
-- Secrets: API keys, `TF_USER_*` values, `TF_EDGE_ADMIN_TOKEN`, SSH keys and `.env` content stay out of the repo, tests, docs, logs and PR bodies. Use synthetic fixtures.
+- Secrets: API keys, `TF_USER_*` values, `TF_EDGE_ADMIN_TOKEN`, SSH keys and `.env` content stay out of unit files, configs, commits, chat output, tests, docs, logs and PR bodies. Use synthetic fixtures.
 - Model aliases are a public contract. Adding an alias is a compatible change; removing or renaming one needs a stated reason and one change that updates `tfconfig.yaml`, docs, every client configuration you know about, and a check that traffic to the old name has stopped. An alias that is merely broken for a client is worse than an alias that was never published.
-- Access and node-metric logs are personal data: client ids, client IPs and usage patterns. Do not paste raw log lines outside the owner's machines, and do not add fields that carry prompt content, keys or headers.
+- Access and node-metric logs are personal data: client ids, client IPs and usage patterns. `logs/*.jsonl` never enters Git, raw log lines do not leave the owner's machines, and no field may carry prompt content, keys or headers.
 
 ## Checks
 
-- Gate before publishing: `uv run pytest -q` and `uv run ruff check .` (`make dev-check` runs the combined check).
+- Gate before publishing: `uv run pytest -q` and `uv run ruff check .` (`make dev-check` runs the tests plus `make dev-lint`, which covers `src/thunder_forge` and `tests`).
 - A change to a config key, a payload field, a log field or a CLI flag updates the documentation that describes it in the same PR. An undocumented field drifts within days.
 - New non-trivial logic — a branch, a loop, a parser, a report aggregation, anything about money, privacy or data retention — ships with a test, or with an assert-based self-check when a test is impractical.
 - Anything that touches the serving path is exercised from a worktree, never from the serving checkout.
@@ -57,12 +59,12 @@ Local agents run against this cluster every day, so a broken main is not a theor
 
 ## Deployment provenance
 
-- The running edge publishes the build it executes: the package version and the git commit, visible in `/status` and in one startup log line. Removing, bypassing or defaulting that is a regression; an empty value must be a visible "unknown", not a plausible-looking string.
+- The edge must publish the build it executes: the package version and the git commit, visible in `/status` and in one startup log line. Removing, bypassing or defaulting that is a regression; an empty value must read as a visible "unknown", not a plausible-looking string.
 - After a deploy, compare the published commit with the merged commit. If it differs, deploy is not finished and the reason is unknown — say exactly that rather than assuming.
 
 ## Versioned publication
 
-- Every change published to `main` carries a version: bump `__version__` in `src/thunder_forge/__init__.py`, add a `CHANGELOG.md` entry, create the annotated tag `v<version>` on that commit, and publish a GitHub release with the same notes. Verify the remote commit, tag, package version and release agree.
+- Every change published to `main` carries a version: bump `__version__` in `src/thunder_forge/__init__.py`, add a `CHANGELOG.md` entry, create the annotated tag `v<version>` on that commit, and publish a GitHub release with the same notes. Verify the remote commit, tag, package version and release agree. `v0.1.0` predates this rule and stays lightweight; every new tag is annotated.
 - PATCH by default, for fixes, internal implementation, tests, documentation and rules that do not extend or deprecate the public contract. MINOR for a compatible addition or deprecation of that contract — a new model alias, a new endpoint, a changed payload field — or a substantial functional slice. MAJOR only after 1.0; until then an incompatible change requires an explicit contract decision and the next MINOR.
 - Group related commits into one published release. Each later published change gets its own version and tag. Preserve published tags.
 
