@@ -3803,8 +3803,11 @@ def usage_check(
     except ValueError:
         typer.echo(f"Error: invalid window {window!r}, expected a duration like 30s, 15m, or 2h", err=True)
         raise typer.Exit(2)
-    if max_failure_rate < 0 or min_requests < 0:
-        typer.echo("Error: --max-failure-rate and --min-requests must not be negative", err=True)
+    if max_failure_rate < 0 or max_failure_rate > 1:
+        typer.echo("Error: --max-failure-rate is a ratio between 0 and 1 (0.05 is five percent)", err=True)
+        raise typer.Exit(2)
+    if min_requests < 0:
+        typer.echo("Error: --min-requests must not be negative", err=True)
         raise typer.Exit(2)
     log_path = _edge_access_log_path(repo_root, config, access_log)
     if not log_path.is_file():
@@ -3827,9 +3830,14 @@ def usage_check(
     requests = 0
     failures = 0
     statuses: Counter[str] = Counter()
+    newest_record_at: datetime | None = None
     for record in records:
         timestamp = _parse_timestamp(record.get("timestamp"))
-        if timestamp is None or timestamp < cutoff:
+        if timestamp is None:
+            continue
+        if newest_record_at is None or timestamp > newest_record_at:
+            newest_record_at = timestamp
+        if timestamp < cutoff:
             continue
         status_code = record.get("status_code")
         if not isinstance(status_code, int):
@@ -3844,7 +3852,9 @@ def usage_check(
             failures += 1
 
     failure_rate = failures / requests if requests else 0.0
-    insufficient_data = requests < min_requests
+    # Too few requests to judge a rate, unless everything that did arrive failed: an all-failure
+    # window is the shape a real outage has on a quiet cluster.
+    insufficient_data = requests < min_requests and failures < requests
     breached = not insufficient_data and failure_rate > max_failure_rate
 
     if json_output:
@@ -3860,13 +3870,16 @@ def usage_check(
             "statuses": dict(sorted(statuses.items())),
             "log_path": str(log_path),
             "checked_at": checked_at.isoformat(),
+            # Deliberately not a breach: an idle cluster is silent too. A wrapper decides.
+            "newest_record_at": newest_record_at.isoformat() if newest_record_at is not None else None,
         }
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
         result = "breach" if breached else ("insufficient_data" if insufficient_data else "ok")
         typer.echo(
             f"usage check: window={window} requests={requests} failures={failures} "
-            f"rate={failure_rate * 100:.1f}% threshold={max_failure_rate * 100:.1f}% result={result}"
+            f"rate={failure_rate * 100:.1f}% threshold={max_failure_rate * 100:.1f}% "
+            f"newest={newest_record_at.isoformat() if newest_record_at is not None else 'none'} result={result}"
         )
     if breached:
         raise typer.Exit(1)

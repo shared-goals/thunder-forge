@@ -61,9 +61,8 @@ def test_usage_check_reports_healthy_window(tmp_path: Path, monkeypatch) -> None
     result = runner.invoke(app, ["usage", "check", "--max-failure-rate", "0.3"])
 
     assert result.exit_code == 0
-    assert (
-        "usage check: window=15m requests=5 failures=1 rate=20.0% threshold=30.0% result=ok" in result.stdout
-    )
+    assert "requests=5 failures=1 rate=20.0% threshold=30.0%" in result.stdout
+    assert "result=ok" in result.stdout
 
 
 def test_usage_check_exits_one_when_failure_rate_exceeds_threshold(tmp_path: Path, monkeypatch) -> None:
@@ -76,20 +75,37 @@ def test_usage_check_exits_one_when_failure_rate_exceeds_threshold(tmp_path: Pat
     result = runner.invoke(app, ["usage", "check"])
 
     assert result.exit_code == 1
-    assert "requests=10 failures=2 rate=20.0% threshold=5.0% result=breach" in result.stdout
+    assert "requests=10 failures=2 rate=20.0% threshold=5.0%" in result.stdout
+    assert "result=breach" in result.stdout
 
 
 def test_usage_check_reports_insufficient_data_below_min_requests(tmp_path: Path, monkeypatch) -> None:
-    _repo_with_access_log(tmp_path, monkeypatch, [_record(502, 1), _record(502, 2)])
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(200, 1), _record(200, 2)])
 
     result = runner.invoke(app, ["usage", "check", "--json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["requests"] == 2
-    assert payload["failure_rate"] == 1.0
+    assert payload["failure_rate"] == 0.0
     assert payload["insufficient_data"] is True
     assert payload["breached"] is False
+
+
+def test_usage_check_breaches_when_every_request_in_a_small_window_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A quiet window where everything failed is an outage, not insufficient data."""
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(502, 1), _record(502, 2)])
+
+    result = runner.invoke(app, ["usage", "check", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["requests"] == 2
+    assert payload["failure_rate"] == 1.0
+    assert payload["insufficient_data"] is False
+    assert payload["breached"] is True
 
 
 def test_usage_check_ignores_records_outside_the_window(tmp_path: Path, monkeypatch) -> None:
@@ -140,6 +156,7 @@ def test_usage_check_json_payload_shape(tmp_path: Path, monkeypatch) -> None:
         "statuses",
         "log_path",
         "checked_at",
+        "newest_record_at",
     }
     assert payload["threshold"] == 0.05
     assert payload["min_requests"] == 5

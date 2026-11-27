@@ -459,14 +459,19 @@ make usage-check 15m
 `usage check` reads the log resolved from `services.edge.access_log` (default `logs/tf-edge-access.jsonl`),
 or `--access-log <path>`, keeps the records whose `timestamp` falls inside `--window` (default `15m`;
 suffix `s`, `m`, or `h`), and compares the failure ratio against `--max-failure-rate` (default `0.05`).
-A record counts as a failure when `status_code >= 500`, when `--include-client-errors` widens that to
-`>= 400`, or when it carries a cluster `error_kind` — the same rule `usage report` counts with, so a
-stream that died after its headers (`status_code: 200`) is a failure here too. A `client_aborted` row is
-not: that is the client's own choice. Below `--min-requests` (default `5`) it reports `insufficient
-data` instead of breaching.
+A record counts as a failure when `status_code >= 500`, when `--include-client-errors` widens the floor
+to `>= 400`, or when it carries a cluster `error_kind` — the same `error_kind` rule `usage report` counts
+with, so a stream that died after its headers (`status_code: 200`) is a failure here too. A
+`client_aborted` row is not: that is the client's own choice. `--max-failure-rate` is a ratio (`0.05` is
+five percent) and is rejected outside `0…1`. Below `--min-requests` (default `5`) it reports
+`insufficient data` instead of breaching — unless every request that did arrive failed, which is an
+outage, not a small sample.
 
 `--json` prints one object: `window_seconds`, `requests`, `failures`, `failure_rate`, `threshold`,
-`min_requests`, `breached`, `insufficient_data`, `statuses`, `log_path`, `checked_at`.
+`min_requests`, `breached`, `insufficient_data`, `statuses`, `log_path`, `checked_at`,
+`newest_record_at`. The last one is the newest record in the whole log, outside the window too: a dead
+edge writes nothing, so a wrapper watching for a stale `newest_record_at` catches the silence this check
+deliberately does not breach on (an idle cluster is silent as well).
 
 Each run reads the whole log file in memory, whatever retention has left; at a few thousand records a day
 that is milliseconds, and it is the reason a scheduled `usage trim-logs` matters.
@@ -475,7 +480,7 @@ Exit codes:
 
 - `0`: healthy, or too few requests in the window to judge
 - `1`: breach, failure rate over the threshold
-- `2`: operator error: a missing or unreadable access log, an invalid `--window`, or a negative option
+- `2`: operator error: a missing or unreadable access log, an invalid `--window`, a `--max-failure-rate` outside `0…1`, or a negative `--min-requests`
 
 Run it from a host that can read the log, for example every five minutes from cron:
 
