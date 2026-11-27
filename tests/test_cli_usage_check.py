@@ -157,6 +157,7 @@ def test_usage_check_json_payload_shape(tmp_path: Path, monkeypatch) -> None:
         "log_path",
         "checked_at",
         "newest_record_at",
+        "stale",
     }
     assert payload["threshold"] == 0.05
     assert payload["min_requests"] == 5
@@ -242,3 +243,34 @@ def test_usage_check_reads_the_log_given_on_the_command_line(tmp_path: Path, mon
     payload = json.loads(result.stdout)
     assert payload["requests"] == 1
     assert payload["log_path"] == str(other)
+
+
+def test_usage_check_reports_silence_when_the_log_stops_growing(tmp_path: Path, monkeypatch) -> None:
+    """A dead edge writes nothing; with --max-staleness that is a breach, not a healthy zero."""
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(200, 180)])
+
+    result = runner.invoke(app, ["usage", "check", "--window", "15m", "--max-staleness", "30m"])
+
+    assert result.exit_code == 1
+    assert "result=stale_log" in result.stdout
+
+
+def test_usage_check_reports_an_empty_log_as_insufficient(tmp_path: Path, monkeypatch) -> None:
+    _repo_with_access_log(tmp_path, monkeypatch, [])
+
+    result = runner.invoke(app, ["usage", "check", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["requests"] == 0
+    assert payload["insufficient_data"] is True
+    assert payload["newest_record_at"] is None
+
+
+def test_usage_check_rejects_a_nan_failure_rate(tmp_path: Path, monkeypatch) -> None:
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(200, 1)])
+
+    result = runner.invoke(app, ["usage", "check", "--max-failure-rate", "nan"])
+
+    assert result.exit_code == 2
+    assert "ratio between 0 and 1" in result.stderr

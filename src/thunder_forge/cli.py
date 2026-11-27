@@ -3770,6 +3770,11 @@ def usage_check(
         "--access-log",
         help="Access log path. Defaults to tfconfig services.edge.access_log.",
     ),
+    max_staleness: str | None = typer.Option(
+        None,
+        "--max-staleness",
+        help="Breach when the newest record in the log is older than this (same suffixes as --window).",
+    ),
     window: str = typer.Option(
         "15m",
         "--window",
@@ -3803,12 +3808,26 @@ def usage_check(
     except ValueError:
         typer.echo(f"Error: invalid window {window!r}, expected a duration like 30s, 15m, or 2h", err=True)
         raise typer.Exit(2)
-    if max_failure_rate < 0 or max_failure_rate > 1:
+    if not 0 <= max_failure_rate <= 1:
         typer.echo("Error: --max-failure-rate is a ratio between 0 and 1 (0.05 is five percent)", err=True)
         raise typer.Exit(2)
     if min_requests < 0:
         typer.echo("Error: --min-requests must not be negative", err=True)
         raise typer.Exit(2)
+    max_staleness_seconds: int | None = None
+    if max_staleness is not None:
+        try:
+            max_staleness_seconds = _parse_usage_check_window(max_staleness)
+        except ValueError:
+            typer.echo(f"Error: invalid --max-staleness {max_staleness!r}, expected like 15m or 2h", err=True)
+            raise typer.Exit(2)
+    max_staleness_seconds: int | None = None
+    if max_staleness is not None:
+        try:
+            max_staleness_seconds = _parse_usage_check_window(max_staleness)
+        except ValueError:
+            typer.echo(f"Error: invalid --max-staleness {max_staleness!r}, expected like 15m or 2h", err=True)
+            raise typer.Exit(2)
     log_path = _edge_access_log_path(repo_root, config, access_log)
     if not log_path.is_file():
         # A missing or mistyped log must not look like a healthy cluster.
@@ -3854,8 +3873,12 @@ def usage_check(
     failure_rate = failures / requests if requests else 0.0
     # Too few requests to judge a rate, unless everything that did arrive failed: an all-failure
     # window is the shape a real outage has on a quiet cluster.
-    insufficient_data = requests < min_requests and failures < requests
-    breached = not insufficient_data and failure_rate > max_failure_rate
+    insufficient_data = requests < min_requests and (requests == 0 or failures < requests)
+    stale = max_staleness_seconds is not None and (
+        newest_record_at is None
+        or newest_record_at < checked_at - timedelta(seconds=max_staleness_seconds)
+    )
+    breached = stale or (not insufficient_data and failure_rate > max_failure_rate)
 
     if json_output:
         payload = {
@@ -3867,6 +3890,7 @@ def usage_check(
             "min_requests": min_requests,
             "breached": breached,
             "insufficient_data": insufficient_data,
+            "stale": stale,
             "statuses": dict(sorted(statuses.items())),
             "log_path": str(log_path),
             "checked_at": checked_at.isoformat(),
@@ -3875,7 +3899,9 @@ def usage_check(
         }
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        result = "breach" if breached else ("insufficient_data" if insufficient_data else "ok")
+        result = (
+            "stale_log" if stale else "breach" if breached else "insufficient_data" if insufficient_data else "ok"
+        )
         typer.echo(
             f"usage check: window={window} requests={requests} failures={failures} "
             f"rate={failure_rate * 100:.1f}% threshold={max_failure_rate * 100:.1f}% "
