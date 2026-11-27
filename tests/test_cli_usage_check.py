@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
 from typer.testing import CliRunner
 
 from thunder_forge.cli import app
@@ -61,7 +62,7 @@ def test_usage_check_reports_healthy_window(tmp_path: Path, monkeypatch) -> None
 
     assert result.exit_code == 0
     assert (
-        "usage check: window=15m requests=5 failures_5xx=1 rate=20.0% threshold=30.0% result=ok" in result.stdout
+        "usage check: window=15m requests=5 failures=1 rate=20.0% threshold=30.0% result=ok" in result.stdout
     )
 
 
@@ -75,7 +76,7 @@ def test_usage_check_exits_one_when_failure_rate_exceeds_threshold(tmp_path: Pat
     result = runner.invoke(app, ["usage", "check"])
 
     assert result.exit_code == 1
-    assert "requests=10 failures_5xx=2 rate=20.0% threshold=5.0% result=breach" in result.stdout
+    assert "requests=10 failures=2 rate=20.0% threshold=5.0% result=breach" in result.stdout
 
 
 def test_usage_check_reports_insufficient_data_below_min_requests(tmp_path: Path, monkeypatch) -> None:
@@ -115,9 +116,9 @@ def test_usage_check_include_client_errors_counts_4xx(tmp_path: Path, monkeypatc
     client_error_result = runner.invoke(app, ["usage", "check", "--include-client-errors"])
 
     assert default_result.exit_code == 0
-    assert "failures_5xx=0" in default_result.stdout
+    assert "failures=0" in default_result.stdout
     assert client_error_result.exit_code == 1
-    assert "failures_4xx_5xx=1 rate=16.7%" in client_error_result.stdout
+    assert "failures=1 rate=16.7%" in client_error_result.stdout
 
 
 def test_usage_check_json_payload_shape(tmp_path: Path, monkeypatch) -> None:
@@ -172,3 +173,55 @@ def test_usage_check_rejects_a_window_too_large_for_a_timestamp(tmp_path: Path, 
 
     assert result.exit_code == 2
     assert "is too large" in result.stderr
+
+
+def test_usage_check_counts_a_stream_abort_and_ignores_a_client_abort(tmp_path: Path, monkeypatch) -> None:
+    """A 200 row with a cluster error_kind is a failure; a client hang-up is not."""
+    records = [
+        {**_record(200, 1), "error_kind": "stream_aborted"},
+        {**_record(200, 2), "error_kind": "client_aborted"},
+        {**_record(200, 3), "error_kind": ""},
+        _record(200, 4),
+    ]
+    _repo_with_access_log(tmp_path, monkeypatch, records)
+
+    result = runner.invoke(app, ["usage", "check", "--window", "1h", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["requests"] == 4
+    assert payload["failures"] == 1
+
+
+@pytest.mark.parametrize(("window", "seconds"), [("30s", 30), ("15m", 900), ("2h", 7200)])
+def test_usage_check_window_units(tmp_path: Path, monkeypatch, window: str, seconds: int) -> None:
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(200, 1)])
+
+    result = runner.invoke(app, ["usage", "check", "--window", window, "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["window_seconds"] == seconds
+
+
+def test_usage_check_rejects_a_zero_window(tmp_path: Path, monkeypatch) -> None:
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(200, 1)])
+
+    result = runner.invoke(app, ["usage", "check", "--window", "0s"])
+
+    assert result.exit_code == 2
+    assert "invalid window '0s'" in result.stderr
+
+
+def test_usage_check_reads_the_log_given_on_the_command_line(tmp_path: Path, monkeypatch) -> None:
+    _repo_with_access_log(tmp_path, monkeypatch, [])
+    other = tmp_path / "copied.jsonl"
+    other.write_text(json.dumps(_record(502, 1)) + "\n" * 1)
+
+    result = runner.invoke(
+        app, ["usage", "check", "--access-log", str(other), "--window", "1h", "--min-requests", "1", "--json"]
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["requests"] == 1
+    assert payload["log_path"] == str(other)

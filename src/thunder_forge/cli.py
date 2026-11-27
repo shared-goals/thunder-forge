@@ -3765,6 +3765,11 @@ def _parse_usage_check_window(raw: str) -> int:
 
 @usage_app.command("check")
 def usage_check(
+    access_log: Path | None = typer.Option(
+        None,
+        "--access-log",
+        help="Access log path. Defaults to tfconfig services.edge.access_log.",
+    ),
     window: str = typer.Option(
         "15m",
         "--window",
@@ -3801,7 +3806,7 @@ def usage_check(
     if max_failure_rate < 0 or min_requests < 0:
         typer.echo("Error: --max-failure-rate and --min-requests must not be negative", err=True)
         raise typer.Exit(2)
-    log_path = _edge_access_log_path(repo_root, config, None)
+    log_path = _edge_access_log_path(repo_root, config, access_log)
     if not log_path.is_file():
         # A missing or mistyped log must not look like a healthy cluster.
         typer.echo(f"Error: access log not found: {log_path}", err=True)
@@ -3831,7 +3836,11 @@ def usage_check(
             continue
         requests += 1
         statuses[str(status_code)] += 1
-        if status_code >= failure_floor:
+        # Same rule `usage report` counts with: a stream that died after its headers keeps
+        # status_code 200, and a client hanging up is not a cluster failure.
+        error_kind = record.get("error_kind")
+        cluster_failure = isinstance(error_kind, str) and error_kind not in ("", "client_aborted")
+        if cluster_failure or status_code >= failure_floor:
             failures += 1
 
     failure_rate = failures / requests if requests else 0.0
@@ -3854,10 +3863,9 @@ def usage_check(
         }
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        failures_label = "failures_4xx_5xx" if include_client_errors else "failures_5xx"
         result = "breach" if breached else ("insufficient_data" if insufficient_data else "ok")
         typer.echo(
-            f"usage check: window={window} requests={requests} {failures_label}={failures} "
+            f"usage check: window={window} requests={requests} failures={failures} "
             f"rate={failure_rate * 100:.1f}% threshold={max_failure_rate * 100:.1f}% result={result}"
         )
     if breached:
