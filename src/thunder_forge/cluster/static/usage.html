@@ -171,9 +171,6 @@ async function load() {
       datasets: [
         { label: "cold share", data: hours.map((hour) => (coldByHour[hour] || {}).cold_share ?? null),
           backgroundColor: colors[4] + "99", yAxisID: "y" },
-        { type: "line", label: "cold p50 ms",
-          data: hours.map((hour) => ((coldLatency[hour] || {}).cold || {}).p50 ?? null),
-          borderColor: colors[4], borderDash: [4, 3], tension: 0.2, yAxisID: "y1" },
         { type: "line", label: "warm p50 ms",
           data: hours.map((hour) => ((coldLatency[hour] || {}).warm || {}).p50 ?? null),
           borderColor: colors[1], tension: 0.2, yAxisID: "y1" },

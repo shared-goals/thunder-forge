@@ -135,11 +135,28 @@ def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
 _CACHE_KINDS: tuple[str, ...] = ("cold", "warm")
 
 
-def _cache_bucket(counts: Counter[str]) -> dict[str, object]:
-    cold = counts.get("cold", 0)
-    warm = counts.get("warm", 0)
-    total = cold + warm
-    return {"cold": cold, "warm": warm, "cold_share": round(cold / total, 4) if total else 0.0}
+def _empty_cache_latency() -> dict[str, list[int]]:
+    return {"cold": [], "warm": []}
+
+
+@dataclass(frozen=True)
+class CacheBucket:
+    """Cold/warm split of one scope; the share is derived, never stored."""
+
+    cold: int = 0
+    warm: int = 0
+
+    @classmethod
+    def from_counts(cls, counts: Counter[str]) -> CacheBucket:
+        return cls(cold=counts.get("cold", 0), warm=counts.get("warm", 0))
+
+    def to_json_dict(self) -> dict[str, object]:
+        total = self.cold + self.warm
+        return {
+            "cold": self.cold,
+            "warm": self.warm,
+            "cold_share": round(self.cold / total, 4) if total else 0.0,
+        }
 
 
 def _cache_latency(values: list[int]) -> dict[str, int]:
@@ -150,17 +167,17 @@ def _cache_latency(values: list[int]) -> dict[str, int]:
     }
 
 
-def _is_cold(session_id: str, started: datetime | None, previous: datetime | None, ttl_seconds: int) -> bool:
+def _is_cold(session_id: str, started: datetime | None, previous: datetime | None) -> bool:
     """True when the request cannot reuse the node's prefix cache.
 
     No session id means least-connections routing can land on a different node each time; a
     session without a previous request in the period has no measured gap to rely on; a gap longer
-    than the sticky TTL means affinity already expired. An unreadable timestamp cannot prove
+    than the sticky TTL means affinity already expired. An unreadable start time cannot prove
     affinity either.
     """
     if not session_id or started is None:
         return True
-    return previous is None or (started - previous).total_seconds() > ttl_seconds
+    return previous is None or (started - previous).total_seconds() > DEFAULT_STICKY_IDLE_TTL_SECONDS
 
 
 def _as_non_negative_int(raw: object) -> int | None:
@@ -229,9 +246,9 @@ class DailyUsageSummary:
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     latency_ms_by_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     cache_ttl_seconds: int = DEFAULT_STICKY_IDLE_TTL_SECONDS
-    cache_total: dict[str, object] = field(default_factory=dict)
-    cache_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
-    cache_by_client: dict[str, dict[str, object]] = field(default_factory=dict)
+    cache_total: CacheBucket = field(default_factory=CacheBucket)
+    cache_by_hour: dict[str, CacheBucket] = field(default_factory=dict)
+    cache_by_client: dict[str, CacheBucket] = field(default_factory=dict)
     cache_latency_total: dict[str, dict[str, int]] = field(default_factory=dict)
     cache_latency_by_hour: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     peak_concurrency_by_hour: dict[str, int] = field(default_factory=dict)
@@ -276,9 +293,9 @@ class DailyUsageSummary:
             },
             "cache": {
                 "ttl_seconds": self.cache_ttl_seconds,
-                "total": self.cache_total,
-                "by_hour": self.cache_by_hour,
-                "by_client": self.cache_by_client,
+                "total": self.cache_total.to_json_dict(),
+                "by_hour": {hour: bucket.to_json_dict() for hour, bucket in self.cache_by_hour.items()},
+                "by_client": {client: bucket.to_json_dict() for client, bucket in self.cache_by_client.items()},
                 "latency": {"total": self.cache_latency_total, "hour": self.cache_latency_by_hour},
             },
             "concurrency": {"peak_by_hour": self.peak_concurrency_by_hour},
@@ -328,8 +345,8 @@ def summarize_daily_usage(
     intervals_by_hour: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
     cache_by_hour: dict[str, Counter[str]] = defaultdict(Counter)
     cache_by_client: dict[str, Counter[str]] = defaultdict(Counter)
-    cache_latency_values: dict[str, list[int]] = {kind: [] for kind in _CACHE_KINDS}
-    cache_latency_values_by_hour: dict[str, dict[str, list[int]]] = {}
+    cache_latency_values: dict[str, list[int]] = _empty_cache_latency()
+    cache_latency_values_by_hour: dict[str, dict[str, list[int]]] = defaultdict(_empty_cache_latency)
     # Tracked after the period and client filters, so the first kept request of a session is cold.
     last_seen_by_session: dict[str, datetime] = {}
     excluded_model_names = _normalize_excluded_models(excluded_models)
@@ -367,9 +384,11 @@ def summarize_daily_usage(
         model_name = model.strip() if isinstance(model, str) else ""
         hour_bucket = _hour_bucket(timestamp)
         latency_values_by_hour[hour_bucket].append(latency_ms)
+        # The TTL window Olla keeps starts at request arrival, not at completion.
+        started_at = timestamp - timedelta(milliseconds=latency_ms) if timestamp is not None else None
         if timestamp is not None:
             # An interval belongs to the hour the request finished in.
-            intervals_by_hour[hour_bucket].append((timestamp - timedelta(milliseconds=latency_ms), timestamp))
+            intervals_by_hour[hour_bucket].append((started_at, timestamp))
 
         requests_by_user[client_id] += 1
         consumed_ms_by_user[client_id] += latency_ms
@@ -377,21 +396,16 @@ def summarize_daily_usage(
         consumed_ms_by_hour[hour_bucket] += latency_ms
         session_id = payload.get("sticky_id")
         session_key = session_id.strip() if isinstance(session_id, str) else ""
-        cold = _is_cold(
-            session_key,
-            timestamp,
-            last_seen_by_session.get(session_key),
-            DEFAULT_STICKY_IDLE_TTL_SECONDS,
-        )
-        if session_key and timestamp is not None:
-            last_seen_by_session[session_key] = timestamp
+        previous_started_at = last_seen_by_session.get(session_key)
+        cold = _is_cold(session_key, started_at, previous_started_at)
+        if session_key and started_at is not None:
+            # Interleaved log lines must not rewind the window and report a negative gap.
+            last_seen_by_session[session_key] = max(previous_started_at or started_at, started_at)
         cache_kind = "cold" if cold else "warm"
         cache_by_hour[hour_bucket][cache_kind] += 1
         cache_by_client[client_id][cache_kind] += 1
         cache_latency_values[cache_kind].append(latency_ms)
-        cache_latency_values_by_hour.setdefault(hour_bucket, {kind: [] for kind in _CACHE_KINDS})[cache_kind].append(
-            latency_ms
-        )
+        cache_latency_values_by_hour[hour_bucket][cache_kind].append(latency_ms)
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_user_model[client_id][model_name] += 1
             requests_by_hour_model[hour_bucket][model_name] += 1
@@ -433,7 +447,7 @@ def summarize_daily_usage(
     for hour_counts in cache_by_hour.values():
         cache_total_counts.update(hour_counts)
     cache_by_client_payload = {
-        client: _cache_bucket(counts)
+        client: CacheBucket.from_counts(counts)
         for client, counts in sorted(cache_by_client.items(), key=lambda item: (-sum(item[1].values()), item[0]))
     }
 
@@ -555,9 +569,8 @@ def summarize_daily_usage(
         requests_by_hour=requests_by_hour_payload,
         requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
         latency_ms_by_hour=latency_ms_by_hour,
-        cache_ttl_seconds=DEFAULT_STICKY_IDLE_TTL_SECONDS,
-        cache_total=_cache_bucket(cache_total_counts),
-        cache_by_hour={hour: _cache_bucket(counts) for hour, counts in sorted(cache_by_hour.items())},
+        cache_total=CacheBucket.from_counts(cache_total_counts),
+        cache_by_hour={hour: CacheBucket.from_counts(counts) for hour, counts in sorted(cache_by_hour.items())},
         cache_by_client=cache_by_client_payload,
         cache_latency_total={kind: _cache_latency(values) for kind, values in sorted(cache_latency_values.items())},
         cache_latency_by_hour={

@@ -120,7 +120,8 @@ A request counts as cold when any of these holds:
    the previous prefix sits on an unknown node;
 2. it is the first request of that `sticky_id` inside the reported period;
 3. the gap from the previous request of the same `sticky_id` exceeds `cache.ttl_seconds` - the sticky
-   affinity expired, so the next turn may have gone to another node.
+   affinity expired, so the next turn may have gone to another node. The gap runs between request
+   starts (`timestamp - latency_ms`), the same sliding window Olla keeps.
 
 The cache is per node and never shared between nodes, so a session that keeps its affinity keeps its
 prefix warm; the metric measures affinity, not model behaviour.
@@ -133,7 +134,9 @@ Boundaries of the definition:
   prove affinity (only reachable with `period=all`);
 - a client that never sends `X-Olla-Session-ID` reads as 100% cold, because every one of its requests
   falls under rule 1 - check `cache.by_client` before reading the aggregate share;
-- `cold_share` is a share of requests, not of time or tokens; `0.0` for a bucket with no requests.
+- `cold_share` is a share of requests, not of time or tokens; `0.0` for a bucket with no requests;
+- a latency bucket with no requests of that kind reports `{count: 0, p50: 0, p95: 0}`, which means "no
+  samples", not zero milliseconds.
 
 ## HTTP Contract
 

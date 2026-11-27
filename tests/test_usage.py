@@ -18,42 +18,40 @@ from thunder_forge.cluster.usage import (
 )
 
 
+def _access_log(tmp_path: Path, records: list[object]) -> Path:
+    """Write one JSONL access log; a raw string record is kept verbatim as a broken line."""
+    path = tmp_path / "tf-edge-access.jsonl"
+    path.write_text("\n".join(json.dumps(record) if isinstance(record, dict) else str(record) for record in records))
+    return path
+
+
 def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path) -> None:
-    access_log = tmp_path / "tf-edge-access.jsonl"
-    access_log.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "timestamp": "2026-06-02T08:15:00+00:00",
-                        "client_id": "alice",
-                        "model": "coder",
-                        "latency_ms": 100,
-                        "olla_endpoint": "msm1-omlx-live",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "timestamp": "2026-06-02T08:45:00+00:00",
-                        "client_id": "alice",
-                        "model": "coder",
-                        "latency_ms": 200,
-                        "olla_endpoint": "msm1-omlx-live",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "timestamp": "2026-06-02T09:00:00+00:00",
-                        "client_id": "bob",
-                        "model": "agent",
-                        "latency_ms": 150,
-                        "olla_endpoint": "msm2-omlx-live",
-                    }
-                ),
-                "not json",
-            ]
-        )
-        + "\n"
+    access_log = _access_log(
+        tmp_path,
+        [
+            {
+                "timestamp": "2026-06-02T08:15:00+00:00",
+                "client_id": "alice",
+                "model": "coder",
+                "latency_ms": 100,
+                "olla_endpoint": "msm1-omlx-live",
+            },
+            {
+                "timestamp": "2026-06-02T08:45:00+00:00",
+                "client_id": "alice",
+                "model": "coder",
+                "latency_ms": 200,
+                "olla_endpoint": "msm1-omlx-live",
+            },
+            {
+                "timestamp": "2026-06-02T09:00:00+00:00",
+                "client_id": "bob",
+                "model": "agent",
+                "latency_ms": 150,
+                "olla_endpoint": "msm2-omlx-live",
+            },
+            "not json",
+        ],
     )
 
     node_metrics = tmp_path / "tf-node-metrics.jsonl"
@@ -93,31 +91,24 @@ def test_extract_hot_loaded_models_orders_by_last_access() -> None:
 
 
 def test_summarize_daily_usage_excludes_tool_models_from_model_metrics(tmp_path: Path) -> None:
-    access_log = tmp_path / "tf-edge-access.jsonl"
-    access_log.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "timestamp": "2026-06-02T08:15:00+00:00",
-                        "client_id": "alice",
-                        "model": "MarkItDown",
-                        "latency_ms": 100,
-                        "olla_endpoint": "msm1-omlx-live",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "timestamp": "2026-06-02T08:16:00+00:00",
-                        "client_id": "alice",
-                        "model": "coder",
-                        "latency_ms": 120,
-                        "olla_endpoint": "msm1-omlx-live",
-                    }
-                ),
-            ]
-        )
-        + "\n"
+    access_log = _access_log(
+        tmp_path,
+        [
+            {
+                "timestamp": "2026-06-02T08:15:00+00:00",
+                "client_id": "alice",
+                "model": "MarkItDown",
+                "latency_ms": 100,
+                "olla_endpoint": "msm1-omlx-live",
+            },
+            {
+                "timestamp": "2026-06-02T08:16:00+00:00",
+                "client_id": "alice",
+                "model": "coder",
+                "latency_ms": 120,
+                "olla_endpoint": "msm1-omlx-live",
+            },
+        ],
     )
 
     node_metrics = tmp_path / "tf-node-metrics.jsonl"
@@ -145,18 +136,17 @@ def test_summarize_daily_usage_excludes_tool_models_from_model_metrics(tmp_path:
 
 
 def test_summarize_daily_usage_include_tool_models_when_exclusion_is_empty(tmp_path: Path) -> None:
-    access_log = tmp_path / "tf-edge-access.jsonl"
-    access_log.write_text(
-        json.dumps(
+    access_log = _access_log(
+        tmp_path,
+        [
             {
                 "timestamp": "2026-06-02T08:15:00+00:00",
                 "client_id": "alice",
                 "model": "MarkItDown",
                 "latency_ms": 100,
                 "olla_endpoint": "msm1-omlx-live",
-            }
-        )
-        + "\n"
+            },
+        ],
     )
 
     summary = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=[])
@@ -167,31 +157,24 @@ def test_summarize_daily_usage_include_tool_models_when_exclusion_is_empty(tmp_p
 
 
 def test_summarize_daily_usage_excludes_unauthenticated_when_configured(tmp_path: Path) -> None:
-    access_log = tmp_path / "tf-edge-access.jsonl"
-    access_log.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "timestamp": "2026-06-02T08:15:00+00:00",
-                        "client_id": "unauthenticated",
-                        "model": "agent",
-                        "latency_ms": 100,
-                        "olla_endpoint": "msm1-omlx-live",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "timestamp": "2026-06-02T08:16:00+00:00",
-                        "client_id": "alice",
-                        "model": "coder",
-                        "latency_ms": 120,
-                        "olla_endpoint": "msm1-omlx-live",
-                    }
-                ),
-            ]
-        )
-        + "\n"
+    access_log = _access_log(
+        tmp_path,
+        [
+            {
+                "timestamp": "2026-06-02T08:15:00+00:00",
+                "client_id": "unauthenticated",
+                "model": "agent",
+                "latency_ms": 100,
+                "olla_endpoint": "msm1-omlx-live",
+            },
+            {
+                "timestamp": "2026-06-02T08:16:00+00:00",
+                "client_id": "alice",
+                "model": "coder",
+                "latency_ms": 120,
+                "olla_endpoint": "msm1-omlx-live",
+            },
+        ],
     )
 
     summary = summarize_daily_usage(access_log, period="2026-06-02", exclude_unauthenticated=True)
@@ -217,15 +200,12 @@ def test_percentile_and_peak_concurrency_helpers() -> None:
 
 
 def test_resolve_usage_period_and_select_usage_events(tmp_path: Path) -> None:
-    access_log = tmp_path / "tf-edge-access.jsonl"
-    access_log.write_text(
-        "\n".join(
-            [
-                json.dumps({"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "latency_ms": 10}),
-                json.dumps({"timestamp": "2026-06-03T09:00:00+00:00", "client_id": "bob", "latency_ms": 20}),
-            ]
-        )
-        + "\n"
+    access_log = _access_log(
+        tmp_path,
+        [
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "latency_ms": 10},
+            {"timestamp": "2026-06-03T09:00:00+00:00", "client_id": "bob", "latency_ms": 20},
+        ],
     )
 
     assert resolve_usage_period("all") == "all"
@@ -376,17 +356,13 @@ def test_summarize_daily_usage_keeps_memory_when_the_node_probe_failed(tmp_path:
 
 
 def test_summarize_daily_usage_filters_by_client_id(tmp_path: Path) -> None:
-    access_log = tmp_path / "tf-edge-access.jsonl"
-    access_log.write_text(
-        "\n".join(
-            json.dumps(item)
-            for item in (
-                {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "gnezim", "model": "agent", "latency_ms": 1000},
-                {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "hermes", "model": "agent", "latency_ms": 9000},
-                {"timestamp": "2026-06-02T08:20:00+00:00", "client_id": "dirge", "model": "coder", "latency_ms": 3000},
-            )
-        )
-        + "\n"
+    access_log = _access_log(
+        tmp_path,
+        [
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "gnezim", "model": "agent", "latency_ms": 1000},
+            {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "hermes", "model": "agent", "latency_ms": 9000},
+            {"timestamp": "2026-06-02T08:20:00+00:00", "client_id": "dirge", "model": "coder", "latency_ms": 3000},
+        ],
     )
 
     everyone = summarize_daily_usage(access_log, period="2026-06-02")
@@ -403,12 +379,6 @@ def test_summarize_daily_usage_filters_by_client_id(tmp_path: Path) -> None:
     assert only_hermes.consumed_ms_total == 9000
     assert only_hermes.latency_ms_by_hour["08"] == {"count": 1, "p50": 9000, "p95": 9000, "max": 9000}
     assert only_hermes.requests_by_user == {"hermes": 1}
-
-
-def _access_log(tmp_path: Path, records: list[dict[str, object]]) -> Path:
-    path = tmp_path / "tf-edge-access.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    return path
 
 
 def test_summarize_daily_usage_counts_a_cold_cache_on_the_first_session_turn(tmp_path: Path) -> None:
@@ -451,17 +421,54 @@ def test_summarize_daily_usage_marks_a_gap_beyond_the_sticky_ttl_cold(tmp_path: 
     access_log = _access_log(
         tmp_path,
         [
+            # The gap runs between request starts (timestamp - latency_ms), like Olla's window.
             {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
-            # Exactly the TTL is still the same affinity window.
+            # 599 s after the first start: still inside the window.
             {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 2000},
-            # One second past it, the next turn may land on another node.
-            {"timestamp": "2026-06-02T08:20:01+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 60000},
+            # Exactly 600 s: the TTL is a lower bound, not an expiry.
+            {"timestamp": "2026-06-02T08:20:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 2000},
+            # 601 s: the next turn may land on another node.
+            {"timestamp": "2026-06-02T08:30:01+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 2000},
         ],
     )
 
     summary = summarize_daily_usage(access_log, period="2026-06-02")
 
-    assert summary.cache_total == {"cold": 2, "warm": 1, "cold_share": 0.6667}
+    assert summary.cache_total.to_json_dict() == {"cold": 2, "warm": 2, "cold_share": 0.5}
+
+
+def test_summarize_daily_usage_keeps_the_window_when_the_log_is_out_of_order(tmp_path: Path) -> None:
+    access_log = _access_log(
+        tmp_path,
+        [
+            {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
+            # An older line arriving later must not rewind the window.
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
+            {"timestamp": "2026-06-02T08:11:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
+        ],
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02")
+
+    # Out of order, only the first line of the session is cold; a negative gap never appears.
+    assert summary.cache_total.to_json_dict() == {"cold": 1, "warm": 2, "cold_share": 0.3333}
+
+
+def test_summarize_daily_usage_counts_a_record_without_a_timestamp_cold(tmp_path: Path) -> None:
+    access_log = _access_log(
+        tmp_path,
+        [
+            # Only reachable with period=all: a day period drops the record earlier.
+            {"timestamp": "not-a-timestamp", "client_id": "alice", "sticky_id": "s1", "latency_ms": 100},
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 200},
+        ],
+    )
+
+    summary = summarize_daily_usage(access_log, period="all")
+
+    # Without a start time there is no gap to prove affinity, and the hour is unknown.
+    assert summary.cache_total.to_json_dict() == {"cold": 2, "warm": 0, "cold_share": 1.0}
+    assert summary.cache_by_hour["unknown"].to_json_dict() == {"cold": 1, "warm": 0, "cold_share": 1.0}
 
 
 def test_summarize_daily_usage_counts_cache_inside_the_client_filter(tmp_path: Path) -> None:
@@ -477,8 +484,8 @@ def test_summarize_daily_usage_counts_cache_inside_the_client_filter(tmp_path: P
     everything = summarize_daily_usage(access_log, period="2026-06-02")
     only_bob = summarize_daily_usage(access_log, period="2026-06-02", client_ids=["bob"])
 
-    assert everything.cache_total == {"cold": 1, "warm": 2, "cold_share": 0.3333}
+    assert everything.cache_total.to_json_dict() == {"cold": 1, "warm": 2, "cold_share": 0.3333}
     # The filter runs before counting, so bob's first kept turn is the cold one.
-    assert only_bob.cache_total == {"cold": 1, "warm": 1, "cold_share": 0.5}
-    assert only_bob.cache_by_client == {"bob": {"cold": 1, "warm": 1, "cold_share": 0.5}}
-    assert only_bob.cache_by_hour == {"08": {"cold": 1, "warm": 1, "cold_share": 0.5}}
+    assert only_bob.cache_total.to_json_dict() == {"cold": 1, "warm": 1, "cold_share": 0.5}
+    assert only_bob.cache_by_client["bob"].to_json_dict() == {"cold": 1, "warm": 1, "cold_share": 0.5}
+    assert only_bob.cache_by_hour["08"].to_json_dict() == {"cold": 1, "warm": 1, "cold_share": 0.5}
