@@ -1018,7 +1018,7 @@ def resolve_build_info(repo_root: Path | None = None) -> dict[str, object]:
             root = None
     commit = _git_stdout(root, "rev-parse", "HEAD")
     dirty = bool(commit) and bool(_git_stdout(root, "status", "--porcelain"))
-    return {"version": __version__, "commit": commit, "dirty": dirty}
+    return {"version": __version__, "commit": commit or "unknown", "dirty": dirty}
 
 
 def _git_stdout(repo_root: Path | None, *args: str) -> str:

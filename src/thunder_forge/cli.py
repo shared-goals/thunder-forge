@@ -4017,7 +4017,7 @@ def edge_serve(
     typer.echo(
         "build: "
         f"version={build_info['version']} "
-        f"commit={build_info['commit'] or 'unknown'} "
+        f"commit={build_info['commit']} "
         f"dirty={'yes' if build_info['dirty'] else 'no'}"
     )
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")

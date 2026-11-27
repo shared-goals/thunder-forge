@@ -828,7 +828,7 @@ def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, t
 def test_resolve_build_info_degrades_to_empty_commit_without_git(monkeypatch, tmp_path: Path) -> None:
     import thunder_forge.cluster.config as config_module
 
-    missing_checkout = {"version": __version__, "commit": "", "dirty": False}
+    missing_checkout = {"version": __version__, "commit": "unknown", "dirty": False}
     assert resolve_build_info(tmp_path) == missing_checkout
 
     def _no_git(*args, **kwargs):
