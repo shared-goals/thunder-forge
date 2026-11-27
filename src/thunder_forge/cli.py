@@ -3667,6 +3667,10 @@ def usage_report(
     except ValueError:
         typer.echo(f"Error: invalid period {period!r}, expected YYYY-MM-DD, today, or all", err=True)
         raise typer.Exit(1)
+    if not access_log_path.exists():
+        # A missing or mistyped log must not look like a quiet day with zero traffic.
+        typer.echo(f"Error: access log not found: {access_log_path}", err=True)
+        raise typer.Exit(2)
     summary = summarize_daily_usage(
         access_log_path,
         period=period,
@@ -3689,8 +3693,13 @@ def usage_report(
         return f"{value:,}"
 
     typer.echo(f"requests_total: {_fmt_number(summary.requests_total)}")
+    typer.echo(f"failures_total: {_fmt_number(summary.failures_total)}")
+    typer.echo(f"unauthenticated: {_fmt_number(summary.requests_unauthenticated)}")
     typer.echo(f"consumed_ms_total: {_fmt_number(summary.consumed_ms_total)}")
     typer.echo(f"invalid_lines: {_fmt_number(summary.invalid_lines)}")
+    typer.echo(f"first_record_at: {summary.coverage_first_record_at or '-'}")
+    typer.echo(f"last_record_at: {summary.coverage_last_record_at or '-'}")
+    typer.echo(f"partial: {str(summary.partial).lower()}")
 
     def _print_mapping(title: str, mapping: dict[str, int]) -> None:
         typer.echo(f"{title}:")
@@ -3710,6 +3719,7 @@ def usage_report(
                 typer.echo(f"      {model}: {_fmt_number(count)}")
     _print_mapping("requests_by_node", summary.requests_by_node)
     _print_mapping("requests_by_model", summary.requests_by_model)
+    _print_mapping("requests_by_status", summary.requests_by_status)
     typer.echo("requests_by_hour:")
     if not summary.requests_by_hour:
         typer.echo("  []")

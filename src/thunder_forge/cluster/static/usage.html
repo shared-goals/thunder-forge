@@ -128,7 +128,8 @@ async function load() {
     data.period,
     "requests " + data.requests.total,
     "consumed " + (data.consumed_ms.total / 3600000).toFixed(1) + " h",
-    "nodes " + Object.keys(data.requests.by_node).length,
+    // "unknown" is the residual attribution bucket, not a node.
+    "nodes " + Object.keys(data.requests.by_node).filter((node) => node !== "unknown").length,
     selected.length ? "user " + selected.join(", ") : "",
     data.period === "all" ? "all days merged into hour-of-day buckets" : "",
     selected.length ? "node load and memory stay cluster-wide" : "",

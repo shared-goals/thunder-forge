@@ -1,7 +1,7 @@
 # Daily Summary Contract
 
 **Status:** Implemented (MVP)  
-**Last Updated:** 2026-06-02  
+**Last Updated:** 2026-11-27  
 **Owner:** Thunder Forge
 
 ## Overview
@@ -77,12 +77,20 @@ Expected keys:
   `TF_USER_<NAME>` identity, so a client with no traffic today is still selectable). API keys
   are never logged, so only the client identity is ever exposed
 - `requests.total`
+- `requests.unauthenticated` (records whose `client_id` is the unauthenticated marker, e.g. a
+  rejected key or scanner traffic; kept inside `total`, named instead of silently dropped)
 - `requests.by_user`
-- `requests.by_node`
-- `requests.by_model`
-- `requests.by_hour` (0-23 buckets, each bucket carries `requests`, `consumed_ms`,
-  `by_model`, and `by_user` so one view answers when/what/who)
-- `requests.by_node_hour` (0-23 buckets)
+- `requests.by_node` (`"unknown"` collects records with no `X-Olla-Endpoint` attribution, so the
+  bucket sums to `requests.total`)
+- `requests.by_model` (`"unknown"` collects records with an empty model, such as `/v1/models`
+  catalogue calls; models listed in `operations.usage.exclude_models` stay out of the breakdown)
+- `requests.by_status` (`status_code` -> count histogram; `"unknown"` when a record carries no
+  integer status)
+- `requests.by_hour` (all 24 hour buckets 00-23, each bucket carries `requests`, `consumed_ms`,
+  `by_model`, and `by_user` so one view answers when/what/who; hours without traffic are present
+  with zeros, so a silent hour is visible)
+- `requests.by_node_hour` (same 24 hour buckets per node, zero-filled the same way)
+- `failures_total` (top level: records with `status_code >= 400`)
 - `consumed_ms.total`
 - `consumed_ms.by_user`
 - `consumed_ms.by_node`
@@ -98,9 +106,22 @@ Expected keys:
   `waiting_max`, taken from node snapshots)
 - `node_metrics.model_memory` (latest snapshot per node: `{model: {actual_size, idle_seconds}}`)
 - `node_metrics.model_memory_sampled_at` (snapshot `timestamp` behind each node's memory numbers)
+- `coverage.first_record_at` / `coverage.last_record_at` (first and last timestamp among the
+  retained records of the period, `null` when the period holds none; they ignore the `?user=`
+  filter and describe the log, not the filtered view)
+- `partial` (true only when the period is the oldest day present in the log **and** its first
+  record starts after 00:00. Retention cuts the file at an absolute `now - N days` instant, so the
+  oldest day is the only one it can truncate. The flag is a warning, not proof: an idle morning
+  looks the same as a truncated morning)
 - `invalid_lines`
 
 `consumed_ms` is defined as sum of edge-observed `latency_ms`.
+
+## CLI Exit Codes
+
+`usage report` and `usage report --json` exit `2` and name the resolved path when the access log
+file is absent, instead of printing `requests_total: 0` for a mistyped path or a wrong checkout.
+An invalid `--period` stays `1`.
 
 ## HTTP Contract
 

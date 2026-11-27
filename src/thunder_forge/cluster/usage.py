@@ -14,6 +14,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _DEFAULT_MODELS_EXCLUDED_FROM_USAGE = {"markitdown"}
+# Rejected key or scanner traffic carries this pseudo-identity; it is not a client.
+_UNAUTHENTICATED_CLIENT_ID = "unauthenticated"
 
 
 def resolve_usage_period(raw: str) -> str:
@@ -61,6 +63,11 @@ def _hour_bucket(timestamp: datetime | None) -> str:
     return f"{timestamp.hour:02d}"
 
 
+def _dense_hour_keys(observed: set[str]) -> list[str]:
+    """All 24 hour buckets plus 'unknown' when records carried no timestamp."""
+    return sorted({f"{hour:02d}" for hour in range(24)} | observed)
+
+
 def _derive_node_id_from_olla_endpoint(raw: object) -> str:
     if not isinstance(raw, str):
         return ""
@@ -70,6 +77,33 @@ def _derive_node_id_from_olla_endpoint(raw: object) -> str:
     if "-omlx-" in endpoint:
         return endpoint.split("-omlx-", 1)[0]
     return endpoint
+
+
+def _retention_window(
+    records: list[dict[str, object]], period: str | None
+) -> tuple[str | None, datetime | None, datetime | None]:
+    """Return the oldest day in the file and the first/last timestamp inside `period`.
+
+    The window ignores client filters and invalid rows, so it describes the retained
+    log rather than the filtered view.
+    """
+    oldest_day: str | None = None
+    first_at: datetime | None = None
+    last_at: datetime | None = None
+    for payload in records:
+        timestamp = _parse_timestamp(payload.get("timestamp"))
+        if timestamp is None:
+            continue
+        day = timestamp.date().isoformat()
+        if oldest_day is None or day < oldest_day:
+            oldest_day = day
+        if not _in_period(timestamp, period):
+            continue
+        if first_at is None or timestamp < first_at:
+            first_at = timestamp
+        if last_at is None or timestamp > last_at:
+            last_at = timestamp
+    return oldest_day, first_at, last_at
 
 
 def _load_jsonl_lines(path: Path) -> tuple[list[dict[str, object]], int]:
@@ -192,6 +226,12 @@ class DailyUsageSummary:
     consumed_ms_by_node: dict[str, int] = field(default_factory=dict)
     requests_by_model: dict[str, int] = field(default_factory=dict)
     consumed_ms_by_model: dict[str, int] = field(default_factory=dict)
+    requests_by_status: dict[str, int] = field(default_factory=dict)
+    failures_total: int = 0
+    requests_unauthenticated: int = 0
+    coverage_first_record_at: str | None = None
+    coverage_last_record_at: str | None = None
+    partial: bool = False
     requests_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     latency_ms_by_hour: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -214,13 +254,23 @@ class DailyUsageSummary:
             "node_metrics_path": self.node_metrics_path,
             "requests": {
                 "total": self.requests_total,
+                "unauthenticated": self.requests_unauthenticated,
                 "by_user": self.requests_by_user,
                 "by_user_model": self.requests_by_user_model,
                 "by_node": self.requests_by_node,
                 "by_model": self.requests_by_model,
+                "by_status": self.requests_by_status,
                 "by_hour": self.requests_by_hour,
                 "by_node_hour": self.requests_by_node_hour,
             },
+            # Records with status_code >= 400, counted from the same rows as requests.total.
+            "failures_total": self.failures_total,
+            "coverage": {
+                "first_record_at": self.coverage_first_record_at,
+                "last_record_at": self.coverage_last_record_at,
+            },
+            # True when retention may have cut the start of the oldest day in the file.
+            "partial": self.partial,
             "consumed_ms": {
                 "total": self.consumed_ms_total,
                 "by_user": self.consumed_ms_by_user,
@@ -270,6 +320,9 @@ def summarize_daily_usage(
     consumed_ms_by_node: Counter[str] = Counter()
     requests_by_model: Counter[str] = Counter()
     consumed_ms_by_model: Counter[str] = Counter()
+    requests_by_status: Counter[str] = Counter()
+    failures_total = 0
+    requests_unauthenticated = 0
     requests_by_hour: Counter[str] = Counter()
     consumed_ms_by_hour: Counter[str] = Counter()
     requests_by_hour_model: dict[str, Counter[str]] = defaultdict(Counter)
@@ -286,6 +339,7 @@ def summarize_daily_usage(
 
     records, invalid = _load_jsonl_lines(access_log_path)
     invalid_lines += invalid
+    oldest_day, first_record_at, last_record_at = _retention_window(records, period)
     for payload in records:
         timestamp = _parse_timestamp(payload.get("timestamp"))
         if not _in_period(timestamp, period):
@@ -296,7 +350,8 @@ def summarize_daily_usage(
             invalid_lines += 1
             continue
         client_id = client_id.strip()
-        if exclude_unauthenticated and client_id == "unauthenticated":
+        unauthenticated = client_id == _UNAUTHENTICATED_CLIENT_ID
+        if exclude_unauthenticated and unauthenticated:
             continue
 
         latency_ms = payload.get("latency_ms")
@@ -309,10 +364,25 @@ def summarize_daily_usage(
 
         requests_total += 1
         consumed_ms_total += latency_ms
-        node_id = _derive_node_id_from_olla_endpoint(payload.get("olla_endpoint")).strip()
+        if unauthenticated:
+            requests_unauthenticated += 1
+        status_code = _as_non_negative_int(payload.get("status_code"))
+        requests_by_status[str(status_code) if status_code is not None else "unknown"] += 1
+        if status_code is not None and status_code >= 400:
+            failures_total += 1
+        # Records without an endpoint attribution still count; the residual bucket makes
+        # the breakdown add up to requests.total instead of hiding them.
+        node_id = _derive_node_id_from_olla_endpoint(payload.get("olla_endpoint")).strip() or "unknown"
 
         model = payload.get("model")
         model_name = model.strip() if isinstance(model, str) else ""
+        if not model_name:
+            model_key = "unknown"
+        elif _include_model_in_usage(model_name, excluded_model_names):
+            model_key = model_name
+        else:
+            # Configured exclusions stay out of every model breakdown.
+            model_key = ""
         hour_bucket = _hour_bucket(timestamp)
         latency_values_by_hour[hour_bucket].append(latency_ms)
         if timestamp is not None:
@@ -323,29 +393,28 @@ def summarize_daily_usage(
         consumed_ms_by_user[client_id] += latency_ms
         requests_by_hour[hour_bucket] += 1
         consumed_ms_by_hour[hour_bucket] += latency_ms
-        if model_name and _include_model_in_usage(model_name, excluded_model_names):
-            requests_by_user_model[client_id][model_name] += 1
-            requests_by_hour_model[hour_bucket][model_name] += 1
         requests_by_hour_user[hour_bucket][client_id] += 1
 
-        if node_id:
-            requests_by_node[node_id] += 1
-            consumed_ms_by_node[node_id] += latency_ms
-            if timestamp is not None:
-                requests_by_node_hour[node_id][hour_bucket] += 1
+        requests_by_node[node_id] += 1
+        consumed_ms_by_node[node_id] += latency_ms
+        if timestamp is not None:
+            requests_by_node_hour[node_id][hour_bucket] += 1
 
-        if model_name and _include_model_in_usage(model_name, excluded_model_names):
-            requests_by_model[model_name] += 1
-            consumed_ms_by_model[model_name] += latency_ms
+        if model_key:
+            requests_by_user_model[client_id][model_key] += 1
+            requests_by_hour_model[hour_bucket][model_key] += 1
+            requests_by_model[model_key] += 1
+            consumed_ms_by_model[model_key] += latency_ms
 
+    hour_keys = _dense_hour_keys(set(requests_by_hour))
     requests_by_hour_payload: dict[str, dict[str, object]] = {
         hour: {
-            "requests": count,
+            "requests": requests_by_hour.get(hour, 0),
             "consumed_ms": consumed_ms_by_hour.get(hour, 0),
             "by_model": _ordered_counter_by_weight(requests_by_hour_model.get(hour, Counter()), requests_by_model),
             "by_user": _ordered_counter_by_weight(requests_by_hour_user.get(hour, Counter()), requests_by_user),
         }
-        for hour, count in requests_by_hour.items()
+        for hour in hour_keys
     }
 
     latency_ms_by_hour: dict[str, dict[str, int]] = {
@@ -461,6 +530,12 @@ def summarize_daily_usage(
         for hour, nodes in sorted(node_load_active.items())
     }
 
+    # Same dense axis as requests.by_hour so a node line never hides a silent hour.
+    requests_by_node_hour_payload: dict[str, dict[str, int]] = {
+        node_id: {hour: counts.get(hour, 0) for hour in hour_keys}
+        for node_id, counts in sorted(requests_by_node_hour.items())
+    }
+
     return DailyUsageSummary(
         period=period or "all",
         generated_at=datetime.now(UTC).isoformat(),
@@ -469,6 +544,16 @@ def summarize_daily_usage(
         requests_total=requests_total,
         invalid_lines=invalid_lines,
         consumed_ms_total=consumed_ms_total,
+        # Retention cuts the log at an absolute instant, so the oldest day in the file
+        # may start mid-day; only that day can be silently truncated.
+        partial=bool(
+            period
+            and oldest_day == period
+            and first_record_at is not None
+            and (first_record_at.hour, first_record_at.minute) != (0, 0)
+        ),
+        coverage_first_record_at=first_record_at.isoformat() if first_record_at is not None else None,
+        coverage_last_record_at=last_record_at.isoformat() if last_record_at is not None else None,
         requests_by_user=_ordered_counter(requests_by_user),
         consumed_ms_by_user=_ordered_counter(consumed_ms_by_user),
         requests_by_user_model=_ordered_nested_counter(requests_by_user_model),
@@ -476,8 +561,11 @@ def summarize_daily_usage(
         consumed_ms_by_node=_ordered_counter(consumed_ms_by_node),
         requests_by_model=_ordered_counter(requests_by_model),
         consumed_ms_by_model=_ordered_counter(consumed_ms_by_model),
+        requests_by_status=_ordered_counter(requests_by_status),
+        failures_total=failures_total,
+        requests_unauthenticated=requests_unauthenticated,
         requests_by_hour=requests_by_hour_payload,
-        requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
+        requests_by_node_hour=requests_by_node_hour_payload,
         latency_ms_by_hour=latency_ms_by_hour,
         peak_concurrency_by_hour=peak_concurrency_by_hour,
         node_metrics_present=node_metrics_present,

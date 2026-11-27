@@ -392,6 +392,20 @@ Summary dimensions include:
 - by model: requests, consumed time, tokens when present
 - node hot-loaded model sets from collected node snapshots
 
+Failure and coverage signals in the same summary:
+
+- `requests.by_status`: histogram of `status_code` responses, and `failures_total` for `status_code >= 400`
+- residual buckets keep the breakdowns honest: `requests.by_node["unknown"]` (no endpoint attribution),
+  `requests.by_model["unknown"]` (empty model, for example `/v1/models`), and
+  `requests.unauthenticated` (records carrying the unauthenticated marker)
+- `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, so an idle hour reads
+  as a zero instead of vanishing from the day
+- `coverage.first_record_at` / `coverage.last_record_at` and `partial: true` when the report period
+  is the oldest day in the log and its first record starts after midnight, which is the day retention
+  can truncate
+- a missing or mistyped access log is an error (`exit 2`, naming the resolved path), never a
+  green zero-request day
+
 ### Minimal Metric Strategy
 
 Thunder Forge should collect only the smallest set of base signals needed to answer two questions:
@@ -503,6 +517,9 @@ duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
 # or
 make usage-duckdb 2026-06-02
 ```
+
+The `make usage-duckdb` default period is the local date (`date +%F`), matching the local offset
+in each log record; pass `YYYY-MM-DD` to query another day.
 
 ## Similar Repo Landscape (Olla/oMLX/Mac Cluster)
 
