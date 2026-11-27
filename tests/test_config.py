@@ -863,6 +863,7 @@ def test_resolve_build_info_reads_the_commit_and_the_tree_state(
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(config_module.subprocess, "run", fake_run)
+    (tmp_path / ".git").mkdir()
 
     result = resolve_build_info(tmp_path)
 
@@ -949,3 +950,18 @@ def test_resolve_build_info_ignores_a_git_environment_pointing_elsewhere(tmp_pat
     assert info["commit"] != subprocess.run(
         ["git", "-C", str(other), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
+
+
+def test_resolve_build_info_does_not_borrow_the_enclosing_repository(tmp_path: Path) -> None:
+    """A deploy without .git sits inside some other repo on the host; its HEAD is not this code."""
+    deployed = tmp_path / "outer" / "deploy"
+    deployed.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(tmp_path / "outer")], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "outer"), "commit", "-q", "--allow-empty", "-m", "x"], check=True
+    )
+
+    info = resolve_build_info(deployed)
+
+    assert info["commit"] == "unknown"
+    assert info["dirty"] == "unknown"

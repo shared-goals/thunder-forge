@@ -1018,10 +1018,14 @@ def resolve_build_info(repo_root: Path) -> dict[str, object]:
     """Provenance of the code being executed: package version, git commit and tree state.
 
     One `git status --porcelain=v2 --branch` call answers both the commit and whether the tree
-    is dirty. `git -C` resolves the enclosing repository, so an edge installed inside an
-    unrelated clone reports that clone's HEAD. Anything unreadable stays visibly unknown.
+    is dirty. A tree without `.git` is not a checkout, so nothing is guessed from its parents.
+    Anything unreadable stays visibly unknown.
     """
     unknown = dict(UNKNOWN_BUILD_INFO, version=__version__)
+    # A deployed copy without .git would otherwise answer from the *enclosing* repository:
+    # a real-looking sha for code that is not running.
+    if not (Path(repo_root) / ".git").exists():
+        return unknown
     try:
         # `-unormal` keeps untracked files visible: `status.showUntrackedFiles=no` in a user
         # config would otherwise report a dirty tree as clean.
