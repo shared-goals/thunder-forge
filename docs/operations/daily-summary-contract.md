@@ -1,7 +1,7 @@
 # Daily Summary Contract
 
 **Status:** Implemented (MVP)  
-**Last Updated:** 2026-11-27  
+**Last Updated:** 2026-11-27\
 **Owner:** Thunder Forge
 
 ## Overview
@@ -165,8 +165,8 @@ are anonymous and GET-only.
 
 `?user=` accepts a client identity, repeated or comma-separated; it narrows requests, consumed time,
 latency, concurrency and the cold/warm split. Node load and model memory come from node snapshots,
-which have no client dimension, so they stay cluster-wide - the dashboard says so when a filter is
-active.
+which have no client dimension, so they stay cluster-wide - the cold cache card always says so, and
+the header repeats it when a filter is active.
 
 `period` defaults to the edge host's local date. Authentication accepts only
 `Authorization: Bearer <token>`: a `?token=` query would be recorded by the Caddy/gost
