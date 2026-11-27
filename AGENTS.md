@@ -2,11 +2,11 @@
 
 ## What this repository is
 
-Thunder Forge is the control plane for a private inference cluster, not a library: TF edge (OpenAI-compatible HTTPS gateway), Olla (router) and oMLX runtimes on four Apple-Silicon nodes. Read `README.md` before changing behaviour; `docs/operations/` holds the runbooks; `tfconfig.example.yaml` is the committed config surface. `tfconfig.yaml`, `.env` and `logs/` are gitignored, so the live config, the secrets and the logs stay out of Git.
+Thunder Forge is the control plane for a private inference cluster, not a library: TF edge (an OpenAI-compatible gateway behind the Caddy reverse proxy), Olla (router) and oMLX runtimes on four Apple-Silicon nodes — one gateway/cache node and three inference nodes. Read `README.md` before changing behaviour; `docs/operations/` holds the operations notes (usage contract, DuckDB SQL, cache fabric); `tfconfig.example.yaml` is the committed config surface. `tfconfig.yaml`, `.env` and `logs/` are gitignored, so the live config, the secrets and the logs stay out of Git.
 
-- Language / runtime: Python >= 3.12 (`pyproject.toml`); package manager `uv` (`.venv` in the repo; the edge systemd unit runs `.venv/bin/thunder-forge` directly).
+- Language / runtime: Python >= 3.12 (`pyproject.toml`); package manager `uv` (`.venv` in the repo; the edge unit prefers `.venv/bin/thunder-forge` and falls back to `uv run thunder-forge`).
 - Owner: shag (runtime), shared with gnezim; production lives on rock at `/mnt/samsung/thunder-forge`.
-- Access limits: rock grants agents no broad sudo — only the unit install/restart commands listed in sudoers; secrets live in the repo `.env` (loaded by `edge serve`), never in unit files.
+- Access limits: rock grants agents no broad sudo — only the unit install/restart commands listed in sudoers.
 
 Local agents run against this cluster every day, so a broken main is not a theoretical risk.
 
@@ -22,7 +22,7 @@ Local agents run against this cluster every day, so a broken main is not a theor
 ## Status Endpoints
 
 - Keep `/health` and `/status` anonymously accessible during pre-MVP.
-- Anonymous `/status` must stay a liveness and version check: node health, readiness and the gateway and runtime versions. Live request identities, client ids and token-like material belong behind `TF_EDGE_ADMIN_TOKEN`.
+- Anonymous `/status` must stay a liveness and version check: node health, readiness and the gateway and runtime versions. Live request identities and client ids, token-like material, node hosts and admin URLs, model memory (`actual_size`, `idle_seconds`, `last_access`) and per-node probe errors belong behind `TF_EDGE_ADMIN_TOKEN`.
 - Treat CLI status as an HTTP consumer of edge status APIs, not a secondary status implementation.
 - Usage endpoints (`/usage`, `/usage/report`, `/usage/events`) are disabled (404) until `TF_EDGE_ADMIN_TOKEN` is set, then the page is anonymous while data paths require the bearer token; client API keys (`TF_USER_*`) authorize inference only, never usage.
 
@@ -37,8 +37,8 @@ Local agents run against this cluster every day, so a broken main is not a theor
 
 These rules apply to any change on the running cluster (nodes, edge, Olla, tfconfig, deployment) as opposed to in-repo development.
 
-- The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `usage report`, `usage collect-node-metrics`, `usage trim-logs`, and the `/usage/report` and `/usage/events` endpoints.
-- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `make config`, installing or removing a runtime, changing `tfconfig.yaml` on a host, restarting edge/Olla/oMLX, killing a process, changing model placement, deleting cached models. Propose options with trade-offs and wait for the operator's decision instead of executing them.
+- The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `/usage/report` and `/usage/events` with the admin token, and reading `logs/*.jsonl`.
+- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `usage trim-logs` (it deletes log records), installing or removing a runtime, changing `tfconfig.yaml` on a host, killing a process, changing model placement, deleting cached models. Propose options with trade-offs and wait for the operator's decision instead of executing them.
 - Load the operational runbook or skill for this cluster before acting on live infrastructure; do not guess hosts, ports, paths or deployment conventions.
 - Diagnose before acting: read the file-backed evidence (`logs/tf-edge-access.jsonl`, `logs/tf-node-metrics.jsonl`, Olla logs) and attribute the failing layer before proposing a fix.
 - Prefer hostname conventions (`.lan` FQDNs) over raw IPs in configs and probes.
@@ -64,9 +64,10 @@ These rules apply to any change on the running cluster (nodes, edge, Olla, tfcon
 
 ## Versioned publication
 
-- Every change published to `main` carries a version: bump `__version__` in `src/thunder_forge/__init__.py`, add a `CHANGELOG.md` entry, create the annotated tag `v<version>` on that commit, and publish a GitHub release with the same notes. Verify the remote commit, tag, package version and release agree. `v0.1.0` predates this rule and stays lightweight; every new tag is annotated.
-- PATCH by default, for fixes, internal implementation, tests, documentation and rules that do not extend or deprecate the public contract. MINOR for a compatible addition or deprecation of that contract — a new model alias, a new endpoint, a changed payload field — or a substantial functional slice. MAJOR only after 1.0; until then an incompatible change requires an explicit contract decision and the next MINOR.
-- Group related commits into one published release. Each later published change gets its own version and tag. Preserve published tags.
+- Every change published to `main` carries a version: a bump in both `__version__` (`src/thunder_forge/__init__.py`) and `version` (`pyproject.toml`), a `CHANGELOG.md` entry, an annotated tag `v<version>` on that commit, and a GitHub release with the same notes. The four must agree.
+- PATCH by default, for fixes, tests, documentation and rules that do not extend or deprecate the public contract. MINOR for a compatible addition or deprecation of that contract — a new model alias, a new endpoint, a changed payload field — or a substantial functional slice. MAJOR only after 1.0; until then an incompatible change needs an explicit contract decision and the next MINOR.
+- Group related commits into one published release; each later published change gets its own version and tag. Preserve published tags.
+- The step-by-step checklist is `docs/operations/release.md`.
 
 ## Commit Naming
 
