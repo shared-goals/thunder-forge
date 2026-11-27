@@ -300,7 +300,6 @@ def summarize_daily_usage(
     exclude_unauthenticated: bool = False,
     client_ids: list[str] | set[str] | None = None,
     known_client_ids: list[str] | None = None,
-    sticky_ttl_seconds: int = DEFAULT_STICKY_IDLE_TTL_SECONDS,
 ) -> DailyUsageSummary:
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
     if period == "all":
@@ -374,7 +373,12 @@ def summarize_daily_usage(
         consumed_ms_by_hour[hour_bucket] += latency_ms
         session_id = payload.get("sticky_id")
         session_key = session_id.strip() if isinstance(session_id, str) else ""
-        cold = _is_cold(session_key, timestamp, last_seen_by_session.get(session_key), sticky_ttl_seconds)
+        cold = _is_cold(
+            session_key,
+            timestamp,
+            last_seen_by_session.get(session_key),
+            DEFAULT_STICKY_IDLE_TTL_SECONDS,
+        )
         if session_key and timestamp is not None:
             last_seen_by_session[session_key] = timestamp
         cache_kind = "cold" if cold else "warm"
@@ -545,7 +549,7 @@ def summarize_daily_usage(
         requests_by_hour=requests_by_hour_payload,
         requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
         latency_ms_by_hour=latency_ms_by_hour,
-        cache_ttl_seconds=sticky_ttl_seconds,
+        cache_ttl_seconds=DEFAULT_STICKY_IDLE_TTL_SECONDS,
         cache_total=_cache_bucket(cache_total_counts),
         cache_by_hour={hour: _cache_bucket(counts) for hour, counts in sorted(cache_by_hour.items())},
         cache_by_client=cache_by_client_payload,

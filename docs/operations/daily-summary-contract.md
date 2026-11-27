@@ -47,6 +47,7 @@ Expected keys:
 - `model`
 - `status_code`
 - `latency_ms`
+- `sticky_id` (empty when the client sent no `X-Olla-Session-ID`)
 - `olla_endpoint`
 - optional token fields: `prompt_tokens`, `completion_tokens`, `total_tokens`
 
@@ -92,8 +93,8 @@ Expected keys:
 - `tokens.by_model` (when available)
 - `latency_ms.by_hour` (nearest-rank `p50`, `p95`, `max`, and `count` per 0-23 bucket; with
   `period=all` the buckets are hour-of-day across every retained day, not distinct days)
-- `cache.ttl_seconds` (the Olla sticky-session idle TTL the cold/warm split used, 600 s in the
-  generated config)
+- `cache.ttl_seconds` (the Olla sticky-session idle TTL the cold/warm split used: `600` s, the
+  `DEFAULT_STICKY_IDLE_TTL_SECONDS` that the generated Olla config also writes)
 - `cache.total`, `cache.by_hour`, `cache.by_client` (`cold`, `warm`, `cold_share` — see below)
 - `cache.latency.total` and `cache.latency.hour` (`cold` and `warm` each carry `count`, `p50`, `p95`, so
   the cold tail is read against the warm tail instead of against one merged distribution)
@@ -128,6 +129,8 @@ Boundaries of the definition:
 
 - the period and the `?user=` filter are applied **before** counting, so a session that started before
   the period produces one cold request at its first turn inside the period;
+- a record with no readable `timestamp` counts as cold: without a previous request there is no gap to
+  prove affinity (only reachable with `period=all`);
 - a client that never sends `X-Olla-Session-ID` reads as 100% cold, because every one of its requests
   falls under rule 1 - check `cache.by_client` before reading the aggregate share;
 - `cold_share` is a share of requests, not of time or tokens; `0.0` for a bucket with no requests.

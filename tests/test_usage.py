@@ -464,21 +464,6 @@ def test_summarize_daily_usage_marks_a_gap_beyond_the_sticky_ttl_cold(tmp_path: 
     assert summary.cache_total == {"cold": 2, "warm": 1, "cold_share": 0.6667}
 
 
-def test_summarize_daily_usage_reports_the_ttl_it_used(tmp_path: Path) -> None:
-    access_log = _access_log(
-        tmp_path,
-        [
-            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
-            {"timestamp": "2026-06-02T08:02:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 2000},
-        ],
-    )
-
-    summary = summarize_daily_usage(access_log, period="2026-06-02", sticky_ttl_seconds=60)
-
-    assert summary.cache_ttl_seconds == 60
-    assert summary.cache_total == {"cold": 2, "warm": 0, "cold_share": 1.0}
-
-
 def test_summarize_daily_usage_counts_cache_inside_the_client_filter(tmp_path: Path) -> None:
     access_log = _access_log(
         tmp_path,
