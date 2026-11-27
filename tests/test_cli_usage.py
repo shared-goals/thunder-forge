@@ -528,3 +528,61 @@ def test_usage_collect_node_metrics_skips_unmanaged_runtime_entries(tmp_path: Pa
     assert payload["hot_loaded_models"] == ["agent"]
     assert payload["hot_loaded_count"] == 1
     assert [entry["id"] for entry in payload["loaded_models"]] == ["agent"]
+    # The dropped entry is named in errors instead of disappearing without a trace.
+    assert payload["errors"] == ["no configured alias for runtime model: MarkItDown"]
+
+
+def test_usage_collect_node_metrics_counts_aliases_not_rows(tmp_path: Path, monkeypatch) -> None:
+    """Two aliases on one runtime id: hot_loaded_count counts aliases, loaded_models has one row."""
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={
+            "stable": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.8-Flash-Next"),
+                runtime_model_id="Qwen3.8-Flash-Next-oQ3.5e-mtp",
+            ),
+            "agent": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.8-Flash-Next"),
+                runtime_model_id="Qwen3.8-Flash-Next-oQ3.5e-mtp",
+            ),
+        },
+        nodes={
+            "msm1": Node(
+                host="msm1-wifi.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["stable", "agent"],
+            )
+        },
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda *args, **kwargs: OmlxHealthResult(
+            base_url="http://msm1-wifi.lan:8018",
+            health_ok=True,
+            models_ok=True,
+            status_ok=True,
+            models=["Qwen3.8-Flash-Next-oQ3.5e-mtp"],
+            model_statuses={
+                "Qwen3.8-Flash-Next-oQ3.5e-mtp": {"loaded": True, "last_access": 100.0, "actual_size": 96680000000},
+            },
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads((repo / "logs" / "tf-node-metrics.jsonl").read_text().splitlines()[0])
+    assert payload["hot_loaded_models"] == ["stable", "agent"]
+    assert payload["hot_loaded_count"] == 2
+    assert [entry["id"] for entry in payload["loaded_models"]] == ["stable"]

@@ -72,12 +72,16 @@ Expected keys:
 - `loaded_models` (`id` alias, `actual_size` bytes, `idle_seconds` per loaded model)
 - `errors`
 
-Only models declared in the cluster configuration are recorded. A runtime that reports extra
-entries — tool adapters such as `MarkItDown`, which carry no alias and report zero memory — has
-them dropped here, the same way `GET /status` already drops them, so `hot_loaded_count` counts
-models of this cluster and nothing else. `hot_loaded_models` lists every configured alias of a
-loaded runtime model, while `loaded_models` carries one row per loaded runtime model, so the two
-counts agree only when a runtime model has a single alias.
+Only models declared for **this node** in the cluster configuration are recorded. A runtime that
+reports extra entries — tool adapters such as `MarkItDown`, or a configured model whose
+`runtime_model_id` has drifted — has them dropped from `hot_loaded_models` and `loaded_models`,
+the same way `GET /status` drops them. A dropped entry is named in `errors` as
+`no configured alias for runtime model: <id>`, so drift stays visible instead of vanishing.
+
+`hot_loaded_models` lists every configured alias of a loaded runtime model, while `loaded_models`
+carries one row per loaded runtime model, using its first alias, so the two counts agree only when
+a runtime model has a single alias. A node that lists no models writes `hot_loaded_count: 0` and
+`loaded_models: []`, which is indistinguishable from a probe that found nothing loaded.
 
 ## Summary Contract
 

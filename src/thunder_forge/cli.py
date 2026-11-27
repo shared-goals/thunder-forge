@@ -326,16 +326,21 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         hot_loaded_models = map_runtime_models_to_aliases(
             config, node, hot_loaded_runtime_ids, include_unmanaged=False
         )
+        # Same membership rule as `include_unmanaged=False` above: `runtime_model_aliases` is
+        # keyed only by models configured for this node, so an unmanaged entry has no key here.
         aliases_by_runtime = runtime_model_aliases(config, node)
         loaded_models: list[dict[str, object]] = []
+        unmanaged_loaded: list[str] = []
         sampled_at = time.time()
         for runtime_id, status in sorted(health.model_statuses.items()):
             if not isinstance(status, dict) or status.get("loaded") is not True:
                 continue
             # Unmanaged runtime entries (tools such as MarkItDown) are not models of this cluster:
-            # they carry no alias and no memory, and they inflated hot_loaded_count.
+            # they carry no alias and no memory, and they inflated hot_loaded_count. A configured
+            # model whose runtime id drifted shows up here too, so name it instead of hiding it.
             aliases = aliases_by_runtime.get(runtime_id)
             if not aliases:
+                unmanaged_loaded.append(runtime_id)
                 continue
             entry: dict[str, object] = {"id": aliases[0]}
             actual_size = _as_non_negative_int(status.get("actual_size"))
@@ -358,7 +363,10 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
                 "active_requests": health.active_requests,
                 "waiting_requests": health.waiting_requests,
                 "loaded_models": loaded_models,
-                "errors": health.errors,
+                "errors": [
+                    *health.errors,
+                    *(f"no configured alias for runtime model: {name}" for name in unmanaged_loaded),
+                ],
             }
         )
     return snapshots
