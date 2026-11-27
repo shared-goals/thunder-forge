@@ -1228,6 +1228,41 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
     }
 
 
+STATUS_PUBLIC_NODE_KEYS = (
+    "name",
+    "health",
+    "models",
+    "olla_version",
+    "latest_olla_version",
+    "upgrade",
+    "omlx_version",
+    "macos_version",
+    "served_models",
+    "hot_loaded_models",
+)
+
+
+def public_status_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Reduce a status payload to what an anonymous liveness/version check needs.
+
+    Anonymous callers must not learn which clients are generating against which
+    alias, the cluster's model memory layout and access times, node hosts, admin
+    URLs or per-node probe errors; the full payload needs the admin bearer token.
+    """
+    public = {key: payload[key] for key in ("ok", "target", "summary", "build") if key in payload}
+    for role in ("gateway", "cache", "inference"):
+        nodes = payload.get(role)
+        if isinstance(nodes, dict):
+            public[role] = {key: value for key, value in nodes.items() if key in STATUS_PUBLIC_NODE_KEYS}
+        elif isinstance(nodes, list):
+            public[role] = [
+                {key: value for key, value in node.items() if key in STATUS_PUBLIC_NODE_KEYS}
+                for node in nodes
+                if isinstance(node, dict)
+            ]
+    return public
+
+
 def edge_models_payload(model_catalog: list[EdgeModelCatalogEntry]) -> dict[str, object]:
     """Build an OpenAI-compatible /v1/models payload from TF public aliases."""
     data: list[dict[str, object]] = []
@@ -1683,12 +1718,17 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 if self.command != "GET":
                     self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
                     return
+                # Same admin bearer token as /usage*: it unlocks the full detail and
+                # never turns /status into an error, so liveness monitoring stays anonymous.
+                authorized = usage_request_authorized(config, dict(self.headers.items()))
                 try:
                     target = parse_qs(urlsplit(self.path).query).get("target", [""])[0].strip() or None
                     payload = build_edge_status_payload(config=config, target=target)
                 except (ValueError, RuntimeError, httpx.HTTPError, OSError) as exc:
                     self._send_edge_response(_json_response(503, {"error": f"status_unavailable: {exc}"}))
                     return
+                if not authorized:
+                    payload = public_status_payload(payload)
                 status_code = 200 if payload.get("ok") else 503
                 self._send_edge_response(_json_response(status_code, payload))
                 return

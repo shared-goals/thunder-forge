@@ -1723,9 +1723,13 @@ def _edge_status_base_url(config: ClusterConfig) -> str:
 def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) -> dict[str, object]:
     base_url = _edge_status_base_url(config)
     params = {"target": target} if target else None
+    # Anonymous /status answers with the reduced liveness payload; the admin token
+    # (repo .env, loaded by _load_config) unlocks the full per-node detail.
+    token = os.environ.get(USAGE_TOKEN_ENV, "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else None
     with httpx.Client(base_url=base_url, timeout=30.0, trust_env=False) as client:
         try:
-            response = client.get("/status", params=params)
+            response = client.get("/status", params=params, headers=headers)
         except httpx.HTTPError as exc:
             typer.echo(f"Error: failed to fetch cluster status from {base_url}: {exc}", err=True)
             raise typer.Exit(1)

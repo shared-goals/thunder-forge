@@ -339,6 +339,18 @@ anonymously - it carries no data and a browser navigation cannot send an `Author
 `/usage/report` and `/usage/events` require `Authorization: Bearer <token>` (never a query token, which would
 leak into proxy logs) and answer `401` without it.
 
+### Status Endpoint
+
+`GET /health` and `GET /status` stay anonymous. An anonymous `GET /status` is a liveness/version check:
+`ok`, `target`, the `summary` block, and per node its `name`, `health`, `models`, `omlx_version`,
+`macos_version` and served alias names. Live client identities (`active_edge_requests`, i.e. who is generating
+against which alias right now), the per-node `model_statuses` (`runtime_id`, `actual_size`, `idle_seconds`,
+`last_access`), node `host`/`admin_url` and per-node `errors` are only returned to a request that carries
+`Authorization: Bearer <TF_EDGE_ADMIN_TOKEN>` - the same admin token as the usage data paths. An invalid or
+missing token is treated as anonymous: it never reveals the detail and never becomes an error on this route, so
+liveness monitoring keeps working without credentials even when a token is configured. `thunder-forge cluster
+status` (`make status`) sends the token when the repo `.env` has one and otherwise prints the reduced payload.
+
 ## Daily Usage Reporting
 
 Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/YAGNI operation:
