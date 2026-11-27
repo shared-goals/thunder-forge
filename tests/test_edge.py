@@ -408,6 +408,9 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     assert payload["status_code"] == 200
     assert payload["latency_ms"] == 42
     assert payload["olla_endpoint"] == "infer-03-omlx-live"
+    assert payload["stream"] is False
+    assert payload["headers_sent"] is False
+    assert payload["error_kind"] == ""
     assert "api_key" not in payload
     assert "dev-secret" not in str(payload)
     assert list(payload) == [
@@ -421,12 +424,15 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
         "client_ip",
         "path",
         "request_id",
+        "stream",
+        "headers_sent",
+        "error_kind",
     ]
 
     serialized = json.dumps(payload, separators=(",", ":"))
     assert serialized.startswith('{"timestamp":"')
     assert '"olla_endpoint":"infer-03-omlx-live"' in serialized
-    assert serialized.endswith(',"request_id":"req-1"}')
+    assert serialized.endswith(',"request_id":"req-1","stream":false,"headers_sent":false,"error_kind":""}')
 
 
 def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_olla() -> None:
@@ -819,6 +825,9 @@ def test_proxy_edge_request_logs_forwarded_client_ip() -> None:
     assert result.status_code == 200
     logged = json.loads(logs[0])
     assert logged["client_ip"] == "203.0.113.10"
+    assert logged["stream"] is False
+    assert logged["headers_sent"] is False
+    assert logged["error_kind"] == ""
 
 
 def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
@@ -848,7 +857,40 @@ def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
     assert logged["client_id"] == "client-a"
     assert logged["model"] == "memory"
     assert logged["status_code"] == 502
+    assert logged["stream"] is False
+    assert logged["headers_sent"] is False
+    assert logged["error_kind"] == "edge_connect"
     assert "dev-secret" not in logs[0]
+
+
+def test_proxy_edge_request_logs_upstream_timeout_as_504() -> None:
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("fixture read timeout", request=request)
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps({"model": "memory", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 504
+    assert len(logs) == 1
+    logged = json.loads(logs[0])
+    assert logged["status_code"] == 504
+    assert logged["error_kind"] == "edge_timeout"
+    assert logged["headers_sent"] is False
+    assert config.active_requests == {}
 
 
 def test_proxy_edge_request_writes_inspector_request_response_entries(tmp_path: Path) -> None:

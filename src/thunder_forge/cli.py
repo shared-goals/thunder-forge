@@ -47,6 +47,7 @@ from thunder_forge.cluster.bootstrap import (
 )
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig
 from thunder_forge.cluster.edge import (
+    EDGE_DEFAULT_TIMEOUT_SECONDS,
     EDGE_USER_PREFIX,
     USAGE_TOKEN_ENV,
     EdgeInspectorConfig,
@@ -3956,11 +3957,19 @@ def edge_serve(
         "--metrics-timeout",
         help="Per-node oMLX health/status timeout in seconds for edge metrics collector.",
     ),
+    upstream_timeout: float = typer.Option(
+        EDGE_DEFAULT_TIMEOUT_SECONDS,
+        "--timeout",
+        help=f"Upstream Olla I/O timeout in seconds for edge serve (default {EDGE_DEFAULT_TIMEOUT_SECONDS:g}).",
+    ),
 ) -> None:
     """Run the minimal TF edge proxy."""
     cluster_config, repo_root = _load_config()
     if metrics_interval_seconds <= 0:
         typer.echo("Error: metrics interval seconds must be positive", err=True)
+        raise typer.Exit(1)
+    if upstream_timeout <= 0:
+        typer.echo("Error: upstream timeout seconds must be positive", err=True)
         raise typer.Exit(1)
     resolved_port = resolve_port(port, default=cluster_config.services.edge_port)
     resolved_olla_base_url = olla_base_url or local_base_url(cluster_config.services.olla_port)
@@ -3999,6 +4008,7 @@ def edge_serve(
         repo_root=repo_root,
         access_log_sink=log_sink,
         model_catalog=_edge_model_catalog_from_config(cluster_config),
+        timeout=upstream_timeout,
         usage_admin_token=usage_admin_token,
         usage_access_log_path=access_log_path,
         usage_node_metrics_path=metrics_path,

@@ -159,7 +159,7 @@ When `services.olla.version` is omitted inside an explicit `services.olla` block
 
 After changing model placement or node topology in `tfconfig.yaml`, run `make restart gateway-cache-01` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
 
-TF edge defaults to a 180-second upstream I/O timeout, leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records a 502 failure in its access log; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
+TF edge defaults to a 180-second upstream I/O timeout (`edge serve --timeout <seconds>`), leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. An upstream timeout answers `504`, an unreachable Olla answers `502`, and the access log tells them apart through `error_kind`. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records `stream: true`, `headers_sent: true`, `error_kind: "stream_aborted"` instead of pretending the whole request failed; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
 
 ### GPU memory ceiling on inference nodes
 
@@ -364,7 +364,28 @@ Edge serve flags for this behavior:
 ```bash
 uv run thunder-forge edge serve --metrics-interval-seconds 60
 uv run thunder-forge edge serve --no-collect-node-metrics
+uv run thunder-forge edge serve --timeout 300  # default 180; upstream Olla I/O timeout in seconds
 ```
+
+### Edge access log fields
+
+Every `logs/tf-edge-access.jsonl` row records `timestamp`, `request_id`, `client_id`, `sticky_id`, `model`, `path`, `status_code`, `latency_ms`, `client_ip`, and `olla_endpoint`, never the API key or request content. Three failure fields separate cases that one `status_code` cannot express:
+
+| Field | Meaning |
+|---|---|
+| `stream` | `true` for an SSE/streaming request |
+| `headers_sent` | `true` when the response status and headers had already reached the client, so the failure is a partial answer |
+| `error_kind` | Empty on success, otherwise one value from the closed vocabulary below |
+
+`error_kind` vocabulary:
+
+- `edge_timeout` — Olla did not answer within the edge timeout (`status_code: 504`).
+- `edge_connect` — Olla was unreachable or the connection dropped before headers (`status_code: 502`).
+- `upstream_error` — any other upstream transport or protocol failure (`status_code: 502`).
+- `stream_aborted` — the stream died after `headers_sent: true`; the client saw a truncated `200` response.
+- `client_aborted` — the client disconnected mid-stream (best effort).
+
+A timeout that happens after the headers were sent keeps `status_code: 504` with `error_kind: "stream_aborted"`: the status names the cause, `error_kind` names what the client received.
 
 Manually run shared log trimming across edge access logs, node metrics, and local service logs:
 

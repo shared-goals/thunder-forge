@@ -141,8 +141,32 @@ def test_stream_failure_sends_only_one_http_response(exchange, failure):
     assert len(records) == 1
     record = json.loads(records[0])
     assert record["status_code"] == (502 if failure else 200)
+    assert record["stream"] is True
+    assert record["headers_sent"] is (failure not in ("connect", None))
+    assert record["error_kind"] == (
+        "edge_connect" if failure == "connect" else "stream_aborted" if failure else ""
+    )
     if failure != "connect":
         assert record["olla_endpoint"] == "infer-01"
+
+
+def test_stream_timeout_before_headers_sends_504(exchange):
+    def upstream(request):
+        raise httpx.ReadTimeout("fixture read timeout", request=request)
+
+    records = []
+    config = edge.EdgeProxyConfig(
+        olla_base_url="http://olla.test", clients_by_key={"fixture-key": edge.EdgeClient("fixture")},
+        access_log_sink=records.append,
+    )
+    wire = exchange(config, upstream)
+    assert wire.count(b"HTTP/1.0 ") == 1
+    assert wire.startswith(b"HTTP/1.0 504")
+    record = json.loads(records[0])
+    assert record["status_code"] == 504
+    assert record["stream"] is True
+    assert record["headers_sent"] is False
+    assert record["error_kind"] == "edge_timeout"
 
 
 @pytest.mark.parametrize("inspect", [False, True])

@@ -228,6 +228,31 @@ def test_edge_serve_cli_uses_config_defaults(monkeypatch) -> None:
     assert config.olla_base_url == "http://127.0.0.1:45115"
     assert "serving_edge: http://127.0.0.1:45116" in result.stdout
     assert "olla_base_url: http://127.0.0.1:45115" in result.stdout
+    assert config.timeout == 180.0
+
+
+def test_edge_serve_cli_accepts_upstream_timeout_option(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("TF_USER_CLIENT_A", "secret-a")
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "serve_edge_proxy",
+        lambda *, host, port, config: captured.update(config=config),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["edge", "serve", "--timeout", "300"])
+    invalid = runner.invoke(app, ["edge", "serve", "--timeout", "0"])
+
+    assert result.exit_code == 0
+    config = captured["config"]
+    assert isinstance(config, EdgeProxyConfig)
+    assert config.timeout == 300.0
+    assert invalid.exit_code == 1
+    assert "Error: upstream timeout seconds must be positive" in invalid.stderr
 
 
 def test_edge_serve_cli_exposes_tf_alias_model_catalog(monkeypatch) -> None:
