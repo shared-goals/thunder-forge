@@ -128,8 +128,9 @@ Boundaries of the definition:
 
 - the period and the `?user=` filter are applied **before** counting, so a session that started before
   the period produces one cold request at its first turn inside the period;
-- a record with no readable `timestamp` counts as cold: without a previous request there is no gap to
-  prove affinity (only reachable with `period=all`);
+- a record with no readable `timestamp` stays outside the cold/warm split (rules 2 and 3 need a start
+  time); it still counts in `requests` and `latency_ms`, under the `unknown` hour (only reachable with
+  `period=all`), so `cache.total` can be smaller than `requests.total`;
 - a client that never sends `X-Olla-Session-ID` reads as 100% cold, because every one of its requests
   falls under rule 1 - check `cache.by_client` before reading the aggregate share;
 - the split measures affinity, not observed cache state: a session that fails over inside the TTL (node
