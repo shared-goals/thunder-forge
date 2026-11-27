@@ -132,6 +132,9 @@ def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
     return peak
 
 
+_CACHE_KINDS: tuple[str, ...] = ("cold", "warm")
+
+
 def _cache_bucket(counts: Counter[str]) -> dict[str, object]:
     cold = counts.get("cold", 0)
     warm = counts.get("warm", 0)
@@ -152,7 +155,8 @@ def _is_cold(session_id: str, started: datetime | None, previous: datetime | Non
 
     No session id means least-connections routing can land on a different node each time; a
     session without a previous request in the period has no measured gap to rely on; a gap longer
-    than the sticky TTL means affinity already expired.
+    than the sticky TTL means affinity already expired. An unreadable timestamp cannot prove
+    affinity either.
     """
     if not session_id or started is None:
         return True
@@ -324,7 +328,7 @@ def summarize_daily_usage(
     intervals_by_hour: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
     cache_by_hour: dict[str, Counter[str]] = defaultdict(Counter)
     cache_by_client: dict[str, Counter[str]] = defaultdict(Counter)
-    cache_latency_values: dict[str, list[int]] = {"cold": [], "warm": []}
+    cache_latency_values: dict[str, list[int]] = {kind: [] for kind in _CACHE_KINDS}
     cache_latency_values_by_hour: dict[str, dict[str, list[int]]] = {}
     # Tracked after the period and client filters, so the first kept request of a session is cold.
     last_seen_by_session: dict[str, datetime] = {}
@@ -385,7 +389,9 @@ def summarize_daily_usage(
         cache_by_hour[hour_bucket][cache_kind] += 1
         cache_by_client[client_id][cache_kind] += 1
         cache_latency_values[cache_kind].append(latency_ms)
-        cache_latency_values_by_hour.setdefault(hour_bucket, {"cold": [], "warm": []})[cache_kind].append(latency_ms)
+        cache_latency_values_by_hour.setdefault(hour_bucket, {kind: [] for kind in _CACHE_KINDS})[cache_kind].append(
+            latency_ms
+        )
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_user_model[client_id][model_name] += 1
             requests_by_hour_model[hour_bucket][model_name] += 1
