@@ -157,12 +157,36 @@ class CacheBucket:
         }
 
 
+@dataclass(frozen=True)
+class CacheLatency:
+    """Latency percentiles of the cold and the warm turns; both kinds are always present."""
+
+    cold: dict[str, int] = field(default_factory=dict)
+    warm: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_samples(cls, samples: dict[str, list[int]]) -> CacheLatency:
+        return cls(cold=_latency_core(samples["cold"]), warm=_latency_core(samples["warm"]))
+
+    def to_json_dict(self) -> dict[str, dict[str, int]]:
+        return {"cold": self.cold, "warm": self.warm}
+
+
 def _latency_core(values: list[int]) -> dict[str, int]:
     return {
         "count": len(values),
         "p50": nearest_rank_percentile(values, 50),
         "p95": nearest_rank_percentile(values, 95),
     }
+
+
+def _request_start_key(payload: dict[str, object]) -> tuple[bool, datetime]:
+    """Sort key placing a request at its start time; an unreadable record sorts last."""
+    timestamp = _parse_timestamp(payload.get("timestamp"))
+    latency_ms = payload.get("latency_ms")
+    if timestamp is None or not isinstance(latency_ms, int):
+        return True, datetime.min.replace(tzinfo=UTC)
+    return False, timestamp - timedelta(milliseconds=latency_ms)
 
 
 def _is_cold(session_id: str, started: datetime | None, previous: datetime | None) -> bool:
@@ -246,8 +270,8 @@ class DailyUsageSummary:
     cache_total: CacheBucket = field(default_factory=CacheBucket)
     cache_by_hour: dict[str, CacheBucket] = field(default_factory=dict)
     cache_by_client: dict[str, CacheBucket] = field(default_factory=dict)
-    cache_latency_total: dict[str, dict[str, int]] = field(default_factory=dict)
-    cache_latency_by_hour: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    cache_latency_total: CacheLatency = field(default_factory=CacheLatency)
+    cache_latency_by_hour: dict[str, CacheLatency] = field(default_factory=dict)
     peak_concurrency_by_hour: dict[str, int] = field(default_factory=dict)
     node_metrics_present: bool = False
     node_hot_loaded_models: dict[str, list[str]] = field(default_factory=dict)
@@ -293,7 +317,10 @@ class DailyUsageSummary:
                 "total": self.cache_total.to_json_dict(),
                 "by_hour": {hour: bucket.to_json_dict() for hour, bucket in self.cache_by_hour.items()},
                 "by_client": {client: bucket.to_json_dict() for client, bucket in self.cache_by_client.items()},
-                "latency": {"total": self.cache_latency_total, "hour": self.cache_latency_by_hour},
+                "latency": {
+                    "total": self.cache_latency_total.to_json_dict(),
+                    "hour": {hour: latency.to_json_dict() for hour, latency in self.cache_latency_by_hour.items()},
+                },
             },
             "concurrency": {"peak_by_hour": self.peak_concurrency_by_hour},
             "invalid_lines": self.invalid_lines,
@@ -352,6 +379,9 @@ def summarize_daily_usage(
 
     records, invalid = _load_jsonl_lines(access_log_path)
     invalid_lines += invalid
+    # The edge writes a record when the request finishes, so log order is completion order: a long
+    # cold turn can be logged after the short follow-up that follows it. Classify in start order.
+    records.sort(key=_request_start_key)
     for payload in records:
         timestamp = _parse_timestamp(payload.get("timestamp"))
         if not _in_period(timestamp, period):
@@ -564,10 +594,9 @@ def summarize_daily_usage(
         cache_total=CacheBucket.from_counts(cache_total_counts),
         cache_by_hour={hour: CacheBucket.from_counts(counts) for hour, counts in sorted(cache_by_hour.items())},
         cache_by_client=cache_by_client_payload,
-        cache_latency_total={kind: _latency_core(values) for kind, values in sorted(cache_latency_values.items())},
+        cache_latency_total=CacheLatency.from_samples(cache_latency_values),
         cache_latency_by_hour={
-            hour: {kind: _latency_core(values) for kind, values in sorted(kinds.items())}
-            for hour, kinds in sorted(cache_latency_values_by_hour.items())
+            hour: CacheLatency.from_samples(samples) for hour, samples in sorted(cache_latency_values_by_hour.items())
         },
         peak_concurrency_by_hour=peak_concurrency_by_hour,
         node_metrics_present=node_metrics_present,

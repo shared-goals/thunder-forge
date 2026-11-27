@@ -454,6 +454,24 @@ def test_summarize_daily_usage_keeps_the_window_when_the_log_is_out_of_order(tmp
     assert summary.cache_total.to_json_dict() == {"cold": 1, "warm": 2, "cold_share": 0.3333}
 
 
+def test_summarize_daily_usage_classifies_overlapping_requests_by_start(tmp_path: Path) -> None:
+    access_log = _access_log(
+        tmp_path,
+        [
+            # The edge logs at completion, so the 54 s cold prefill lands *after* its own follow-up.
+            {"timestamp": "2026-06-02T08:00:02+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
+            {"timestamp": "2026-06-02T08:00:54+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 54000},
+        ],
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02")
+
+    # Classified in start order: the prefill is the session's cold turn, the answer is warm.
+    assert summary.cache_total.to_json_dict() == {"cold": 1, "warm": 1, "cold_share": 0.5}
+    assert summary.cache_latency_total.cold["p50"] == 54000
+    assert summary.cache_latency_total.warm["p50"] == 1000
+
+
 def test_summarize_daily_usage_counts_a_record_without_a_timestamp_cold(tmp_path: Path) -> None:
     access_log = _access_log(
         tmp_path,
