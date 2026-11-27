@@ -319,7 +319,7 @@ def _trim_logs_with_policy(
     config: ClusterConfig,
     node_metrics_path: Path,
     retention_days: int | None,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     days = retention_days if retention_days is not None else config.services.log_retention_days
     if days <= 0:
         typer.echo("Error: retention days must be positive", err=True)
@@ -332,7 +332,8 @@ def _trim_logs_with_policy(
     )
     jsonl_removed = sum(result.removed_lines for result in summary.jsonl_results)
     file_removed = sum(1 for result in summary.file_results if result.removed)
-    return days, jsonl_removed, file_removed
+    skipped = sum(1 for result in summary.jsonl_results if result.skipped)
+    return days, jsonl_removed, file_removed, skipped
 
 
 def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> list[dict[str, object]]:
@@ -3762,7 +3763,7 @@ def usage_collect_node_metrics(
 
     while True:
         run_count += 1
-        days, jsonl_removed, file_removed = _trim_logs_with_policy(
+        days, jsonl_removed, file_removed, skipped = _trim_logs_with_policy(
             repo_root=repo_root,
             config=config,
             node_metrics_path=metrics_path,
@@ -3778,6 +3779,7 @@ def usage_collect_node_metrics(
         typer.echo(f"retention_days: {days}")
         typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
         typer.echo(f"pruned_log_files: {file_removed}")
+        typer.echo(f"skipped_jsonl_files: {skipped}")
         _print_snapshot_summary(snapshots)
 
         if not continuous:
@@ -3802,7 +3804,7 @@ def usage_trim_logs(
     """Trim local TF logs with one shared retention policy."""
     config, repo_root = _load_config()
     metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
-    days, jsonl_removed, file_removed = _trim_logs_with_policy(
+    days, jsonl_removed, file_removed, skipped = _trim_logs_with_policy(
         repo_root=repo_root,
         config=config,
         node_metrics_path=metrics_path,
@@ -3811,6 +3813,7 @@ def usage_trim_logs(
     typer.echo(f"retention_days: {days}")
     typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
     typer.echo(f"pruned_log_files: {file_removed}")
+    typer.echo(f"skipped_jsonl_files: {skipped}")
 
 
 @olla_app.command("smoke")
@@ -3977,12 +3980,6 @@ def edge_serve(
 
     access_log_path = _edge_access_log_path(repo_root, cluster_config, access_log)
     metrics_path = _usage_metrics_log_path(repo_root, None)
-    days, jsonl_removed, file_removed = _trim_logs_with_policy(
-        repo_root=repo_root,
-        config=cluster_config,
-        node_metrics_path=metrics_path,
-        retention_days=None,
-    )
 
     def log_sink(line: str) -> None:
         access_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4024,21 +4021,13 @@ def edge_serve(
         typer.echo(f"edge_inspector: enabled output_dir={edge_proxy_config.inspector.output_dir}")
     else:
         typer.echo("edge_inspector: disabled")
-    typer.echo(f"retention_days: {days}")
-    typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-    typer.echo(f"pruned_log_files: {file_removed}")
+    typer.echo("log_retention: on_demand (thunder-forge usage trim-logs)")
 
     stop_metrics_collector = threading.Event()
 
     def _run_edge_metrics_collector() -> None:
         while not stop_metrics_collector.is_set():
             try:
-                _, _, _ = _trim_logs_with_policy(
-                    repo_root=repo_root,
-                    config=cluster_config,
-                    node_metrics_path=metrics_path,
-                    retention_days=None,
-                )
                 snapshots = _collect_node_metric_snapshots(cluster_config, timeout=metrics_timeout)
                 if snapshots:
                     _append_snapshots(metrics_path, snapshots)

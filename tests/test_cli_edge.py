@@ -303,6 +303,37 @@ def test_edge_serve_cli_reports_node_metrics_collector_errors(monkeypatch) -> No
     assert "node_metrics_collector_error: metrics unavailable" in result.stdout
 
 
+def test_edge_serve_cli_never_trims_logs_from_the_serving_path(monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    collected = threading.Event()
+    trim_calls: list[dict[str, object]] = []
+    monkeypatch.setenv("TF_USER_CLIENT_A", "secret-a")
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_cluster_config(), Path.cwd()), raising=False)
+
+    def fake_trim_local_logs(**kwargs: object):
+        trim_calls.append(kwargs)
+        raise AssertionError("edge serve must not trim logs")
+
+    def fake_collect_node_metric_snapshots(*args, **kwargs):
+        collected.set()
+        return []
+
+    def fake_serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
+        assert collected.wait(timeout=1.0)
+
+    monkeypatch.setattr(cli_module, "trim_local_logs", fake_trim_local_logs, raising=False)
+    monkeypatch.setattr(cli_module, "_collect_node_metric_snapshots", fake_collect_node_metric_snapshots)
+    monkeypatch.setattr(cli_module, "serve_edge_proxy", fake_serve_edge_proxy, raising=False)
+
+    result = runner.invoke(app, ["edge", "serve", "--metrics-interval-seconds", "1"])
+
+    assert result.exit_code == 0
+    assert trim_calls == []
+    assert "log_retention: on_demand (thunder-forge usage trim-logs)" in result.stdout
+    assert "trimmed_jsonl_records" not in result.stdout
+
+
 def test_edge_client_config_opencode_prints_assigned_aliases(monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 
