@@ -579,7 +579,7 @@ def test_summary_flags_a_period_older_than_the_retained_log(tmp_path: Path) -> N
     """A day entirely outside retention is missing, not a quiet day with zero traffic."""
     access_log = tmp_path / "access.jsonl"
     access_log.write_text(
-        json.dumps({"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "memory",
+        json.dumps({"timestamp": "2026-06-02T00:00:10+00:00", "client_id": "alice", "model": "memory",
                     "latency_ms": 5, "olla_endpoint": "msm1-omlx-live", "status_code": 200}) + "\n"
     )
 
