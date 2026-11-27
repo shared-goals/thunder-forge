@@ -12,8 +12,8 @@ Mechanical part of the rule in `AGENTS.md` under "Versioned publication".
 
    ```bash
    git fetch origin --tags
-   git show origin/main:src/thunder_forge/__init__.py | grep __version__
-   git show origin/main:pyproject.toml | grep '^version'
+   git show origin/main:src/thunder_forge/__init__.py | grep -Fqx '__version__ = "<version>"'
+   git show origin/main:pyproject.toml | grep -Fqx 'version = "<version>"'
    uv lock --check
    ```
 
