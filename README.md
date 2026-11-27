@@ -385,6 +385,35 @@ make usage 2026-06-02
 make usage-json 2026-06-02
 ```
 
+Alert on recent failures from the same access log:
+
+```bash
+uv run thunder-forge usage check
+uv run thunder-forge usage check --window 1h --max-failure-rate 0.02 --min-requests 20
+uv run thunder-forge usage check --window 15m --include-client-errors --json
+
+# or
+make usage-check 15m
+```
+
+`usage check` reads the log resolved from `services.edge.access_log` (default `logs/tf-edge-access.jsonl`), keeps
+the records whose `timestamp` falls inside `--window` (default `15m`; suffix `s`, `m`, or `h`), and compares the
+failure ratio against `--max-failure-rate` (default `0.05`). It counts `status_code >= 500` unless
+`--include-client-errors` widens that to `>= 400`, and below `--min-requests` (default `5`) it reports
+`insufficient data` instead of breaching.
+
+Exit codes:
+
+- `0`: healthy, or too few requests in the window to judge
+- `1`: breach, failure rate over the threshold
+- `2`: operator error: a missing or unreadable access log, an invalid `--window`, or a negative option
+
+Run it from a host that can read the log, for example every five minutes from cron:
+
+```cron
+*/5 * * * * cd /mnt/samsung/thunder-forge && make usage-check 15m >> logs/usage-check.log 2>&1 || logger -t tf-usage-check "usage check breached"
+```
+
 Summary dimensions include:
 
 - by user (`tf_user`/`client_id`): requests, consumed time (`latency_ms` sum), tokens when present

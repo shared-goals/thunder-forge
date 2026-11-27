@@ -1,6 +1,6 @@
 UV ?= uv run
 
-_TARGETS := help cli-help dev dev-sync dev-test dev-lint dev-check bootstrap restart smoke bench status sync prune config model usage usage-json usage-trim usage-duckdb \
+_TARGETS := help cli-help dev dev-sync dev-test dev-lint dev-check bootstrap restart smoke bench status sync prune config model usage usage-json usage-trim usage-check usage-duckdb \
 	export opencode hermes vscode
 ARG ?= $(word 2,$(MAKECMDGOALS))
 MODEL ?= $(word 3,$(MAKECMDGOALS))
@@ -33,6 +33,7 @@ help:
 	@printf "  %-24s %s\n" "usage [day]" "print usage summary (day: YYYY-MM-DD)"
 	@printf "  %-24s %s\n" "usage-json [day]" "print usage summary as JSON"
 	@printf "  %-24s %s\n" "usage-trim [days]" "trim local TF logs (default 3 days)"
+	@printf "  %-24s %s\n" "usage-check [window]" "exit non-zero when edge failures exceed the threshold"
 	@printf "  %-24s %s\n" "usage-duckdb [day]" "run DuckDB daily usage SQL over JSONL logs"
 	@printf "  %-24s %s\n" "export [node]" "export oMLX state files and logs from a node (or all inference nodes)"
 	@echo ""
@@ -130,6 +131,9 @@ usage-json:
 
 usage-trim:
 	$(UV) thunder-forge usage trim-logs $(if $(strip $(ARG)),--retention-days "$(ARG)")
+
+usage-check:
+	$(UV) thunder-forge usage check $(if $(strip $(ARG)),--window "$(ARG)")
 
 usage-duckdb:
 	@if ! command -v duckdb >/dev/null 2>&1; then \

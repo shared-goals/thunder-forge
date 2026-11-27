@@ -11,10 +11,11 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -113,6 +114,7 @@ from thunder_forge.cluster.usage import (
     _parse_timestamp,
     extract_hot_loaded_models,
     resolve_usage_period,
+    select_usage_events,
     summarize_daily_usage,
 )
 
@@ -3721,6 +3723,119 @@ def usage_report(
                 parts = cast("dict[str, int]", bucket[key])
                 rendered = ", ".join(f"{name}: {_fmt_number(count)}" for name, count in parts.items())
                 typer.echo(f"      {key}: {rendered or '[]'}")
+
+
+_USAGE_CHECK_WINDOW = re.compile(r"^(\d+)([smh])$")
+_USAGE_CHECK_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600}
+
+
+def _parse_usage_check_window(raw: str) -> int:
+    """Return the look-back window in seconds for a value like 30s, 15m, or 2h."""
+    match = _USAGE_CHECK_WINDOW.fullmatch((raw or "").strip())
+    if match is None:
+        raise ValueError(raw)
+    amount, unit = match.groups()
+    seconds = int(amount) * _USAGE_CHECK_UNIT_SECONDS[unit]
+    if seconds <= 0:
+        raise ValueError(raw)
+    return seconds
+
+
+@usage_app.command("check")
+def usage_check(
+    window: str = typer.Option(
+        "15m",
+        "--window",
+        help="Look-back window relative to now: a number plus s, m, or h (for example 30s, 15m, 2h).",
+    ),
+    max_failure_rate: float = typer.Option(
+        0.05,
+        "--max-failure-rate",
+        help="Breach when the failure ratio over the window exceeds this value.",
+    ),
+    min_requests: int = typer.Option(
+        5,
+        "--min-requests",
+        help="Report insufficient data and never breach below this many requests in the window.",
+    ),
+    include_client_errors: bool = typer.Option(
+        False,
+        "--include-client-errors",
+        help="Count 4xx responses as failures too. Default counts only 5xx.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit a single machine-readable JSON object instead of one text line.",
+    ),
+) -> None:
+    """Check recent edge failures against a threshold. Exit 1 on breach, 2 on error."""
+    config, repo_root = _load_config()
+    try:
+        window_seconds = _parse_usage_check_window(window)
+    except ValueError:
+        typer.echo(f"Error: invalid window {window!r}, expected a duration like 30s, 15m, or 2h", err=True)
+        raise typer.Exit(2)
+    if max_failure_rate < 0 or min_requests < 0:
+        typer.echo("Error: --max-failure-rate and --min-requests must not be negative", err=True)
+        raise typer.Exit(2)
+    log_path = _edge_access_log_path(repo_root, config, None)
+    if not log_path.is_file():
+        # A missing or mistyped log must not look like a healthy cluster.
+        typer.echo(f"Error: access log not found: {log_path}", err=True)
+        raise typer.Exit(2)
+    try:
+        records = select_usage_events(log_path)
+    except OSError as exc:
+        typer.echo(f"Error: cannot read access log {log_path}: {exc}", err=True)
+        raise typer.Exit(2)
+
+    checked_at = datetime.now().astimezone()
+    cutoff = checked_at - timedelta(seconds=window_seconds)
+    failure_floor = 400 if include_client_errors else 500
+    requests = 0
+    failures = 0
+    statuses: Counter[str] = Counter()
+    for record in records:
+        timestamp = _parse_timestamp(record.get("timestamp"))
+        if timestamp is None or timestamp < cutoff:
+            continue
+        status_code = record.get("status_code")
+        if not isinstance(status_code, int):
+            continue
+        requests += 1
+        statuses[str(status_code)] += 1
+        if status_code >= failure_floor:
+            failures += 1
+
+    failure_rate = failures / requests if requests else 0.0
+    insufficient_data = requests < min_requests
+    breached = not insufficient_data and failure_rate > max_failure_rate
+
+    if json_output:
+        payload = {
+            "window_seconds": window_seconds,
+            "requests": requests,
+            "failures": failures,
+            "failure_rate": failure_rate,
+            "threshold": max_failure_rate,
+            "min_requests": min_requests,
+            "breached": breached,
+            "insufficient_data": insufficient_data,
+            "statuses": dict(sorted(statuses.items())),
+            "log_path": str(log_path),
+            "checked_at": checked_at.isoformat(),
+        }
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        failures_label = "failures_4xx_5xx" if include_client_errors else "failures_5xx"
+        result = "breach" if breached else ("insufficient_data" if insufficient_data else "ok")
+        typer.echo(
+            f"usage check: window={window} requests={requests} {failures_label}={failures} "
+            f"rate={failure_rate * 100:.1f}% threshold={max_failure_rate * 100:.1f}% result={result}"
+        )
+    if breached:
+        raise typer.Exit(1)
 
 
 @usage_app.command("collect-node-metrics")
