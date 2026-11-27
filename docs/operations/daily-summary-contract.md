@@ -139,7 +139,7 @@ Aggregation honours `operations.usage.exclude_models` and
 
 - Config key: `services.log_retention_days`
 - Default: `3`
-- Entry point: `thunder-forge usage trim-logs` only. Retention never runs inside `edge serve` or `usage collect-node-metrics` (including its `--continuous` mode); trimming a log that a live process appends to loses records.
+- Entry point: `thunder-forge usage trim-logs` only. Retention never runs inside `edge serve` or `usage collect-node-metrics` (including its `--continuous` mode), and that collector has no `--retention-days` flag any more; trimming a log that a live process appends to loses records.
 - Scope: local TF-managed logs
   - `logs/tf-edge-access.jsonl`
   - `logs/tf-node-metrics.jsonl`

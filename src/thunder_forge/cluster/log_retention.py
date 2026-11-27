@@ -5,6 +5,8 @@ Retention is intentionally file-based and lightweight:
   the file changed since it was read, so a run never overwrites records it did not see. The
   check-then-swap still leaves a sub-second window for a writer that already holds the file open:
   if that matters, coordinate the writer instead of trusting this helper.
+- Blank lines are not counted as removed records, and a file with no expired record is
+  not rewritten at all.
 - Plain text and archive service logs (`*.stdout.log`, `*.stderr.log`, `*.log.gz`) are
   pruned whole by file mtime.
 - `logs/olla.log` is plain text without record timestamps, so it is not a retention
