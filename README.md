@@ -427,8 +427,7 @@ Failure and coverage signals in the same summary:
 
 - `requests.by_status`: histogram of `status_code` responses, and `failures_total` for `status_code >= 400`
   plus any row whose `error_kind` is a cluster failure — a stream that died after its headers still
-  reads `200`. `client_aborted` is not counted: that failure is the client's
-  plus any row that carries an `error_kind` — a stream that died after its headers still reads `200`
+  reads `200`. `client_aborted` is not counted: that failure is the client's own choice
 - residual buckets keep the breakdowns honest: `requests.by_node["unknown"]` (no endpoint attribution),
   `requests.by_model["unknown"]` (empty model, for example `/v1/models`), and
   `requests.unauthenticated` (records carrying the unauthenticated marker, counted even when

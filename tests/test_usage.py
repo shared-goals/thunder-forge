@@ -592,8 +592,8 @@ def test_summary_flags_a_period_older_than_the_retained_log(tmp_path: Path) -> N
     assert present.partial is False
 
 
-def test_summary_counts_a_stream_abort_as_a_failure(tmp_path: Path) -> None:
-    """A row that carries an error_kind did not complete, even though its status reads 200."""
+def test_summary_counts_a_stream_abort_but_not_a_client_abort(tmp_path: Path) -> None:
+    """A stream that died is a cluster failure; a client that hung up is not."""
     access_log = tmp_path / "access.jsonl"
     records = [
         {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
@@ -602,13 +602,15 @@ def test_summary_counts_a_stream_abort_as_a_failure(tmp_path: Path) -> None:
          "olla_endpoint": "msm1-omlx-live", "status_code": 200, "error_kind": "stream_aborted"},
         {"timestamp": "2026-06-02T10:02:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
          "olla_endpoint": "msm1-omlx-live", "status_code": 502},
+        {"timestamp": "2026-06-02T10:03:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200, "error_kind": "client_aborted"},
     ]
     access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
 
     summary = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=[])
 
-    assert summary.requests_total == 3
-    assert summary.requests_by_status == {"200": 2, "502": 1}
+    assert summary.requests_total == 4
+    assert summary.requests_by_status == {"200": 3, "502": 1}
     assert summary.failures_total == 2
 
 
