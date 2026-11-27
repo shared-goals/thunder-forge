@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Changed
+
+- Log retention is operator-run only: `edge serve` and `usage collect-node-metrics` no longer trim, and the
+  collector lost `--retention-days`. `usage trim-logs` splices live appends instead of skipping a growing log,
+  keeps owner and mode, follows symlinks, and exits `1` when a file had to be skipped.
+
+### Added
+
+- Agent rules for the live cluster, the publication boundary and secrets, plus an executable release runbook
+  in `docs/operations/release.md`.
+
 ## v0.2.0 - 2026-06-02
 
 ### Added
