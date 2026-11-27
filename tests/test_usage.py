@@ -532,3 +532,44 @@ def test_summarize_daily_usage_flags_a_truncated_oldest_day(tmp_path: Path) -> N
     # "all" merges days, so there is no oldest-day boundary to warn about.
     assert everything.partial is False
     assert everything.coverage_first_record_at == "2026-11-26T04:00:12+04:00"
+
+
+def test_summary_excludes_configured_models_from_the_model_breakdown_only(tmp_path: Path) -> None:
+    """A configured exclusion disappears from by_model but never from requests.total."""
+    access_log = tmp_path / "access.jsonl"
+    records = [
+        {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "markitdown", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+        {"timestamp": "2026-06-02T10:01:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+    ]
+    access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=["MarkItDown"])
+
+    assert summary.requests_total == 2
+    assert summary.requests_by_model == {"memory": 1}
+    assert summary.consumed_ms_by_model == {"memory": 5}
+    assert summary.requests_by_node == {"msm1": 2}
+
+
+def test_summary_counts_a_record_without_a_timestamp_in_the_unknown_hour(tmp_path: Path) -> None:
+    """The hour breakdowns reconcile even for a row whose timestamp cannot be parsed."""
+    access_log = tmp_path / "access.jsonl"
+    records = [
+        {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+        {"timestamp": "not-a-timestamp", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+    ]
+    access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    summary = summarize_daily_usage(access_log, period="all", excluded_models=[])
+
+    assert summary.requests_total == 2
+    assert sum(bucket["requests"] for bucket in summary.requests_by_hour.values()) == 2
+    assert "unknown" in summary.requests_by_hour
+    assert sum(sum(node.values()) for node in summary.requests_by_node_hour.values()) == 2
+    assert summary.requests_by_node_hour["msm1"]["unknown"] == 1
+
+
