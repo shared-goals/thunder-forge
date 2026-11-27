@@ -32,6 +32,7 @@ import httpx
 
 from thunder_forge.cluster.config import (
     OLLA_BACKEND_TIMEOUT_SECONDS,
+    OLLA_CONNECT_TIMEOUT_SECONDS,
     UNKNOWN_BUILD_INFO,
     ClusterConfig,
     Node,
@@ -75,8 +76,8 @@ EDGE_DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 EDGE_MAX_STREAM_CAPTURE_BYTES = 1024 * 1024
 EDGE_DEFAULT_TIMEOUT_SECONDS = 180.0
 # A shorter edge timeout answers 504 while Olla keeps generating, so the client retries work the
-# node is still doing. The floor is Olla's backend wait plus its own connect attempt.
-EDGE_MIN_TIMEOUT_SECONDS = OLLA_BACKEND_TIMEOUT_SECONDS + 5.0
+# node is still doing. The floor is Olla's connect attempt plus its backend wait.
+EDGE_MIN_TIMEOUT_SECONDS = OLLA_CONNECT_TIMEOUT_SECONDS + OLLA_BACKEND_TIMEOUT_SECONDS
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"

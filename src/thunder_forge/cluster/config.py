@@ -39,7 +39,8 @@ DEFAULT_SYNC_TRANSPORT = "auto"
 DEFAULT_SYNC_TIMEOUT = 7200
 DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
-# The generated Olla config waits this long for a backend, after its own 5 s connect attempt.
+# The generated Olla config's own limits: it connects to a backend, then waits for the answer.
+OLLA_CONNECT_TIMEOUT_SECONDS = 5.0
 OLLA_BACKEND_TIMEOUT_SECONDS = 120.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
@@ -850,7 +851,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
             "engine": "olla",
             "profile": "auto",
             "load_balancer": "least-connections",
-            "connection_timeout": "5s",
+            "connection_timeout": f"{OLLA_CONNECT_TIMEOUT_SECONDS:g}s",
             "response_timeout": f"{OLLA_BACKEND_TIMEOUT_SECONDS:g}s",
             "read_timeout": f"{OLLA_BACKEND_TIMEOUT_SECONDS:g}s",
             "sticky_sessions": {
