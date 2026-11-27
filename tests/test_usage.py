@@ -437,12 +437,12 @@ def test_summarize_daily_usage_marks_a_gap_beyond_the_sticky_ttl_cold(tmp_path: 
     assert summary.cache_total.to_json_dict() == {"cold": 2, "warm": 2, "cold_share": 0.5}
 
 
-def test_summarize_daily_usage_keeps_the_window_when_the_log_is_out_of_order(tmp_path: Path) -> None:
+def test_summarize_daily_usage_classifies_an_out_of_order_log_in_start_order(tmp_path: Path) -> None:
     access_log = _access_log(
         tmp_path,
         [
             {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
-            # An older line arriving later must not rewind the window.
+            # An older line arriving later must not take the cold turn away from the real first request.
             {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
             {"timestamp": "2026-06-02T08:11:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
         ],
@@ -450,8 +450,9 @@ def test_summarize_daily_usage_keeps_the_window_when_the_log_is_out_of_order(tmp
 
     summary = summarize_daily_usage(access_log, period="2026-06-02")
 
-    # Out of order, only the first line of the session is cold; a negative gap never appears.
+    # In file order the 08:10 line would look first; in start order it follows the 08:00 turn.
     assert summary.cache_total.to_json_dict() == {"cold": 1, "warm": 2, "cold_share": 0.3333}
+    assert summary.cache_by_hour["08"].to_json_dict() == {"cold": 1, "warm": 2, "cold_share": 0.3333}
 
 
 def test_summarize_daily_usage_classifies_overlapping_requests_by_start(tmp_path: Path) -> None:

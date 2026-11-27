@@ -443,7 +443,8 @@ def summarize_daily_usage(
         else:
             previous_started_at = last_seen_by_session.get(session_key)
             cold = _is_cold(started_at, previous_started_at)
-            last_seen_by_session[session_key] = max(started_at, previous_started_at or started_at)
+            # Records arrive sorted by start, so the window only moves forward.
+            last_seen_by_session[session_key] = started_at
         cache_kind = "cold" if cold else "warm"
         cache_by_hour[hour_bucket][cache_kind] += 1
         cache_by_client[client_id][cache_kind] += 1
