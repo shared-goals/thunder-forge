@@ -159,7 +159,7 @@ When `services.olla.version` is omitted inside an explicit `services.olla` block
 
 After changing model placement or node topology in `tfconfig.yaml`, run `make restart gateway-cache-01` (or full `make restart`) before `make smoke <node>` so Olla and TF edge reload the generated router config.
 
-TF edge defaults to a 180-second upstream I/O timeout, leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records a 502 failure in its access log; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
+TF edge defaults to a 180-second upstream I/O timeout (`edge serve --timeout <seconds>`), leaving room for the generated Olla config's 120-second backend timeouts and connection attempts. This limits waits for network activity, not total generation time. An upstream timeout answers `504` and a refused or dropped connection answers `502`; the access-log fields below tell them apart. If an upstream stream fails after HTTP headers have been sent, edge closes the incomplete response and records the partial answer instead of pretending the whole request failed; it cannot change the status already sent to the client. Streaming bodies are captured only when `services.edge.inspector.enabled` is true. Inspector response capture is limited to the first 1 MiB, with `body_truncated: true` in the JSONL entry when clipped; clients still receive the full stream.
 
 ### GPU memory ceiling on inference nodes
 
@@ -331,6 +331,8 @@ make edge-keys EDGE_CLIENTS="opencode hindsight"
 
 `edge serve` loads all `TF_USER_<CLIENT>` entries and accepts requests with `Authorization: Bearer <api-key>`. The access log records the mapped `client_id`, model, endpoint, status, and latency, but never the API key. `edge smoke --client-id hindsight` reads that client's key from `TF_USER_HINDSIGHT`; `make edge-usage` summarizes the JSONL access log.
 
+`edge serve` also resolves the build it is about to execute once at startup: the package version from `thunder_forge.__version__` plus the git commit of the checkout being run, read with one `git -C <repo_root> status --porcelain=v2 --branch -unormal` call that also decides whether the tree is dirty. An unavailable git or checkout publishes `commit: "unknown"` and `dirty: "unknown"` — read that as unknown, never as a clean tree — instead of blocking startup, and `git -C` resolves the *enclosing* repository, so an edge installed inside an unrelated clone reports that clone's HEAD. A caller that supplies no build at all publishes the same `unknown` values. It prints a single `build: version=... commit=... dirty=<yes|no|unknown>` startup line, `GET /status` exposes the same values under a top-level `"build": {"version", "commit", "dirty"}` key, and `cluster status` prints the same line first, so a restart can be traced in the service log and matched to a deployment. It gives up after three seconds, so a slow git delays the listener, not the cluster. The commit is read from the checkout on the host that runs the edge, not from a built artifact.
+
 The reverse proxy in front of the edge (Caddy on `rock`, reached through gost) must forward `/usage` and
 `/usage/assets/*` to the edge port; that proxy config lives outside this repository.
 
@@ -338,6 +340,35 @@ Read-only usage endpoints stay disabled until `TF_EDGE_ADMIN_TOKEN` is set in th
 anonymously - it carries no data and a browser navigation cannot send an `Authorization` header - while
 `/usage/report` and `/usage/events` require `Authorization: Bearer <token>` (never a query token, which would
 leak into proxy logs) and answer `401` without it.
+
+### Status Endpoint
+
+`GET /health` and `GET /status` stay anonymous. An anonymous `GET /status` is a liveness/version check:
+
+- `ok`, `target`, `build` (version, commit, dirty — see below)
+- `summary` with `inference_total`, `inference_healthy`, `loaded_models`, `loading_models`,
+  `readiness`, `latest_omlx_version` and `omlx_upgrade_hint`
+- per node `name`, `health`, `models`, `omlx_version`, `macos_version` and `served_models`; the
+  gateway keeps `name`, `olla_version`, `latest_olla_version` and `upgrade`; cache nodes keep `name`
+  and `macos_version`. No per-node model list: `hot_loaded_models` is ordered by `last_access`, so
+  it would carry alias-level activity
+
+An anonymous request also skips the probes only the full view needs: no SSH `sw_vers` per node and
+no upstream release lookups, so `macos_version`, `latest_olla_version`, `upgrade` and
+`summary.omlx_upgrade_hint` read `unknown`. One SSH `omlx --version` per inference node remains,
+because the runtime version is part of the version check. `cluster status` without a token prints that
+reduced payload as it is and does not fill the versions back in.
+A `503` for an anonymous caller says only `status_unavailable`, without the failing host in the text.
+Live client identities (`active_edge_requests`, i.e. who is generating against which alias right now),
+live load (`summary.active_requests`, `waiting_requests`, `traffic_state`), memory turnover
+(`recently_used_models`, `stale_loaded_models`, `recent_idle_threshold_seconds`), the per-node
+`model_statuses` (`runtime_id`, `actual_size`, `idle_seconds`, `last_access`), node `host`,
+`public_host` and `admin_url`, the top-level `health` block and per-node `errors` are only returned to
+a request that carries `Authorization: Bearer <TF_EDGE_ADMIN_TOKEN>` - the same admin token as the
+usage data paths. An invalid or
+missing token is treated as anonymous: it never reveals the detail and never becomes an error on this route, so
+liveness monitoring keeps working without credentials even when a token is configured. `thunder-forge cluster
+status` (`make status`) sends the token when the repo `.env` has one and otherwise prints the reduced payload.
 
 ## Daily Usage Reporting
 
@@ -347,6 +378,7 @@ Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/Y
 - Node snapshots (health + hot-loaded models) come from `logs/tf-node-metrics.jsonl`.
 - Daily rollups are produced by the TF CLI and can also be queried with DuckDB CLI.
 - Shared log retention is controlled by `services.log_retention_days` in `tfconfig.yaml` (default: `3`).
+- Retention is operator-only: neither `edge serve` nor `usage collect-node-metrics` (including `--continuous`) trims logs while requests are appended, so the command below is the single entry point. `edge serve` prints `log_retention: on_demand (thunder-forge usage trim-logs)` where it used to trim at startup, and `usage collect-node-metrics` lost its `--retention-days` flag along with the trim it used to run.
 
 TF edge now collects node metrics in-process every 60 seconds by default, so no separate metrics process is required.
 
@@ -364,7 +396,28 @@ Edge serve flags for this behavior:
 ```bash
 uv run thunder-forge edge serve --metrics-interval-seconds 60
 uv run thunder-forge edge serve --no-collect-node-metrics
+uv run thunder-forge edge serve --timeout 300  # default 180, minimum 125; upstream Olla I/O timeout in seconds. Flag only: there is no tfconfig key, the generated LaunchAgent does not pass it, and `make restart` rewrites the plist, so a hand edit is lost.
 ```
+
+### Edge access log fields
+
+Every `logs/tf-edge-access.jsonl` row records `timestamp`, `request_id`, `client_id`, `sticky_id`, `model`, `path`, `status_code`, `latency_ms`, `client_ip`, and `olla_endpoint`, never the API key or request content. Three failure fields separate cases that one `status_code` cannot express:
+
+| Field | Meaning |
+|---|---|
+| `stream` | `true` when the request reached the streaming response path (a rejected request never gets far enough to be known as streaming) |
+| `headers_sent` | `true` only when a failure came after the response status and headers reached the client, so the client holds a partial answer; a successful record stays `false` |
+| `error_kind` | Empty when nothing upstream failed, otherwise one value from the closed vocabulary below |
+
+`error_kind` vocabulary:
+
+- `edge_timeout` — Olla did not answer within the edge timeout (`status_code: 504`).
+- `edge_connect` — Olla was unreachable or the connection dropped before headers (`status_code: 502`).
+- `upstream_error` — any other upstream transport or protocol failure (`status_code: 502`).
+- `stream_aborted` — the stream died after `headers_sent: true`. `status_code` keeps the cause (`502` or `504`) and this value says the client holds a partial answer.
+- `client_aborted` — the client disconnected mid-stream (best effort). `headers_sent: false` means it hung up before the response headers were written, so nothing reached it.
+
+A timeout that happens after the headers were sent keeps `status_code: 504` with `error_kind: "stream_aborted"`: the status names the cause, `error_kind` names what the client received.
 
 Manually run shared log trimming across edge access logs, node metrics, and local service logs:
 
@@ -373,6 +426,13 @@ uv run thunder-forge usage trim-logs
 # optional override
 uv run thunder-forge usage trim-logs --retention-days 7
 ```
+
+What the command touches:
+
+- `logs/tf-edge-access.jsonl` and `logs/tf-node-metrics.jsonl` are trimmed by record `timestamp`. The kept records go to a temp file that is swapped in with `os.replace`, and the swap is abandoned when the source changed since it was read: a file that grew under a live writer is left intact and reported as `skipped_jsonl_files`. The check and the swap are not one atomic step, so a writer that already holds the file open can still land a record in the replaced inode.
+- `logs/*.stdout.log`, `logs/*.stderr.log` and `logs/*.log.gz` are pruned whole once their mtime is older than the retention window.
+- A file that changed during the run is left alone and named in a `Warning:` line on stderr, so a scheduled trim that could not run says so instead of reporting a quiet zero.
+- `logs/olla.log` is plain text without record timestamps, so it is not a retention target and is never rewritten or deleted.
 
 Print daily summary from structured logs:
 
@@ -416,10 +476,35 @@ Run it from a host that can read the log, for example every five minutes from cr
 
 Summary dimensions include:
 
-- by user (`tf_user`/`client_id`): requests, consumed time (`latency_ms` sum), tokens when present
-- by node (`msm1`-`msm4`): requests, consumed time, tokens, by-model split, by-hour split
-- by model: requests, consumed time, tokens when present
+- by user (`tf_user`/`client_id`): requests, consumed time (`latency_ms` sum)
+- by node (`msm1`-`msm4`): requests, consumed time, by-model split, by-hour split
+- by model: requests, consumed time
 - node hot-loaded model sets from collected node snapshots
+
+Failure and coverage signals in the same summary:
+
+- `requests.by_status`: histogram of `status_code` responses, and `failures_total` for `status_code >= 400`
+  plus any row whose `error_kind` is a cluster failure — a stream that died after its headers still
+  reads `200`. `client_aborted` is not counted: that failure is the client's own choice
+- residual buckets keep the breakdowns honest: `requests.by_node["unknown"]` (no endpoint attribution),
+  `requests.by_model["unknown"]` (empty model, for example `/v1/models`), and
+  `requests.unauthenticated` (records carrying the unauthenticated marker, counted even when
+  `operations.usage.exclude_unauthenticated` keeps them out of the other breakdowns)
+- every breakdown sums to `requests.total` except the model ones, which still omit models listed in
+  `operations.usage.exclude_models` by design
+- `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, so an idle hour reads
+  as a zero instead of vanishing from the day; a record with no parsable timestamp lands in an extra
+  `"unknown"` bucket instead of being dropped
+- `coverage.first_record_at` / `coverage.last_record_at` and `partial: true` when the period is older
+  than the oldest day in the log (missing, not empty) or when it is the oldest day and its first
+  record starts after the first minute, which is the day retention can truncate
+
+Two things the summary deliberately cannot answer. The access log carries no token counts and no
+first-token timestamp, so there is no cost per client and no "how long until the answer started"
+figure; [Minimal Metric Strategy](#minimal-metric-strategy) lists the first-token timestamp still to
+collect, and nothing collects tokens at all. `consumed_ms` is wall time at the edge, so a streaming
+request's time ends when the last byte reaches the client and includes client backpressure; it is not
+model service time.
 
 ### Minimal Metric Strategy
 
@@ -503,6 +588,7 @@ The following sources are the first places to look when debugging routing or bui
 | `GET /usage` on TF edge | Browser dashboard: requests by node/hour, latency percentiles, peak parallel requests, node load, model memory (Chart.js served by the edge, no CDN) | Open `https://<edge>/usage` and paste `TF_EDGE_ADMIN_TOKEN` once |
 | `GET /usage/report` on TF edge | Same aggregates as `usage report --json` over HTTP, optional `?user=<client>` filter; `users.known` lists configured identities | `curl -H 'Authorization: Bearer <token>' '<edge>/usage/report?period=today&user=hermes'` |
 | `GET /usage/events` on TF edge | Raw log lines for one period: `source=access` (default) or `source=node-metrics` | `curl -OJ -H 'Authorization: Bearer <token>' '<edge>/usage/events?period=2026-06-02&source=node-metrics'` |
+| `GET /status` on TF edge | Running build (`version`, `commit`, `dirty`) plus the cluster snapshot: gateway/inference health, oMLX versions, hot-loaded models, readiness | `curl '<edge>/status'` |
 | `logs/olla-40115.stdout.log` | Olla startup config, discovered endpoints, model filters, sticky-session settings, and routed request decisions | Read the log directly if available; it is a useful operational trace |
 | `GET /internal/health` | Olla liveness/ready status | Probe Olla directly |
 | `GET /internal/status/endpoints` | Which endpoints are healthy/routable | Probe Olla directly |
@@ -532,6 +618,9 @@ duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
 # or
 make usage-duckdb 2026-06-02
 ```
+
+The `make usage-duckdb` default period is the local date (`date +%F`), matching the local offset
+in each log record; pass `YYYY-MM-DD` to query another day.
 
 ## Similar Repo Landscape (Olla/oMLX/Mac Cluster)
 
