@@ -132,9 +132,6 @@ def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
     return peak
 
 
-_CACHE_KINDS: tuple[str, ...] = ("cold", "warm")
-
-
 def _empty_cache_latency() -> dict[str, list[int]]:
     return {"cold": [], "warm": []}
 
@@ -245,7 +242,6 @@ class DailyUsageSummary:
     requests_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     latency_ms_by_hour: dict[str, dict[str, int]] = field(default_factory=dict)
-    cache_ttl_seconds: int = DEFAULT_STICKY_IDLE_TTL_SECONDS
     cache_total: CacheBucket = field(default_factory=CacheBucket)
     cache_by_hour: dict[str, CacheBucket] = field(default_factory=dict)
     cache_by_client: dict[str, CacheBucket] = field(default_factory=dict)
@@ -292,7 +288,7 @@ class DailyUsageSummary:
                 "by_hour": self.latency_ms_by_hour,
             },
             "cache": {
-                "ttl_seconds": self.cache_ttl_seconds,
+                "ttl_seconds": DEFAULT_STICKY_IDLE_TTL_SECONDS,
                 "total": self.cache_total.to_json_dict(),
                 "by_hour": {hour: bucket.to_json_dict() for hour, bucket in self.cache_by_hour.items()},
                 "by_client": {client: bucket.to_json_dict() for client, bucket in self.cache_by_client.items()},
