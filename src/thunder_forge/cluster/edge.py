@@ -642,7 +642,7 @@ def classify_edge_failure(exc: httpx.HTTPError, *, headers_sent: bool) -> tuple[
     """
     # ConnectTimeout is a TimeoutException, not a ConnectError, so the connect family is
     # asked first: a connection that never opened is unreachable Olla, not a slow answer.
-    if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError, httpx.NetworkError)):
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.NetworkError)):
         status_code, error_kind = 502, "edge_connect"
     elif isinstance(exc, httpx.TimeoutException):
         status_code, error_kind = 504, "edge_timeout"
