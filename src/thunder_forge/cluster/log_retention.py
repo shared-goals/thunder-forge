@@ -125,7 +125,7 @@ def trim_jsonl_by_age(
 
 
 def _replace_if_unchanged(path: Path, kept_lines: list[str], *, before_stat: os.stat_result) -> bool:
-    """Replace path with kept_lines atomically, unless a writer touched it since before_stat."""
+    """Swap kept_lines in place of path, unless the file changed or vanished since before_stat."""
     temp_path: Path | None = None
     try:
         fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")

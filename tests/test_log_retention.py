@@ -133,7 +133,20 @@ def test_trim_local_logs_covers_jsonl_and_service_logs(tmp_path: Path) -> None:
 
     edge_result = next(result for result in summary.jsonl_results if result.path.endswith("tf-edge-access.jsonl"))
     assert edge_result.removed_lines == 1
+    metrics_paths = [result.path for result in summary.jsonl_results]
+    assert str(node_metrics) in metrics_paths
     assert old_service_log.exists() is False
+
+
+def test_trim_jsonl_by_age_leaves_a_file_with_nothing_to_trim_untouched(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    content = "\n" + json.dumps({"timestamp": "2026-06-05T00:00:00+00:00", "id": "new"}) + "\n\n"
+    path.write_text(content)
+
+    result = trim_jsonl_by_age(path, retention_days=3, now=datetime(2026, 6, 5, tzinfo=UTC))
+
+    assert result.removed_lines == 0
+    assert path.read_text() == content
 
 
 def test_trim_local_logs_leaves_plain_text_olla_log_alone(tmp_path: Path) -> None:

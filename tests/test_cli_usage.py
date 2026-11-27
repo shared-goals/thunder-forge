@@ -325,11 +325,12 @@ def test_usage_collect_node_metrics_never_trims_logs(tmp_path: Path, monkeypatch
         nodes={},
     )
 
-    def fake_trim(*args: object, **kwargs: object) -> tuple[int, int, int, int]:
+    def fake_trim(*args: object, **kwargs: object) -> object:
         raise AssertionError("usage collect-node-metrics must not trim logs")
 
     monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
     monkeypatch.setattr(cli_module, "_trim_logs_with_policy", fake_trim)
+    monkeypatch.setattr(cli_module, "trim_local_logs", fake_trim)
 
     result = runner.invoke(app, ["usage", "collect-node-metrics", "--once"])
 

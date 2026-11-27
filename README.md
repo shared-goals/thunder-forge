@@ -347,7 +347,7 @@ Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/Y
 - Node snapshots (health + hot-loaded models) come from `logs/tf-node-metrics.jsonl`.
 - Daily rollups are produced by the TF CLI and can also be queried with DuckDB CLI.
 - Shared log retention is controlled by `services.log_retention_days` in `tfconfig.yaml` (default: `3`).
-- Retention is operator-only: neither `edge serve` nor `usage collect-node-metrics` trims logs while requests are appended, so the command below is the single entry point.
+- Retention is operator-only: neither `edge serve` nor `usage collect-node-metrics` (including `--continuous`) trims logs while requests are appended, so the command below is the single entry point. `edge serve` prints `log_retention: on_demand (thunder-forge usage trim-logs)` where it used to trim at startup.
 
 TF edge now collects node metrics in-process every 60 seconds by default, so no separate metrics process is required.
 
