@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- Agent rules for the live cluster, the publication boundary and secrets, plus an executable release runbook
+  in `docs/operations/release.md`.
+
 ## v0.2.0 - 2026-06-02
 
 ### Added
