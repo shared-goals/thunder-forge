@@ -2,6 +2,8 @@
 
 CLI for managing a self-hosted MLX inference cluster with oMLX serving and Olla routing.
 
+![Thunder Forge usage dashboard](docs/images/usage-dashboard.png)
+
 Thunder Forge is part of the [Shared Goals](https://github.com/shared-goals/) platform: private, self-hosted AI infrastructure for working with personal and collective goals without sending sensitive data to cloud APIs.
 
 ## Architecture
@@ -336,8 +338,6 @@ Read-only usage endpoints stay disabled until `TF_EDGE_ADMIN_TOKEN` is set in th
 anonymously - it carries no data and a browser navigation cannot send an `Authorization` header - while
 `/usage/report` and `/usage/events` require `Authorization: Bearer <token>` (never a query token, which would
 leak into proxy logs) and answer `401` without it.
-
-![Thunder Forge usage dashboard](docs/images/usage-dashboard.png)
 
 ## Daily Usage Reporting
 
