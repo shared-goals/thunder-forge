@@ -48,6 +48,7 @@ from thunder_forge.cluster.bootstrap import (
 from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig, resolve_build_info
 from thunder_forge.cluster.edge import (
     EDGE_DEFAULT_TIMEOUT_SECONDS,
+    EDGE_MIN_TIMEOUT_SECONDS,
     EDGE_USER_PREFIX,
     USAGE_TOKEN_ENV,
     EdgeInspectorConfig,
@@ -3957,8 +3958,12 @@ def edge_serve(
     if metrics_interval_seconds <= 0:
         typer.echo("Error: metrics interval seconds must be positive", err=True)
         raise typer.Exit(1)
-    if upstream_timeout <= 0:
-        typer.echo("Error: upstream timeout seconds must be positive", err=True)
+    if upstream_timeout < EDGE_MIN_TIMEOUT_SECONDS:
+        typer.echo(
+            f"Error: upstream timeout must be at least {EDGE_MIN_TIMEOUT_SECONDS:g} seconds, "
+            "the backend timeout of the generated Olla config",
+            err=True,
+        )
         raise typer.Exit(1)
     resolved_port = resolve_port(port, default=cluster_config.services.edge_port)
     resolved_olla_base_url = olla_base_url or local_base_url(cluster_config.services.olla_port)

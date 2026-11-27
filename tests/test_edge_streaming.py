@@ -280,5 +280,15 @@ def test_stream_client_disconnect_is_recorded_as_client_aborted(monkeypatch) -> 
     assert len(records) == 1
     record = json.loads(records[0])
     assert record["stream"] is True
+    assert record["headers_sent"] is True
     assert record["error_kind"] == "client_aborted"
     assert config.active_requests == {}
+
+    # A client that hangs up while the headers are written received nothing at all.
+    records.clear()
+    handlers[0](_DisconnectingClient(request, fail_writes_after=0), ("127.0.0.1", 1234), None)
+
+    assert len(records) == 1
+    headless = json.loads(records[0])
+    assert headless["headers_sent"] is False
+    assert headless["error_kind"] == "client_aborted"

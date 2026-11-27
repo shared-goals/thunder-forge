@@ -245,14 +245,14 @@ def test_edge_serve_cli_accepts_upstream_timeout_option(monkeypatch) -> None:
     )
 
     result = runner.invoke(app, ["edge", "serve", "--timeout", "300"])
-    invalid = runner.invoke(app, ["edge", "serve", "--timeout", "0"])
+    invalid = runner.invoke(app, ["edge", "serve", "--timeout", "60"])
 
     assert result.exit_code == 0
     config = captured["config"]
     assert isinstance(config, EdgeProxyConfig)
     assert config.timeout == 300.0
     assert invalid.exit_code == 1
-    assert "Error: upstream timeout seconds must be positive" in invalid.stderr
+    assert "at least 120 seconds" in invalid.stderr
 
 
 def test_edge_serve_cli_prints_one_build_line_for_an_unknown_build(monkeypatch) -> None:

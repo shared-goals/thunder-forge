@@ -68,6 +68,9 @@ EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
 EDGE_DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 EDGE_MAX_STREAM_CAPTURE_BYTES = 1024 * 1024
 EDGE_DEFAULT_TIMEOUT_SECONDS = 180.0
+# The generated Olla config waits this long for a backend, so a shorter edge timeout answers 504
+# while Olla keeps generating and the client retries whatever the node is still working on.
+EDGE_MIN_TIMEOUT_SECONDS = 120.0
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"

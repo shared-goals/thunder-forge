@@ -386,7 +386,7 @@ Every `logs/tf-edge-access.jsonl` row records `timestamp`, `request_id`, `client
 - `edge_connect` — Olla was unreachable or the connection dropped before headers (`status_code: 502`).
 - `upstream_error` — any other upstream transport or protocol failure (`status_code: 502`).
 - `stream_aborted` — the stream died after `headers_sent: true`. `status_code` keeps the cause (`502` or `504`) and this value says the client holds a partial answer.
-- `client_aborted` — the client disconnected mid-stream (best effort).
+- `client_aborted` — the client disconnected mid-stream (best effort). `headers_sent: false` means it hung up before the response headers were written, so nothing reached it.
 
 A timeout that happens after the headers were sent keeps `status_code: 504` with `error_kind: "stream_aborted"`: the status names the cause, `error_kind` names what the client received.
 
