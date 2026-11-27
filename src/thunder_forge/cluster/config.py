@@ -855,16 +855,12 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
             },
             "retry": {
                 "enabled": True,
-                "on_connection_failure": True,
                 "max_attempts": 0,
             },
         },
         "discovery": {
             "type": "static",
             "refresh_interval": "30s",
-            "health_check": {
-                "initial_delay": "1s",
-            },
             "static": {
                 "endpoints": endpoints,
             },
