@@ -3985,11 +3985,12 @@ def edge_serve(
         ),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
+    dirty_state = build_info["dirty"]
     typer.echo(
         "build: "
         f"version={build_info['version']} "
         f"commit={build_info['commit']} "
-        f"dirty={'yes' if build_info['dirty'] else 'no'}"
+        f"dirty={'unknown' if dirty_state is None else ('yes' if dirty_state else 'no')}"
     )
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")

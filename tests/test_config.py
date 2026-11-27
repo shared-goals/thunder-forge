@@ -1,5 +1,6 @@
 """Tests for config parsing, validation, and generation."""
 
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 
@@ -825,18 +826,35 @@ def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, t
     assert "tfconfig.yaml" in str(exc_info.value)
 
 
-def test_resolve_build_info_degrades_to_empty_commit_without_git(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_build_info_reports_unknown_without_git(monkeypatch, tmp_path: Path) -> None:
     import thunder_forge.cluster.config as config_module
 
-    missing_checkout = {"version": __version__, "commit": "unknown", "dirty": False}
-    assert resolve_build_info(tmp_path) == missing_checkout
+    unknown_build = {"version": __version__, "commit": "unknown", "dirty": None}
+    assert resolve_build_info(tmp_path) == unknown_build
 
     def _no_git(*args, **kwargs):
         raise FileNotFoundError("git not installed")
 
     monkeypatch.setattr(config_module.subprocess, "run", _no_git)
-    monkeypatch.setattr(config_module, "find_repo_root", lambda: tmp_path)
-    assert resolve_build_info() == missing_checkout
+    assert resolve_build_info(tmp_path) == unknown_build
+
+
+def test_resolve_build_info_reports_dirty_unknown_when_status_fails(monkeypatch, tmp_path: Path) -> None:
+    """A clean-looking `dirty: false` must never stand in for a status read that failed."""
+    import thunder_forge.cluster.config as config_module
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(tuple(argv[3:]))
+        if tuple(argv[3:]) == ("rev-parse", "HEAD"):
+            return subprocess.CompletedProcess(argv, 0, stdout="abc1234\n", stderr="")
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(config_module.subprocess, "run", fake_run)
+
+    assert resolve_build_info(tmp_path) == {"version": __version__, "commit": "abc1234", "dirty": None}
+    assert calls == [("rev-parse", "HEAD"), ("status", "--porcelain")]
 
 
 def test_parse_model_info() -> None:

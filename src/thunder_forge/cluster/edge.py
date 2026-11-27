@@ -121,8 +121,10 @@ class EdgeProxyConfig:
     usage_admin_token: str | None = None
     usage_access_log_path: Path | None = None
     usage_node_metrics_path: Path | None = None
-    # Resolved once at `edge serve` startup; empty when the caller did not supply it.
-    build: dict[str, object] = field(default_factory=dict)
+    # Resolved once at `edge serve` startup; a caller that supplies nothing publishes "unknown".
+    build: dict[str, object] = field(
+        default_factory=lambda: {"version": "unknown", "commit": "unknown", "dirty": None}
+    )
 
 
 @dataclass

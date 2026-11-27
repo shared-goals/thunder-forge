@@ -1008,23 +1008,21 @@ def generated_olla_config_path(repo_root: Path) -> Path:
     return repo_root / GENERATED_CONFIG_DIR / GENERATED_OLLA_CONFIG_FILENAME
 
 
-def resolve_build_info(repo_root: Path | None = None) -> dict[str, object]:
-    """Best-effort provenance of the code being executed: package version plus git commit."""
-    root = repo_root
-    if root is None:
-        try:
-            root = find_repo_root()
-        except FileNotFoundError:
-            root = None
-    commit = _git_stdout(root, "rev-parse", "HEAD")
-    dirty = bool(commit) and bool(_git_stdout(root, "status", "--porcelain"))
+def resolve_build_info(repo_root: Path) -> dict[str, object]:
+    """Best-effort provenance of the code being executed: package version plus git commit.
+
+    `git -C` resolves the enclosing repository, so an edge installed inside an unrelated clone
+    reports that clone's HEAD. Unknown values stay visibly unknown: `commit` is the string
+    "unknown" and `dirty` is None when git or the checkout cannot be read.
+    """
+    commit = _git_stdout(repo_root, "rev-parse", "HEAD")
+    status = None if commit is None else _git_stdout(repo_root, "status", "--porcelain")
+    dirty = None if status is None else bool(status)
     return {"version": __version__, "commit": commit or "unknown", "dirty": dirty}
 
 
-def _git_stdout(repo_root: Path | None, *args: str) -> str:
-    """Return stripped git stdout, or an empty string when git or the checkout is unavailable."""
-    if repo_root is None:
-        return ""
+def _git_stdout(repo_root: Path, *args: str) -> str | None:
+    """Return stripped git stdout, or None when git or the checkout answers nothing."""
     try:
         result = subprocess.run(
             ["git", "-C", str(repo_root), *args],
@@ -1033,8 +1031,8 @@ def _git_stdout(repo_root: Path | None, *args: str) -> str:
             timeout=BUILD_INFO_GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
-        return ""
-    return result.stdout.strip() if result.returncode == 0 else ""
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def find_repo_root() -> Path:
