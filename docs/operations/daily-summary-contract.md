@@ -134,6 +134,8 @@ Boundaries of the definition:
   prove affinity (only reachable with `period=all`);
 - a client that never sends `X-Olla-Session-ID` reads as 100% cold, because every one of its requests
   falls under rule 1 - check `cache.by_client` before reading the aggregate share;
+- an out-of-order log line never rewinds the session window (the latest start wins), so a shuffled
+  log cannot manufacture a negative gap;
 - `cold_share` is a share of requests, not of time or tokens; `0.0` for a bucket with no requests;
 - a latency bucket with no requests of that kind reports `{count: 0, p50: 0, p95: 0}`, which means "no
   samples", not zero milliseconds.
