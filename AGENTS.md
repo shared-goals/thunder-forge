@@ -4,6 +4,10 @@
 
 Thunder Forge is the control plane for a private inference cluster: TF edge (OpenAI-compatible HTTPS gateway), Olla (router) and oMLX runtimes on four Apple-Silicon nodes. Read `README.md` before changing behaviour; `docs/operations/` holds the runbooks; `tfconfig.example.yaml` is the committed config surface. The live `tfconfig.yaml`, `.env` and API keys never enter Git.
 
+- Language / runtime: Python >= 3.12 (`pyproject.toml`); package manager `uv` (`.venv` in the repo; the edge systemd unit runs `.venv/bin/thunder-forge` directly).
+- Owner: shag (runtime), shared with gnezim; production lives on rock at `/mnt/samsung/thunder-forge`.
+- Access limits: rock grants agents no broad sudo — only the unit install/restart commands listed in sudoers; secrets live in the repo `.env` (loaded by `edge serve`), never in unit files.
+
 Local agents run against this cluster every day, so a broken main is not a theoretical risk.
 
 ## Pre-MVP Principles
@@ -18,8 +22,9 @@ Local agents run against this cluster every day, so a broken main is not a theor
 ## Status Endpoints
 
 - Keep `/health` and `/status` anonymously accessible during pre-MVP.
-- Anonymous `/status` stays a liveness and version check: node health, versions, readiness and versions of the running build. Live request identities, client ids and token-like material belong behind `TF_EDGE_ADMIN_TOKEN`.
+- Anonymous `/status` stays a liveness and version check: node health, readiness and the versions of the running services. Live request identities, client ids and token-like material belong behind `TF_EDGE_ADMIN_TOKEN`.
 - Treat CLI status as an HTTP consumer of edge status APIs, not a secondary status implementation.
+- Usage endpoints (`/usage`, `/usage/report`, `/usage/events`) are disabled (404) until `TF_EDGE_ADMIN_TOKEN` is set, then the page is anonymous while data paths require the bearer token; client API keys (`TF_USER_*`) authorize inference only, never usage.
 
 ## Work selection and tracker
 
@@ -31,7 +36,12 @@ Local agents run against this cluster every day, so a broken main is not a theor
 ## Authority, safety and the live cluster
 
 - The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `usage report`, `usage events`.
-- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `config apply`, installing or removing a runtime, changing `tfconfig.yaml` on a host, restarting edge/Olla/oMLX, deleting cached models.
+- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `config apply`, installing or removing a runtime, changing `tfconfig.yaml` on a host, restarting edge/Olla/oMLX, deleting cached models. Propose options with trade-offs and wait for the operator's decision instead of executing them.
+- Load the operational runbook or skill for this cluster before acting on live infrastructure; do not guess hosts, ports, paths or deployment conventions.
+- Diagnose before acting: read the file-backed evidence (`logs/tf-edge-access.jsonl`, `logs/tf-node-metrics.jsonl`, Olla logs) and attribute the failing layer before proposing a fix.
+- Prefer hostname conventions (`.lan` FQDNs) over raw IPs in configs and probes.
+- After a cluster change, verify through the real path: `cluster smoke`, one alias chat through the edge, and a live `cluster status`. Self-reported success is not verification.
+- Keep rollback cheap: leave old config entries as comments for a one-edit rollback, and copy a node settings file before editing it.
 - Merged code is not a deployed cluster. Keep four separate statements: implemented, published (PR merged), deployed (which commit is running), observed (what the logs and `/status` show). Never report the first as evidence of the last.
 - Secrets: API keys, `TF_USER_*` values, `TF_EDGE_ADMIN_TOKEN`, SSH keys and `.env` content stay out of the repo, tests, docs, logs and PR bodies. Use synthetic fixtures.
 - Model aliases are a public contract. Adding an alias is a compatible change; removing or renaming one needs a stated reason and one change that updates `tfconfig.yaml`, docs, every client configuration you know about, and a check that traffic to the old name has stopped. An alias that is merely broken for a client is worse than an alias that was never published.
