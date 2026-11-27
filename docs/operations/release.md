@@ -28,6 +28,7 @@ Mechanical part of the rule in `AGENTS.md` under "Versioned publication".
    git rev-list -n 1 v<version>                                # must equal the line below
    git rev-parse origin/main
    git cat-file -t v<version>                                  # "tag", not "commit"
+   git show v<version>:pyproject.toml | grep -qx 'version = "<version>"'
    git show v<version>:src/thunder_forge/__init__.py | grep __version__
    gh release view v<version>
    ```
