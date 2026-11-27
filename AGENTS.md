@@ -45,7 +45,7 @@ These rules apply to any change on the running cluster (nodes, edge, Olla, tfcon
 - Merged code is not a deployed cluster. Keep four separate statements: implemented, published (PR merged), deployed (which commit is running), observed (what the logs and `/status` show). Never report the first as evidence of the last.
 - Secrets: API keys, `TF_USER_*` values, `TF_EDGE_ADMIN_TOKEN`, SSH keys and `.env` content stay out of configs, commits, chat output, tests, docs, logs and PR bodies. They live in the repo `.env`, which `edge serve` loads — not in a LaunchAgent plist, whose environment every local process can read. Use synthetic fixtures.
 - Model aliases are a public contract. Adding an alias is a compatible change; removing or renaming one needs a stated reason and one change that updates `tfconfig.yaml`, docs, every client configuration you know about, and a check that traffic to the old name has stopped.
-- Access and node-metric logs are personal data: client ids, client IPs and usage patterns. `logs/*.jsonl` never enters Git, raw log lines do not leave the owner's machines, and no field may carry prompt content, keys or headers.
+- Access and node-metric logs are personal data: client ids, client IPs and usage patterns. `logs/*.jsonl` never enters Git, no client id, client IP or per-client count leaves the owner's machines — quoted, retyped or summarised — and no field may carry prompt content, keys or headers.
 
 ## Checks
 
@@ -57,7 +57,7 @@ These rules apply to any change on the running cluster (nodes, edge, Olla, tfcon
 
 ## Deployment provenance
 
-- The edge must publish the build it executes: the package version and the git commit, visible in `/status` and in one startup log line. Removing, bypassing or defaulting that is a regression, and and an empty value must read as a visible "unknown" rather than a plausible-looking string.
+- The edge must publish the build it executes: the package version and the git commit, visible in `/status` and in one startup log line. Removing, bypassing or defaulting that is a regression, and an empty value must read as a visible "unknown" rather than a plausible-looking string.
 - After a deploy, compare the published commit with the merged commit. If it differs, deploy is not finished and the reason is unknown — say exactly that rather than assuming.
 
 ## Versioned publication

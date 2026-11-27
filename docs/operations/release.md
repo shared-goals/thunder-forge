@@ -8,7 +8,7 @@ Mechanical part of the rule in `AGENTS.md` under "Versioned publication".
    lockfile — `uv lock` — and commit the updated `uv.lock` with the bump. The root package version is pinned
    in `uv.lock`, so a bump without it leaves `uv lock --check` failing and lets the next `uv run` rewrite
    the lockfile on `main`.
-2. The owner merges the pull request.
+2. The owner merges the pull request and owns steps 3–5; an agent stops at step 2.
 3. Verify the merged tree carries that version; stop here if it does not:
 
    ```bash
@@ -35,6 +35,6 @@ Mechanical part of the rule in `AGENTS.md` under "Versioned publication".
    git rev-parse origin/main
    git cat-file -t v<version>                                  # "tag", not "commit"
    git show v<version>:pyproject.toml | grep -qx 'version = "<version>"'
-   git show v<version>:src/thunder_forge/__init__.py | grep __version__
+   git show v<version>:src/thunder_forge/__init__.py | grep -Fqx '__version__ = "<version>"'
    gh release view v<version>
    ```
