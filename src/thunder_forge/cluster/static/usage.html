@@ -163,7 +163,12 @@ async function load() {
 
   const coldByHour = cache.by_hour || {};
   const coldLatency = (cache.latency || {}).hour || {};
-  // The share answers "when", the p50 lines answer "how much slower", so both share one card.
+  // A bucket with no warm samples reports p50 0; plotting that would fake a zero millisecond turn.
+  const warmP50 = (hour) => {
+    const warm = (coldLatency[hour] || {}).warm;
+    return warm && warm.count ? warm.p50 : null;
+  };
+  // The share answers "when", the warm p50 line answers "how much slower", so both share one card.
   draw("coldChart", {
     type: "bar",
     data: {
@@ -171,8 +176,7 @@ async function load() {
       datasets: [
         { label: "cold share", data: hours.map((hour) => (coldByHour[hour] || {}).cold_share ?? null),
           backgroundColor: colors[4] + "99", yAxisID: "y" },
-        { type: "line", label: "warm p50 ms",
-          data: hours.map((hour) => ((coldLatency[hour] || {}).warm || {}).p50 ?? null),
+        { type: "line", label: "warm p50 ms", data: hours.map(warmP50),
           borderColor: colors[1], tension: 0.2, yAxisID: "y1" },
       ],
     },
