@@ -169,6 +169,8 @@ async function load() {
     const warm = (coldLatency[hour] || {}).warm;
     return warm && warm.count ? warm.p50 : null;
   };
+  // Without a single warm turn the ms axis and its ticks would suggest measurements that do not exist.
+  const hasWarm = hours.some((hour) => warmP50(hour) !== null);
   // The share answers "when", the warm p50 line answers "how much slower", so both share one card.
   draw("coldChart", {
     type: "bar",
@@ -186,7 +188,7 @@ async function load() {
       scales: {
         x: options.scales.x,
         y: { ...options.scales.y, ticks: { callback: percent, maxTicksLimit: 6 } },
-        y1: { position: "right", beginAtZero: true, grid: { drawOnChartArea: false } },
+        y1: { position: "right", beginAtZero: true, grid: { drawOnChartArea: false }, display: hasWarm },
       },
     },
   });
