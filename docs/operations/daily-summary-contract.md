@@ -12,7 +12,7 @@ Thunder Forge daily usage reporting is file-backed and CLI-first:
 - node snapshots: `logs/tf-node-metrics.jsonl`
 - node snapshots are collected by `thunder-forge edge serve` in-process every 60s by default
 - summary command: `thunder-forge usage report`
-- shared retention command: `thunder-forge usage trim-logs`
+- shared retention command: `thunder-forge usage trim-logs` (operator-run; `edge serve` never trims)
 - ad hoc SQL: DuckDB CLI over JSONL
 
 This keeps operations simple and avoids a metrics backend while still supporting daily rollups by user, node, model, and hour.
@@ -143,14 +143,16 @@ Aggregation honours `operations.usage.exclude_models` and
 
 - Config key: `services.log_retention_days`
 - Default: `3`
+- Entry point: `thunder-forge usage trim-logs` only. Retention never runs inside `edge serve` or `usage collect-node-metrics` (including its `--continuous` mode), and that collector has no `--retention-days` flag any more; trimming a log that a live process appends to loses records.
 - Scope: local TF-managed logs
   - `logs/tf-edge-access.jsonl`
   - `logs/tf-node-metrics.jsonl`
-  - `logs/olla.log`
   - `logs/*.stdout.log`, `logs/*.stderr.log`, `logs/*.log.gz`
 - Behavior:
-  - JSONL files are trimmed by record `timestamp`
-  - plain/archive logs are pruned by file mtime
+  - JSONL files are trimmed by record `timestamp`; blank lines are not counted as removed records, and a file with no expired record is not rewritten at all (blank lines survive such a run, and are dropped as collateral when the file is rewritten)
+  - the trimmed file is written next to the original and swapped with `os.replace`, and only if size and mtime are unchanged since the read - a file that grew under a live writer is skipped and reported as `skipped_jsonl_files`. The size/mtime check and the swap are not atomic with respect to a writer that already holds the file open
+  - plain/archive logs are pruned whole by file mtime
+  - `logs/olla.log` is plain text without record timestamps, so it is not a retention target; this command never rewrites or deletes it
 
 ## DuckDB CLI Workflow
 

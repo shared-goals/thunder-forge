@@ -30,7 +30,7 @@ from uuid import uuid4
 
 import httpx
 
-from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole
+from thunder_forge.cluster.config import UNKNOWN_BUILD_INFO, ClusterConfig, Node, NodeRole
 from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases
 from thunder_forge.cluster.omlx import check_omlx_health
 from thunder_forge.cluster.ports import DEFAULT_EDGE_PORT, DEFAULT_OLLA_PORT, local_base_url, resolve_port
@@ -122,6 +122,8 @@ class EdgeProxyConfig:
     usage_admin_token: str | None = None
     usage_access_log_path: Path | None = None
     usage_node_metrics_path: Path | None = None
+    # Resolved once at `edge serve` startup; a caller that supplies nothing publishes "unknown".
+    build: dict[str, object] = field(default_factory=lambda: dict(UNKNOWN_BUILD_INFO))
 
 
 @dataclass
@@ -1218,6 +1220,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
     return {
         "ok": ok,
         "target": target or "all",
+        "build": dict(config.build),
         "health": {"ok": ok},
         "gateway": gateway_payload,
         "cache": cache_payloads,
