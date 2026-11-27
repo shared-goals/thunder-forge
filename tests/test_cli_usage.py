@@ -384,7 +384,8 @@ def test_usage_trim_logs_warns_when_a_live_log_moved_under_it(tmp_path: Path, mo
 
     result = runner.invoke(app, ["usage", "trim-logs"])
 
-    assert result.exit_code == 0, result.output
+    # A skip is a retention failure, so cron must see a non-zero exit.
+    assert result.exit_code == 1, result.output
     assert "skipped_jsonl_files: 1" in result.stdout
     assert "Warning: left these logs intact" in result.stderr
     assert path in result.stderr
