@@ -163,3 +163,12 @@ def test_usage_check_rejects_invalid_window(tmp_path: Path, monkeypatch) -> None
 
     assert result.exit_code == 2
     assert "invalid window '15'" in result.stderr
+
+
+def test_usage_check_rejects_a_window_too_large_for_a_timestamp(tmp_path: Path, monkeypatch) -> None:
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(200, 1)])
+
+    result = runner.invoke(app, ["usage", "check", "--window", "999999999999999h"])
+
+    assert result.exit_code == 2
+    assert "is too large" in result.stderr

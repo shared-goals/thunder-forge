@@ -3791,7 +3791,11 @@ def usage_check(
         raise typer.Exit(2)
 
     checked_at = datetime.now().astimezone()
-    cutoff = checked_at - timedelta(seconds=window_seconds)
+    try:
+        cutoff = checked_at - timedelta(seconds=window_seconds)
+    except OverflowError:
+        typer.echo(f"Error: window {window!r} is too large", err=True)
+        raise typer.Exit(2)
     failure_floor = 400 if include_client_errors else 500
     requests = 0
     failures = 0
