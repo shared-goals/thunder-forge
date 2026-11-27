@@ -868,7 +868,8 @@ def test_resolve_build_info_reads_the_commit_and_the_tree_state(
 
     assert result == {"version": __version__, **expected}
     assert len(seen) == 1
-    assert seen[0][-3:] == ["status", "--porcelain=v2", "--branch"]
+    # One call answers both facts, and -unormal keeps untracked files in the answer.
+    assert seen[0][3:] == ["status", "--porcelain=v2", "--branch", "-unormal"]
 
 
 def test_parse_model_info() -> None:

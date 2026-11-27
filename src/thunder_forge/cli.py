@@ -2288,23 +2288,29 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
         console.print(model_table)
         console.print()
 
+def _build_line(build: object) -> str:
+    """The one spelling of the build line, shared by serve and by `cluster status`."""
+    values = build if isinstance(build, dict) else {}
+    return (
+        f"build: version={values.get('version', 'unknown')}"
+        f" commit={values.get('commit', 'unknown')}"
+        f" dirty={values.get('dirty', 'unknown')}"
+    )
+
+
 def _print_cluster_status_payload(
     payload: dict[str, object], *, config: ClusterConfig, plain: bool = False
 ) -> None:
     if not plain and sys.stdout.isatty():
+        typer.echo(_build_line(payload.get("build")))
         _print_cluster_status_rich(payload, console=Console())
         return
     view = _status_view(payload)
     summary = payload.get("summary")
     gateway = payload.get("gateway")
-    build = payload.get("build")
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {payload.get('target', 'all')}")
-    if isinstance(build, dict) and build:
-        typer.echo(
-            f"build: version={build.get('version', 'unknown')} "
-            f"commit={build.get('commit', 'unknown')} dirty={build.get('dirty', 'unknown')}"
-        )
+    typer.echo(_build_line(payload.get("build")))
     typer.echo("")
     typer.echo("summary:")
     typer.echo(f"  nodes: {view['healthy_count']}/{len(view['inference_nodes'])} healthy")
@@ -3991,10 +3997,7 @@ def edge_serve(
         ),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
-    typer.echo(
-        "build: "
-        f"version={build_info['version']} commit={build_info['commit']} dirty={build_info['dirty']}"
-    )
+    typer.echo(_build_line(build_info))
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")
     typer.echo(f"api_key_count: {len(clients_by_key)}")

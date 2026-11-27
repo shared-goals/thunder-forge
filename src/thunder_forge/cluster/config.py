@@ -1017,17 +1017,20 @@ def resolve_build_info(repo_root: Path) -> dict[str, object]:
     is dirty. `git -C` resolves the enclosing repository, so an edge installed inside an
     unrelated clone reports that clone's HEAD. Anything unreadable stays visibly unknown.
     """
+    unknown = dict(UNKNOWN_BUILD_INFO, version=__version__)
     try:
+        # `-unormal` keeps untracked files visible: `status.showUntrackedFiles=no` in a user
+        # config would otherwise report a dirty tree as clean.
         result = subprocess.run(
-            ["git", "-C", str(repo_root), "status", "--porcelain=v2", "--branch"],
+            ["git", "-C", str(repo_root), "status", "--porcelain=v2", "--branch", "-unormal"],
             capture_output=True,
             text=True,
             timeout=BUILD_INFO_GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
-        return {"version": __version__, "commit": "unknown", "dirty": "unknown"}
+        return unknown
     if result.returncode != 0:
-        return {"version": __version__, "commit": "unknown", "dirty": "unknown"}
+        return unknown
 
     commit = ""
     dirty = "no"
@@ -1037,7 +1040,7 @@ def resolve_build_info(repo_root: Path) -> dict[str, object]:
         elif line.strip() and not line.startswith("#"):
             dirty = "yes"
     if not commit or commit == "(initial)":
-        return {"version": __version__, "commit": "unknown", "dirty": "unknown"}
+        return unknown
     return {"version": __version__, "commit": commit, "dirty": dirty}
 
 
