@@ -10,7 +10,7 @@ run these steps when publishing, nothing else.
    - `version` in `pyproject.toml`
 2. Add a `CHANGELOG.md` entry for the new version: what changed and why, in the words the release
    notes will reuse.
-3. Merge the change to `main`.
+3. Confirm the owner merged the change to `main`. Do not merge it yourself.
 4. Tag the merged commit and push the tag:
 
    ```bash
@@ -28,6 +28,7 @@ run these steps when publishing, nothing else.
 
    ```bash
    git fetch origin --tags
+   git rev-parse HEAD                             # must equal the tagged commit
    git rev-parse origin/main                      # merged commit
    git rev-list -n 1 v<version>                   # tagged commit: must match
    git cat-file -t v<version>                     # "tag", not "commit"
@@ -35,9 +36,3 @@ run these steps when publishing, nothing else.
    grep -n '^version' pyproject.toml
    gh release view v<version>
    ```
-
-## Transition
-
-Nothing merged before this rule existed is retroactively tagged: `v0.1.0` stays lightweight, and the
-82 commits between `v0.2.0` and the merge of the rule are not backfilled. The first published change
-under the rule is the first release.

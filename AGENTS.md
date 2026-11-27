@@ -38,7 +38,7 @@ Local agents run against this cluster every day, so a broken main is not a theor
 These rules apply to any change on the running cluster (nodes, edge, Olla, tfconfig, deployment) as opposed to in-repo development.
 
 - The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `/usage/report` and `/usage/events` with the admin token, and reading `logs/*.jsonl`.
-- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `make usage-trim` (it deletes log records), installing or removing a runtime, changing `tfconfig.yaml` on a host, killing a process, changing model placement, deleting cached models. Propose options with trade-offs and wait for the operator's decision instead of executing them.
+- Mutating actions need an explicit instruction for that exact target: `make restart`, `make sync`, `make prune`, `make bootstrap`, `make model`, `make usage-trim` (it deletes log records), installing or removing a runtime, changing `tfconfig.yaml` on a host, killing a process, changing model placement, deleting cached models. Propose options with trade-offs and wait for the operator's decision instead of executing them.
 - Load the operational runbook or skill for this cluster before acting on live infrastructure; do not guess hosts, ports, paths or deployment conventions.
 - Diagnose before acting: read the file-backed evidence (`logs/tf-edge-access.jsonl`, `logs/tf-node-metrics.jsonl`, Olla logs) and attribute the failing layer before proposing a fix.
 - Prefer hostname conventions (`.lan` FQDNs) over raw IPs in configs and probes.
