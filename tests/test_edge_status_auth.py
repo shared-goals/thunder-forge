@@ -212,6 +212,24 @@ def test_status_stays_anonymous_when_the_edge_has_no_admin_token(
     assert payload["ok"] is True
 
 
+def test_anonymous_status_does_not_name_the_failing_host(monkeypatch, status_config, get_status) -> None:
+    """A /status failure must not hand an anonymous caller a node host or port."""
+
+    def boom(*, config, target):
+        raise OSError("ssh: Could not resolve hostname msm1.lan")
+
+    monkeypatch.setattr(edge, "build_edge_status_payload", boom)
+
+    status, anonymous = get_status(status_config)
+    assert status == 503
+    assert anonymous == {"error": "status_unavailable"}
+
+    status_config.usage_admin_token = "admin-secret"
+    status, elevated = get_status(status_config, token="admin-secret")
+    assert status == 503
+    assert elevated == {"error": "status_unavailable: ssh: Could not resolve hostname msm1.lan"}
+
+
 def test_cluster_status_cli_sends_the_admin_token_when_the_env_has_one(
     status_config, monkeypatch
 ) -> None:

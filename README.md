@@ -343,7 +343,10 @@ leak into proxy logs) and answer `401` without it.
 
 `GET /health` and `GET /status` stay anonymous. An anonymous `GET /status` is a liveness/version check:
 `ok`, `target`, the `summary` block, and per node its `name`, `health`, `models`, `omlx_version`,
-`macos_version` and served alias names. Live client identities (`active_edge_requests`, i.e. who is generating
+`macos_version`, `served_models` and `hot_loaded_models` (alias names only, no sizes or access times);
+the gateway keeps `name`, `olla_version`, `latest_olla_version` and `upgrade`, and cache nodes keep `name`
+and `macos_version`. A `503` for an anonymous caller says only `status_unavailable`, without the failing
+host in the text. Live client identities (`active_edge_requests`, i.e. who is generating
 against which alias right now), the per-node `model_statuses` (`runtime_id`, `actual_size`, `idle_seconds`,
 `last_access`), node `host`/`admin_url` and per-node `errors` are only returned to a request that carries
 `Authorization: Bearer <TF_EDGE_ADMIN_TOKEN>` - the same admin token as the usage data paths. An invalid or

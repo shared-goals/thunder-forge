@@ -1725,7 +1725,9 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     target = parse_qs(urlsplit(self.path).query).get("target", [""])[0].strip() or None
                     payload = build_edge_status_payload(config=config, target=target)
                 except (ValueError, RuntimeError, httpx.HTTPError, OSError) as exc:
-                    self._send_edge_response(_json_response(503, {"error": f"status_unavailable: {exc}"}))
+                    # The failure text names hosts and ports, so it is detail, not liveness.
+                    detail = f"status_unavailable: {exc}" if authorized else "status_unavailable"
+                    self._send_edge_response(_json_response(503, {"error": detail}))
                     return
                 if not authorized:
                     payload = public_status_payload(payload)
