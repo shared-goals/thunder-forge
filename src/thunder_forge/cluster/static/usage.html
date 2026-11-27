@@ -133,7 +133,8 @@ async function load() {
     data.period,
     "requests " + data.requests.total,
     "consumed " + (data.consumed_ms.total / 3600000).toFixed(1) + " h",
-    "cold " + percent(coldTotal.cold_share || 0),
+    // A period without cache samples has no share: report the absence, not 0%.
+    coldTotal.cold || coldTotal.warm ? "cold " + percent(coldTotal.cold_share || 0) : "cold \u2013",
     "nodes " + Object.keys(data.requests.by_node).length,
     selected.length ? "user " + selected.join(", ") : "",
     data.period === "all" ? "all days merged into hour-of-day buckets" : "",
