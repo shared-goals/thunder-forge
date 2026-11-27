@@ -472,7 +472,7 @@ def test_summarize_daily_usage_classifies_overlapping_requests_by_start(tmp_path
     assert summary.cache_latency_total.warm["p50"] == 1000
 
 
-def test_summarize_daily_usage_counts_a_record_without_a_timestamp_cold(tmp_path: Path) -> None:
+def test_summarize_daily_usage_leaves_a_record_without_a_start_outside_the_split(tmp_path: Path) -> None:
     access_log = _access_log(
         tmp_path,
         [
@@ -484,9 +484,12 @@ def test_summarize_daily_usage_counts_a_record_without_a_timestamp_cold(tmp_path
 
     summary = summarize_daily_usage(access_log, period="all")
 
-    # Without a start time there is no gap to prove affinity, and the hour is unknown.
-    assert summary.cache_total.to_json_dict() == {"cold": 2, "warm": 0, "cold_share": 1.0}
-    assert summary.cache_by_hour["unknown"].to_json_dict() == {"cold": 1, "warm": 0, "cold_share": 1.0}
+    # Rules 2 and 3 need a start time, so the unreadable turn is counted but not classified.
+    assert summary.requests_total == 2
+    assert summary.cache_total.to_json_dict() == {"cold": 1, "warm": 0, "cold_share": 1.0}
+    assert "unknown" not in summary.cache_by_hour
+    # It still lands in the plain latency aggregate, under the unknown hour.
+    assert summary.latency_ms_by_hour["unknown"] == {"count": 1, "p50": 100, "p95": 100, "max": 100}
 
 
 def test_summarize_daily_usage_counts_cache_inside_the_client_filter(tmp_path: Path) -> None:

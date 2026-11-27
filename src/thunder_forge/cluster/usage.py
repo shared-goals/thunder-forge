@@ -189,16 +189,12 @@ def _request_start_key(payload: dict[str, object]) -> tuple[bool, datetime]:
     return False, timestamp - timedelta(milliseconds=latency_ms)
 
 
-def _is_cold(session_id: str, started: datetime | None, previous: datetime | None) -> bool:
-    """True when the request cannot reuse the node's prefix cache.
+def _is_cold(started: datetime, previous: datetime | None) -> bool:
+    """True when a session turn cannot reuse the node's prefix cache.
 
-    No session id means least-connections routing can land on a different node each time; a
-    session without a previous request in the period has no measured gap to rely on; a gap longer
-    than the sticky TTL means affinity already expired. An unreadable start time cannot prove
-    affinity either.
+    No previous turn in the period means no gap to rely on; a gap longer than the sticky TTL means
+    affinity already expired.
     """
-    if not session_id or started is None:
-        return True
     return previous is None or (started - previous).total_seconds() > DEFAULT_STICKY_IDLE_TTL_SECONDS
 
 
@@ -421,18 +417,6 @@ def summarize_daily_usage(
         consumed_ms_by_user[client_id] += latency_ms
         requests_by_hour[hour_bucket] += 1
         consumed_ms_by_hour[hour_bucket] += latency_ms
-        session_id = payload.get("sticky_id")
-        session_key = session_id.strip() if isinstance(session_id, str) else ""
-        previous_started_at = last_seen_by_session.get(session_key)
-        cold = _is_cold(session_key, started_at, previous_started_at)
-        if session_key and started_at is not None:
-            # Interleaved log lines must not rewind the window and report a negative gap.
-            last_seen_by_session[session_key] = max(previous_started_at or started_at, started_at)
-        cache_kind = "cold" if cold else "warm"
-        cache_by_hour[hour_bucket][cache_kind] += 1
-        cache_by_client[client_id][cache_kind] += 1
-        cache_latency_values[cache_kind].append(latency_ms)
-        cache_latency_values_by_hour[hour_bucket][cache_kind].append(latency_ms)
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_user_model[client_id][model_name] += 1
             requests_by_hour_model[hour_bucket][model_name] += 1
@@ -447,6 +431,24 @@ def summarize_daily_usage(
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_model[model_name] += 1
             consumed_ms_by_model[model_name] += latency_ms
+
+        session_id = payload.get("sticky_id")
+        session_key = session_id.strip() if isinstance(session_id, str) else ""
+        if not session_key:
+            # Rule 1: least-connections may pick another node on every turn.
+            cold = True
+        elif started_at is None:
+            # Rules 2 and 3 need a start time, so the turn stays outside the cold/warm split.
+            continue
+        else:
+            previous_started_at = last_seen_by_session.get(session_key)
+            cold = _is_cold(started_at, previous_started_at)
+            last_seen_by_session[session_key] = max(started_at, previous_started_at or started_at)
+        cache_kind = "cold" if cold else "warm"
+        cache_by_hour[hour_bucket][cache_kind] += 1
+        cache_by_client[client_id][cache_kind] += 1
+        cache_latency_values[cache_kind].append(latency_ms)
+        cache_latency_values_by_hour[hour_bucket][cache_kind].append(latency_ms)
 
     requests_by_hour_payload: dict[str, dict[str, object]] = {
         hour: {
