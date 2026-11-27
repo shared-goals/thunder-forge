@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from thunder_forge.cluster.config import DEFAULT_STICKY_IDLE_TTL_SECONDS
+
 _DEFAULT_MODELS_EXCLUDED_FROM_USAGE = {"markitdown"}
 
 
@@ -130,6 +132,33 @@ def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
     return peak
 
 
+def _cache_bucket(counts: Counter[str]) -> dict[str, object]:
+    cold = counts.get("cold", 0)
+    warm = counts.get("warm", 0)
+    total = cold + warm
+    return {"cold": cold, "warm": warm, "cold_share": round(cold / total, 4) if total else 0.0}
+
+
+def _cache_latency(values: list[int]) -> dict[str, int]:
+    return {
+        "count": len(values),
+        "p50": nearest_rank_percentile(values, 50),
+        "p95": nearest_rank_percentile(values, 95),
+    }
+
+
+def _is_cold(session_id: str, started: datetime | None, previous: datetime | None, ttl_seconds: int) -> bool:
+    """True when the request cannot reuse the node's prefix cache.
+
+    No session id means least-connections routing can land on a different node each time; a
+    session without a previous request in the period has no measured gap to rely on; a gap longer
+    than the sticky TTL means affinity already expired.
+    """
+    if not session_id or started is None:
+        return True
+    return previous is None or (started - previous).total_seconds() > ttl_seconds
+
+
 def _as_non_negative_int(raw: object) -> int | None:
     """Accept ints and finite floats; oMLX reports sizes as either."""
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
@@ -195,6 +224,12 @@ class DailyUsageSummary:
     requests_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     latency_ms_by_hour: dict[str, dict[str, int]] = field(default_factory=dict)
+    cache_ttl_seconds: int = DEFAULT_STICKY_IDLE_TTL_SECONDS
+    cache_total: dict[str, object] = field(default_factory=dict)
+    cache_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
+    cache_by_client: dict[str, dict[str, object]] = field(default_factory=dict)
+    cache_latency_total: dict[str, dict[str, int]] = field(default_factory=dict)
+    cache_latency_by_hour: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     peak_concurrency_by_hour: dict[str, int] = field(default_factory=dict)
     node_metrics_present: bool = False
     node_hot_loaded_models: dict[str, list[str]] = field(default_factory=dict)
@@ -235,6 +270,13 @@ class DailyUsageSummary:
             "latency_ms": {
                 "by_hour": self.latency_ms_by_hour,
             },
+            "cache": {
+                "ttl_seconds": self.cache_ttl_seconds,
+                "total": self.cache_total,
+                "by_hour": self.cache_by_hour,
+                "by_client": self.cache_by_client,
+                "latency": {"total": self.cache_latency_total, "hour": self.cache_latency_by_hour},
+            },
             "concurrency": {"peak_by_hour": self.peak_concurrency_by_hour},
             "invalid_lines": self.invalid_lines,
         }
@@ -258,6 +300,7 @@ def summarize_daily_usage(
     exclude_unauthenticated: bool = False,
     client_ids: list[str] | set[str] | None = None,
     known_client_ids: list[str] | None = None,
+    sticky_ttl_seconds: int = DEFAULT_STICKY_IDLE_TTL_SECONDS,
 ) -> DailyUsageSummary:
     """Summarize daily TF usage from JSONL request logs and optional node samples."""
     if period == "all":
@@ -280,6 +323,12 @@ def summarize_daily_usage(
     consumed_ms_total = 0
     latency_values_by_hour: dict[str, list[int]] = defaultdict(list)
     intervals_by_hour: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+    cache_by_hour: dict[str, Counter[str]] = defaultdict(Counter)
+    cache_by_client: dict[str, Counter[str]] = defaultdict(Counter)
+    cache_latency_values: dict[str, list[int]] = {"cold": [], "warm": []}
+    cache_latency_values_by_hour: dict[str, dict[str, list[int]]] = {}
+    # Tracked after the period and client filters, so the first kept request of a session is cold.
+    last_seen_by_session: dict[str, datetime] = {}
     excluded_model_names = _normalize_excluded_models(excluded_models)
     selected_clients = {item.strip() for item in client_ids or [] if item and item.strip()} or None
     seen_clients: set[str] = set()
@@ -323,6 +372,16 @@ def summarize_daily_usage(
         consumed_ms_by_user[client_id] += latency_ms
         requests_by_hour[hour_bucket] += 1
         consumed_ms_by_hour[hour_bucket] += latency_ms
+        session_id = payload.get("sticky_id")
+        session_key = session_id.strip() if isinstance(session_id, str) else ""
+        cold = _is_cold(session_key, timestamp, last_seen_by_session.get(session_key), sticky_ttl_seconds)
+        if session_key and timestamp is not None:
+            last_seen_by_session[session_key] = timestamp
+        cache_kind = "cold" if cold else "warm"
+        cache_by_hour[hour_bucket][cache_kind] += 1
+        cache_by_client[client_id][cache_kind] += 1
+        cache_latency_values[cache_kind].append(latency_ms)
+        cache_latency_values_by_hour.setdefault(hour_bucket, {"cold": [], "warm": []})[cache_kind].append(latency_ms)
         if model_name and _include_model_in_usage(model_name, excluded_model_names):
             requests_by_user_model[client_id][model_name] += 1
             requests_by_hour_model[hour_bucket][model_name] += 1
@@ -359,6 +418,13 @@ def summarize_daily_usage(
     }
     peak_concurrency_by_hour: dict[str, int] = {
         hour: peak_concurrency(intervals) for hour, intervals in sorted(intervals_by_hour.items())
+    }
+    cache_total_counts: Counter[str] = Counter()
+    for hour_counts in cache_by_hour.values():
+        cache_total_counts.update(hour_counts)
+    cache_by_client_payload = {
+        client: _cache_bucket(counts)
+        for client, counts in sorted(cache_by_client.items(), key=lambda item: (-sum(item[1].values()), item[0]))
     }
 
     node_metrics_path_str = ""
@@ -479,6 +545,15 @@ def summarize_daily_usage(
         requests_by_hour=requests_by_hour_payload,
         requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
         latency_ms_by_hour=latency_ms_by_hour,
+        cache_ttl_seconds=sticky_ttl_seconds,
+        cache_total=_cache_bucket(cache_total_counts),
+        cache_by_hour={hour: _cache_bucket(counts) for hour, counts in sorted(cache_by_hour.items())},
+        cache_by_client=cache_by_client_payload,
+        cache_latency_total={kind: _cache_latency(values) for kind, values in sorted(cache_latency_values.items())},
+        cache_latency_by_hour={
+            hour: {kind: _cache_latency(values) for kind, values in sorted(kinds.items())}
+            for hour, kinds in sorted(cache_latency_values_by_hour.items())
+        },
         peak_concurrency_by_hour=peak_concurrency_by_hour,
         node_metrics_present=node_metrics_present,
         node_hot_loaded_models=_ordered_list_map(node_hot_loaded_models),

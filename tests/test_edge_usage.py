@@ -161,6 +161,10 @@ def test_usage_report_returns_latency_concurrency_and_node_metrics(tmp_path: Pat
     assert payload["period"] == "2026-06-02"
     assert payload["requests"]["total"] == 2
     assert payload["latency_ms"]["by_hour"]["08"] == {"count": 2, "p50": 2500, "p95": 12500, "max": 12500}
+    # Neither fixture record carries a session id, so both turns are cold by definition.
+    assert payload["cache"]["ttl_seconds"] == 600
+    assert payload["cache"]["total"] == {"cold": 2, "warm": 0, "cold_share": 1.0}
+    assert payload["cache"]["latency"]["total"]["cold"] == {"count": 2, "p50": 2500, "p95": 12500}
     assert payload["concurrency"]["peak_by_hour"]["08"] == 2
     assert payload["node_metrics"]["load_by_hour"]["08"]["msm1"] == {
         "samples": 1,

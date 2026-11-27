@@ -403,3 +403,97 @@ def test_summarize_daily_usage_filters_by_client_id(tmp_path: Path) -> None:
     assert only_hermes.consumed_ms_total == 9000
     assert only_hermes.latency_ms_by_hour["08"] == {"count": 1, "p50": 9000, "p95": 9000, "max": 9000}
     assert only_hermes.requests_by_user == {"hermes": 1}
+
+
+def _access_log(tmp_path: Path, records: list[dict[str, object]]) -> Path:
+    path = tmp_path / "tf-edge-access.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    return path
+
+
+def test_summarize_daily_usage_counts_a_cold_cache_on_the_first_session_turn(tmp_path: Path) -> None:
+    access_log = _access_log(
+        tmp_path,
+        [
+            # No session id: least-connections can send each turn to another node.
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "", "latency_ms": 5000},
+            # First turn of a session pays the prefill.
+            {"timestamp": "2026-06-02T08:01:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 60000},
+            # Same session, still inside the sticky window: warm.
+            {"timestamp": "2026-06-02T08:06:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 8000},
+            # A second session starts in another hour.
+            {"timestamp": "2026-06-02T09:00:00+00:00", "client_id": "alice", "sticky_id": "s2", "latency_ms": 7000},
+        ],
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02")
+    payload = summary.to_json_dict()
+
+    assert payload["cache"]["ttl_seconds"] == 600
+    assert payload["cache"]["total"] == {"cold": 3, "warm": 1, "cold_share": 0.75}
+    assert payload["cache"]["by_hour"] == {
+        "08": {"cold": 2, "warm": 1, "cold_share": 0.6667},
+        "09": {"cold": 1, "warm": 0, "cold_share": 1.0},
+    }
+    assert payload["cache"]["by_client"] == {"alice": {"cold": 3, "warm": 1, "cold_share": 0.75}}
+    # The point of the metric: cold turns are read against their own tail, not the overall one.
+    assert payload["cache"]["latency"]["total"] == {
+        "cold": {"count": 3, "p50": 7000, "p95": 60000},
+        "warm": {"count": 1, "p50": 8000, "p95": 8000},
+    }
+    assert payload["cache"]["latency"]["hour"]["08"] == {
+        "cold": {"count": 2, "p50": 5000, "p95": 60000},
+        "warm": {"count": 1, "p50": 8000, "p95": 8000},
+    }
+
+
+def test_summarize_daily_usage_marks_a_gap_beyond_the_sticky_ttl_cold(tmp_path: Path) -> None:
+    access_log = _access_log(
+        tmp_path,
+        [
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
+            # Exactly the TTL is still the same affinity window.
+            {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 2000},
+            # One second past it, the next turn may land on another node.
+            {"timestamp": "2026-06-02T08:20:01+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 60000},
+        ],
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02")
+
+    assert summary.cache_total == {"cold": 2, "warm": 1, "cold_share": 0.6667}
+
+
+def test_summarize_daily_usage_reports_the_ttl_it_used(tmp_path: Path) -> None:
+    access_log = _access_log(
+        tmp_path,
+        [
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
+            {"timestamp": "2026-06-02T08:02:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 2000},
+        ],
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", sticky_ttl_seconds=60)
+
+    assert summary.cache_ttl_seconds == 60
+    assert summary.cache_total == {"cold": 2, "warm": 0, "cold_share": 1.0}
+
+
+def test_summarize_daily_usage_counts_cache_inside_the_client_filter(tmp_path: Path) -> None:
+    access_log = _access_log(
+        tmp_path,
+        [
+            {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "sticky_id": "s1", "latency_ms": 1000},
+            {"timestamp": "2026-06-02T08:01:00+00:00", "client_id": "bob", "sticky_id": "s1", "latency_ms": 2000},
+            {"timestamp": "2026-06-02T08:02:00+00:00", "client_id": "bob", "sticky_id": "s1", "latency_ms": 3000},
+        ],
+    )
+
+    everything = summarize_daily_usage(access_log, period="2026-06-02")
+    only_bob = summarize_daily_usage(access_log, period="2026-06-02", client_ids=["bob"])
+
+    assert everything.cache_total == {"cold": 1, "warm": 2, "cold_share": 0.3333}
+    # The filter runs before counting, so bob's first kept turn is the cold one.
+    assert only_bob.cache_total == {"cold": 1, "warm": 1, "cold_share": 0.5}
+    assert only_bob.cache_by_client == {"bob": {"cold": 1, "warm": 1, "cold_share": 0.5}}
+    assert only_bob.cache_by_hour == {"08": {"cold": 1, "warm": 1, "cold_share": 0.5}}

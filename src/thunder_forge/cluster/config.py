@@ -40,6 +40,9 @@ DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
+# Sliding window of Olla sticky sessions; usage accounting reads the same number to decide
+# when a session lost its node affinity and therefore lost its warm prefix cache.
+DEFAULT_STICKY_IDLE_TTL_SECONDS = 600
 
 
 class RuntimeType(StrEnum):
@@ -849,7 +852,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
             "read_timeout": "120s",
             "sticky_sessions": {
                 "enabled": True,
-                "idle_ttl_seconds": 600,
+                "idle_ttl_seconds": DEFAULT_STICKY_IDLE_TTL_SECONDS,
                 "max_sessions": 10000,
                 "key_sources": ["session_header"],
             },

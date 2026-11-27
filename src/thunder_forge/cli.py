@@ -3721,6 +3721,18 @@ def usage_report(
                 parts = cast("dict[str, int]", bucket[key])
                 rendered = ", ".join(f"{name}: {_fmt_number(count)}" for name, count in parts.items())
                 typer.echo(f"      {key}: {rendered or '[]'}")
+    cache = summary.cache_total
+    typer.echo(
+        f"cache_cold_share: {float(cache['cold_share']):.1%}"
+        f" (cold {_fmt_number(int(cache['cold']))}, warm {_fmt_number(int(cache['warm']))},"
+        f" ttl_seconds {summary.cache_ttl_seconds})"
+    )
+    for kind in ("cold", "warm"):
+        latency = summary.cache_latency_total[kind]
+        typer.echo(
+            f"cache_latency_ms_{kind}: count {_fmt_number(latency['count'])}"
+            f" p50 {_fmt_number(latency['p50'])} p95 {_fmt_number(latency['p95'])}"
+        )
 
 
 @usage_app.command("collect-node-metrics")
