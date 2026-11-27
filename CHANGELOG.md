@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+
 ### Changed
 
 - Log retention is operator-run only: `edge serve` and `usage collect-node-metrics` no longer trim, and the

@@ -384,7 +384,7 @@ Every `logs/tf-edge-access.jsonl` row records `timestamp`, `request_id`, `client
 |---|---|
 | `stream` | `true` when the request reached the streaming response path (a rejected request never gets far enough to be known as streaming) |
 | `headers_sent` | `true` only when a failure came after the response status and headers reached the client, so the client holds a partial answer; a successful record stays `false` |
-| `error_kind` | Empty when nothing upstream failed, otherwise one value from the closed vocabulary below |
+| `error_kind` | Empty when the *edge* raised nothing for this request, otherwise one value from the closed vocabulary below. An error Olla itself answered (a `502`/`503` because no node is healthy) keeps an empty `error_kind`: it is visible in `status_code` only |
 
 `error_kind` vocabulary:
 
