@@ -3821,13 +3821,6 @@ def usage_check(
         except ValueError:
             typer.echo(f"Error: invalid --max-staleness {max_staleness!r}, expected like 15m or 2h", err=True)
             raise typer.Exit(2)
-    max_staleness_seconds: int | None = None
-    if max_staleness is not None:
-        try:
-            max_staleness_seconds = _parse_usage_check_window(max_staleness)
-        except ValueError:
-            typer.echo(f"Error: invalid --max-staleness {max_staleness!r}, expected like 15m or 2h", err=True)
-            raise typer.Exit(2)
     log_path = _edge_access_log_path(repo_root, config, access_log)
     if not log_path.is_file():
         # A missing or mistyped log must not look like a healthy cluster.
