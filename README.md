@@ -469,9 +469,11 @@ outage, not a small sample.
 
 `--json` prints one object: `window_seconds`, `requests`, `failures`, `failure_rate`, `threshold`,
 `min_requests`, `breached`, `insufficient_data`, `statuses`, `log_path`, `checked_at`,
-`newest_record_at`. The last one is the newest record in the whole log, outside the window too: a dead
-edge writes nothing, so a wrapper watching for a stale `newest_record_at` catches the silence this check
-deliberately does not breach on (an idle cluster is silent as well).
+`newest_record_at`. The last one is the newest record in the whole log, outside the window too.
+
+`--max-staleness 30m` turns silence into a breach: when the newest record is older than that (seconds,
+minutes or hours, like `--window`), the edge stopped writing and no request failure can show it. Leave it
+off on a cluster that is idle overnight.
 
 Each run reads the whole log file in memory, whatever retention has left; at a few thousand records a day
 that is milliseconds, and it is the reason a scheduled `usage trim-logs` matters.
@@ -479,13 +481,13 @@ that is milliseconds, and it is the reason a scheduled `usage trim-logs` matters
 Exit codes:
 
 - `0`: healthy, or too few requests in the window to judge
-- `1`: breach, failure rate over the threshold
-- `2`: operator error: a missing or unreadable access log, an invalid `--window`, a `--max-failure-rate` outside `0…1`, or a negative `--min-requests`
+- `1`: breach — the failure rate is over the threshold, or the log is staler than `--max-staleness`
+- `2`: operator error: a missing or unreadable access log, an invalid `--window` or `--max-staleness`, a `--max-failure-rate` outside `0…1`, or a negative `--min-requests`
 
 Run it from a host that can read the log, for example every five minutes from cron:
 
 ```cron
-*/5 * * * * cd /mnt/samsung/thunder-forge && make usage-check 15m >> logs/usage-check.log 2>&1 || logger -t tf-usage-check "usage check breached"
+*/5 * * * * cd /mnt/samsung/thunder-forge && uv run thunder-forge usage check --window 15m --max-staleness 30m >> logs/usage-check.log 2>&1 || logger -t tf-usage-check "usage check breached"
 ```
 
 Summary dimensions include:
