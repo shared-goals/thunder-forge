@@ -26,6 +26,7 @@ from thunder_forge.cluster.edge import (
     build_edge_access_log,
     build_edge_clients_from_env,
     build_edge_status_payload,
+    classify_edge_failure,
     edge_api_key_from_env,
     edge_models_payload,
     ensure_edge_api_keys,
@@ -433,6 +434,19 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     assert serialized.startswith('{"timestamp":"')
     assert '"olla_endpoint":"infer-03-omlx-live"' in serialized
     assert serialized.endswith(',"request_id":"req-1","stream":false,"headers_sent":false,"error_kind":""}')
+
+
+def test_classify_edge_failure_maps_the_closed_vocabulary() -> None:
+    request = httpx.Request("POST", "http://olla.test/v1/chat/completions")
+    cases = [
+        (httpx.ReadTimeout("fixture", request=request), False, 504, "edge_timeout"),
+        (httpx.ConnectError("fixture", request=request), False, 502, "edge_connect"),
+        (httpx.RemoteProtocolError("fixture", request=request), False, 502, "upstream_error"),
+        (httpx.ReadTimeout("fixture", request=request), True, 504, "stream_aborted"),
+        (httpx.ConnectError("fixture", request=request), True, 502, "stream_aborted"),
+    ]
+    for exc, headers_sent, status_code, error_kind in cases:
+        assert classify_edge_failure(exc, headers_sent=headers_sent) == (status_code, error_kind)
 
 
 def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_olla() -> None:

@@ -374,7 +374,7 @@ Every `logs/tf-edge-access.jsonl` row records `timestamp`, `request_id`, `client
 | Field | Meaning |
 |---|---|
 | `stream` | `true` for an SSE/streaming request |
-| `headers_sent` | `true` when the response status and headers had already reached the client, so the failure is a partial answer |
+| `headers_sent` | `true` only when a failure came after the response status and headers reached the client, so the client holds a partial answer; a successful record stays `false` |
 | `error_kind` | Empty on success, otherwise one value from the closed vocabulary below |
 
 `error_kind` vocabulary:
