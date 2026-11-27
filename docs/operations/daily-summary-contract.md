@@ -183,13 +183,14 @@ Aggregation honours `operations.usage.exclude_models` and
 - Config key: `services.log_retention_days`
 - Default: `3`
 - Entry point: `thunder-forge usage trim-logs` only. Retention never runs inside `edge serve` or `usage collect-node-metrics` (including its `--continuous` mode), and that collector has no `--retention-days` flag any more; trimming a log that a live process appends to loses records.
+- Scheduling: operator-run, nothing in the repository schedules it. Run it from cron (`README.md` carries the line); it exits `1` when any file had to be skipped.
 - Scope: local TF-managed logs
   - `logs/tf-edge-access.jsonl`
   - `logs/tf-node-metrics.jsonl`
-  - `logs/*.stdout.log`, `logs/*.stderr.log`, `logs/*.log.gz`
+  - `logs/*.stdout.log`, `logs/*.stderr.log`, `logs/*.log.gz`, `logs/.*.jsonl.*.tmp` (leftovers of a killed trim)
 - Behavior:
   - JSONL files are trimmed by record `timestamp`; blank lines are not counted as removed records, and a file with no expired record is not rewritten at all (blank lines survive such a run, and are dropped as collateral when the file is rewritten)
-  - the trimmed file is written next to the original and swapped with `os.replace`, and only if size and mtime are unchanged since the read - a file that grew under a live writer is skipped and reported as `skipped_jsonl_files`. The size/mtime check and the swap are not atomic with respect to a writer that already holds the file open
+  - the trimmed file is written next to the original and swapped with `os.replace`. Bytes a live writer appended after the read are spliced onto the new file from the saved offset, so a growing log still trims; a file that shrank (rotated or truncated under us) is skipped and reported as `skipped_jsonl_files`. The offset read and the swap are not atomic: a record written in that window can still be lost
   - plain/archive logs are pruned whole by file mtime
   - `logs/olla.log` is plain text without record timestamps, so it is not a retention target; this command never rewrites or deletes it
 
