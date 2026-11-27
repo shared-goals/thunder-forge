@@ -387,10 +387,16 @@ make usage-json 2026-06-02
 
 Summary dimensions include:
 
-- by user (`tf_user`/`client_id`): requests, consumed time (`latency_ms` sum), tokens when present
-- by node (`msm1`-`msm4`): requests, consumed time, tokens, by-model split, by-hour split
-- by model: requests, consumed time, tokens when present
+- by user (`tf_user`/`client_id`): requests, consumed time (`latency_ms` sum)
+- by node (`msm1`-`msm4`): requests, consumed time, by-model split, by-hour split
+- by model: requests, consumed time
 - node hot-loaded model sets from collected node snapshots
+
+Two things the summary deliberately cannot answer. The access log carries no token counts and no
+first-token timestamp, so there is no cost per client and no "how long until the answer started"
+figure; [Minimal Metric Strategy](#minimal-metric-strategy) lists what would have to be collected
+first. And `consumed_ms` is wall time at the edge: for a streaming request it ends when the last
+byte reaches the client, so it includes client backpressure and is not model service time.
 
 ### Minimal Metric Strategy
 
