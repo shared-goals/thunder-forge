@@ -174,7 +174,11 @@ def prune_file_if_older_than(
 
     current_now = now or datetime.now(UTC)
     cutoff = current_now - timedelta(days=retention_days)
-    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    try:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        # Vanished between the check and the stat: nothing left to prune.
+        return FilePruneResult(path=str(path), removed=False)
     if modified < cutoff:
         path.unlink(missing_ok=True)
         return FilePruneResult(path=str(path), removed=True)
