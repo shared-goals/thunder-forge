@@ -94,8 +94,13 @@ def trim_jsonl_by_age(
         before_stat = path.stat()
         # surrogateescape keeps a half-written record round-trippable instead of raising.
         original_lines = path.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
-    except OSError:
+    except FileNotFoundError:
         return JsonlTrimResult(path=str(path), before_lines=0, after_lines=0, removed_lines=0)
+    except OSError:
+        # Unreadable is not empty: an operator must see a skip, not a quiet zero.
+        return JsonlTrimResult(
+            path=str(path), before_lines=0, after_lines=0, removed_lines=0, skipped=True
+        )
     kept_lines: list[str] = []
     before = 0
 
@@ -131,7 +136,11 @@ def trim_jsonl_by_age(
 
 def _replace_if_unchanged(path: Path, kept_lines: list[str], *, before_stat: os.stat_result) -> bool:
     """Swap kept_lines in place of path, unless the file changed or vanished since before_stat."""
-    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    except OSError:
+        # A log directory the operator cannot write is a skip, like an owner we cannot keep.
+        return False
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as handle:
@@ -143,6 +152,24 @@ def _replace_if_unchanged(path: Path, kept_lines: list[str], *, before_stat: os.
                 # shortcut: some network/FUSE mounts refuse fsync; the log survives a crash
                 # at the cost of this durability guarantee, upgrade if a mount ever matters.
                 pass
+        try:
+            current_stat = path.stat()
+        except OSError:
+            return False
+        if current_stat.st_size < before_stat.st_size:
+            # Truncated or rotated under us: the bytes we read are gone, so do not swap.
+            return False
+        if current_stat.st_size > before_stat.st_size:
+            # The writers appended while we rewrote. That is not a conflict: the new bytes are
+            # past the offset we read, so carry them over instead of skipping a live log forever.
+            try:
+                with path.open("rb") as source:
+                    source.seek(before_stat.st_size)
+                    tail = source.read()
+                with temp_path.open("ab") as target:
+                    target.write(tail)
+            except OSError:
+                return False
         # The new inode must keep the log's owner and mode, or the serving process cannot append.
         try:
             os.chown(temp_path, before_stat.st_uid, before_stat.st_gid)
@@ -150,14 +177,11 @@ def _replace_if_unchanged(path: Path, kept_lines: list[str], *, before_stat: os.
             pass
         except PermissionError:
             return False
-        os.chmod(temp_path, before_stat.st_mode & 0o777)
         try:
-            current_stat = path.stat()
+            os.chmod(temp_path, before_stat.st_mode & 0o777)
+            os.replace(temp_path, path)
         except OSError:
             return False
-        if (current_stat.st_size, current_stat.st_mtime_ns) != (before_stat.st_size, before_stat.st_mtime_ns):
-            return False
-        os.replace(temp_path, path)
         return True
     finally:
         temp_path.unlink(missing_ok=True)
@@ -169,6 +193,8 @@ def prune_file_if_older_than(
     retention_days: int,
     now: datetime | None = None,
 ) -> FilePruneResult:
+    # An absolute symlinked log is pruned at its target, not by unlinking the link.
+    path = path.resolve()
     if not path.exists() or not path.is_file():
         return FilePruneResult(path=str(path), removed=False)
 
@@ -208,7 +234,8 @@ def trim_local_logs(
 
     file_candidates: set[Path] = set()
     logs_dir = repo_root / "logs"
-    for pattern in ("*.stdout.log", "*.stderr.log", "*.log.gz"):
+    # The third pattern is a temp file a killed trim leaves behind: a full copy of the log.
+    for pattern in ("*.stdout.log", "*.stderr.log", "*.log.gz", ".*.jsonl.*.tmp"):
         file_candidates.update(logs_dir.glob(pattern))
 
     file_results: list[FilePruneResult] = []
