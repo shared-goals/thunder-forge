@@ -465,6 +465,45 @@ def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_oll
     assert invalid.body == b'{"error":"unauthorized"}'
 
 
+def test_proxy_edge_request_answers_unknown_paths_with_404_not_401() -> None:
+    """Browser probes (favicon, apple-touch-icon) and other non-/v1 paths must
+    answer 404 before auth, so logs do not fill with unauthorized noise."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"unexpected": True})
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+    )
+
+    for path in ("/favicon.ico", "/apple-touch-icon.png", "/props", "/version"):
+        unauthenticated = proxy_edge_request(
+            method="GET",
+            path=path,
+            headers={},
+            body=b"",
+            config=config,
+            transport=httpx.MockTransport(handler),
+        )
+        authenticated = proxy_edge_request(
+            method="GET",
+            path=path,
+            headers={"Authorization": "Bearer dev-secret"},
+            body=b"",
+            config=config,
+            transport=httpx.MockTransport(handler),
+        )
+        assert unauthenticated.status_code == 404
+        assert unauthenticated.body == b'{"error":"not_found"}'
+        assert authenticated.status_code == 404
+        assert authenticated.body == b'{"error":"not_found"}'
+
+    assert requests == []
+
+
 def test_proxy_edge_request_logs_auth_failures_without_calling_olla() -> None:
     requests: list[httpx.Request] = []
     logs: list[str] = []

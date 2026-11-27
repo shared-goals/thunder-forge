@@ -1408,6 +1408,21 @@ def _prepare_edge_upstream_request(
     sticky_id = (_header_value(headers, "X-Olla-Session-ID") or "").strip()
     model = _extract_model(body)
     resolved_client_ip = _extract_client_ip(headers, peer_ip=client_ip)
+    if not path.partition("?")[0].startswith("/v1"):
+        # Unknown paths answer 404 before auth: browser probes (favicon,
+        # apple-touch-icon) must not fill the access log with unauthorized noise.
+        _record_edge_access_event(
+            config,
+            request_id=request_id,
+            client_id="unauthenticated",
+            sticky_id=sticky_id,
+            client_ip=resolved_client_ip,
+            path=path,
+            model="",
+            status_code=404,
+            started=started,
+        )
+        return _json_response(404, {"error": "not_found"})
     auth = authenticate_edge_request(_header_value(headers, "Authorization"), config.clients_by_key)
     if not auth.allowed:
         _record_edge_access_event(
