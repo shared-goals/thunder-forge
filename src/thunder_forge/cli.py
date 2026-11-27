@@ -1737,8 +1737,11 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
     if payload.get("error"):
         typer.echo(f"Error: edge status endpoint error: {payload['error']}", err=True)
         raise typer.Exit(1)
-    _enrich_cluster_status_payload_with_olla_version(payload)
-    _enrich_cluster_status_payload_with_omlx_version(payload)
+    if token:
+        # The edge skipped these lookups because the request was anonymous; do not pay for them
+        # here either, or "prints the reduced payload" would be false.
+        _enrich_cluster_status_payload_with_olla_version(payload)
+        _enrich_cluster_status_payload_with_omlx_version(payload)
     _normalize_cluster_status_payload(payload)
     return payload
 

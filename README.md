@@ -353,7 +353,10 @@ leak into proxy logs) and answer `401` without it.
   `olla_version`, `latest_olla_version` and `upgrade`; cache nodes keep `name` and `macos_version`
 
 An anonymous request also skips the probes only the full view needs: no SSH `sw_vers` per node and
-no upstream release lookups, so `macos_version`, `latest_olla_version` and `upgrade` read `unknown`.
+no upstream release lookups, so `macos_version`, `latest_olla_version`, `upgrade` and
+`summary.omlx_upgrade_hint` read `unknown`. One SSH `omlx --version` per inference node remains,
+because the runtime version is part of the version check. `cluster status` without a token prints that
+reduced payload as it is and does not fill the versions back in.
 A `503` for an anonymous caller says only `status_unavailable`, without the failing host in the text.
 Live client identities (`active_edge_requests`, i.e. who is generating against which alias right now),
 live load (`summary.active_requests`, `waiting_requests`, `traffic_state`), memory turnover

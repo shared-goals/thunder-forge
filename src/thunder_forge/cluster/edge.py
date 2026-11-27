@@ -1235,6 +1235,9 @@ def build_edge_status_payload(
         )
     elif unknown_count:
         omlx_upgrade_hint = "check (unknown versions present)"
+    elif not detail:
+        # The release lookup was skipped for this caller, so alignment is not a fact here.
+        omlx_upgrade_hint = "unknown (release lookup skipped)"
     else:
         omlx_upgrade_hint = "no (versions aligned)"
 
