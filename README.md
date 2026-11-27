@@ -334,7 +334,7 @@ make edge-keys EDGE_CLIENTS="opencode hindsight"
 The reverse proxy in front of the edge (Caddy on `rock`, reached through gost) must forward `/usage` and
 `/usage/assets/*` to the edge port; that proxy config lives outside this repository.
 
-Read-only usage endpoints stay disabled until `TF_EDGE_ADMIN_TOKEN` is set in the environment of `edge serve` (launchd `EnvironmentVariables` or the shell that started it). With a token, `GET /usage` serves the browser dashboard, `GET /usage/report?period=<YYYY-MM-DD|today|all>` returns the aggregated JSON, and `GET /usage/events?period=...` downloads the matching access-log lines as ndjson. While the token is unset all three answer `404 not_found`. Once it is set, `GET /usage` serves the HTML page
+Read-only usage endpoints stay disabled until `TF_EDGE_ADMIN_TOKEN` is set in the environment of `edge serve` — from the repo `.env`, which it loads, or the shell that started it, but not the launchd plist, whose environment every local process can read. With a token, `GET /usage` serves the browser dashboard, `GET /usage/report?period=<YYYY-MM-DD|today|all>` returns the aggregated JSON, and `GET /usage/events?period=...` downloads the matching access-log lines as ndjson. While the token is unset all three answer `404 not_found`. Once it is set, `GET /usage` serves the HTML page
 anonymously - it carries no data and a browser navigation cannot send an `Authorization` header - while
 `/usage/report` and `/usage/events` require `Authorization: Bearer <token>` (never a query token, which would
 leak into proxy logs) and answer `401` without it.
@@ -346,7 +346,14 @@ Thunder Forge now has a file-backed daily usage workflow designed for KISS/DRY/Y
 - Request events come from `logs/tf-edge-access.jsonl`.
 - Node snapshots (health + hot-loaded models) come from `logs/tf-node-metrics.jsonl`.
 - Daily rollups are produced by the TF CLI and can also be queried with DuckDB CLI.
-- Shared log retention is controlled by `services.log_retention_days` in `tfconfig.yaml` (default: `3`).
+- Shared log retention is controlled by `services.log_retention_days` in `tfconfig.yaml` (default: `3`) and
+  is applied only by an operator-run `make usage-trim`. Nothing schedules it for you; the hourly line below
+  is the whole of the automation, and a skipped file exits `1` so the wrapper notices:
+
+  ```cron
+  0 3 * * * cd /mnt/samsung/thunder-forge && make usage-trim >> logs/usage-trim.log 2>&1 || logger -t tf-usage-trim "log retention skipped a file"
+  ```
+- Retention is operator-only: neither `edge serve` nor `usage collect-node-metrics` (including `--continuous`) trims logs while requests are appended, so the command below is the single entry point. `edge serve` prints `log_retention: on_demand (thunder-forge usage trim-logs)` where it used to trim at startup, and `usage collect-node-metrics` lost its `--retention-days` flag along with the trim it used to run.
 
 TF edge now collects node metrics in-process every 60 seconds by default, so no separate metrics process is required.
 
@@ -373,6 +380,13 @@ uv run thunder-forge usage trim-logs
 # optional override
 uv run thunder-forge usage trim-logs --retention-days 7
 ```
+
+What the command touches:
+
+- `logs/tf-edge-access.jsonl` and `logs/tf-node-metrics.jsonl` are trimmed by record `timestamp`. The kept records go to a temp file that is swapped in with `os.replace`, and the swap is abandoned when the source changed since it was read: a file that grew under a live writer is left intact and reported as `skipped_jsonl_files`. The check and the swap are not one atomic step, so a writer that already holds the file open can still land a record in the replaced inode.
+- `logs/*.stdout.log`, `logs/*.stderr.log` and `logs/*.log.gz` are pruned whole once their mtime is older than the retention window.
+- A file that changed during the run is left alone and named in a `Warning:` line on stderr, so a scheduled trim that could not run says so instead of reporting a quiet zero.
+- `logs/olla.log` is plain text without record timestamps, so it is not a retention target and is never rewritten or deleted.
 
 Print daily summary from structured logs:
 
