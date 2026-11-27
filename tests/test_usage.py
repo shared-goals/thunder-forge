@@ -610,3 +610,21 @@ def test_summary_counts_a_stream_abort_as_a_failure(tmp_path: Path) -> None:
     assert summary.requests_total == 3
     assert summary.requests_by_status == {"200": 2, "502": 1}
     assert summary.failures_total == 2
+
+
+def test_summary_counts_unauthenticated_rows_the_filter_excludes(tmp_path: Path) -> None:
+    """A scanner run must stay visible even when the config drops those rows from the breakdowns."""
+    access_log = tmp_path / "access.jsonl"
+    records = [
+        {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "unauthenticated", "model": "", "latency_ms": 1,
+         "olla_endpoint": "", "status_code": 401},
+        {"timestamp": "2026-06-02T10:01:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+    ]
+    access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    kept = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=[],
+                                 exclude_unauthenticated=True)
+
+    assert kept.requests_total == 1
+    assert kept.requests_unauthenticated == 1

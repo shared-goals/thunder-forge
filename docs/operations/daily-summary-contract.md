@@ -97,7 +97,9 @@ Expected keys:
 - `requests.by_node_hour` (same 24 hour buckets per node, zero-filled the same way; a record with
   no parsable timestamp lands in an extra `"unknown"` bucket in both hour breakdowns, so
   `by_node_hour` still sums to `requests.total`)
-- `failures_total` (top level: records with `status_code >= 400`)
+- `failures_total` (top level: records with `status_code >= 400`, plus any record whose
+  `error_kind` is a cluster failure — a stream that died after its headers keeps
+  `status_code: 200`; `client_aborted` is the client's own choice and is not counted)
 - `consumed_ms.total`
 - `consumed_ms.by_user`
 - `consumed_ms.by_node`

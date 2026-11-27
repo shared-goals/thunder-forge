@@ -263,7 +263,9 @@ class DailyUsageSummary:
                 "by_hour": self.requests_by_hour,
                 "by_node_hour": self.requests_by_node_hour,
             },
-            # Records with status_code >= 400, counted from the same rows as requests.total.
+            # Records that failed on the cluster side: status_code >= 400, plus a stream that died
+            # after its headers (status 200). A client abort is not counted.
+
             "failures_total": self.failures_total,
             "coverage": {
                 "first_record_at": self.coverage_first_record_at,
@@ -370,10 +372,12 @@ def summarize_daily_usage(
         consumed_ms_total += latency_ms
         status_code = _as_non_negative_int(payload.get("status_code"))
         requests_by_status[str(status_code) if status_code is not None else "unknown"] += 1
-        # A row that carries an error_kind did not complete, even when its status reads 200:
-        # a stream that died after the headers, or a client that hung up mid-stream.
+        # A stream that died after its headers keeps status_code 200, so the error kind is what
+        # says the request did not complete. `client_aborted` is the client's decision, not a
+        # cluster failure, so it stays out of this count.
         error_kind = payload.get("error_kind")
-        if (status_code is not None and status_code >= 400) or (isinstance(error_kind, str) and error_kind):
+        cluster_failure = isinstance(error_kind, str) and error_kind not in ("", "client_aborted")
+        if cluster_failure or (status_code is not None and status_code >= 400):
             failures_total += 1
         # Records without an endpoint attribution still count; the residual bucket makes
         # the breakdown add up to requests.total instead of hiding them.
