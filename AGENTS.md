@@ -20,7 +20,7 @@ Thunder Forge is the control plane for a private inference cluster, not a librar
 ## Status Endpoints
 
 - `/health` and `/status` stay anonymously accessible during pre-MVP, and an anonymous answer covers liveness only: node health, readiness and the gateway and runtime versions.
-- Everything past liveness needs `Authorization: Bearer $TF_EDGE_ADMIN_TOKEN`: live request identities and client ids, node hosts and admin URLs, model memory (`actual_size`, `idle_seconds`, `last_access`), probe errors and token-like material. An anonymous response that still carries any of those is a defect to fix, not a permission — the current edge still returns them anonymously, and `cluster status` sends no token yet.
+- Everything past liveness needs `Authorization: Bearer $TF_EDGE_ADMIN_TOKEN`: live request identities and client ids, node hosts and admin URLs, model memory (`actual_size`, `idle_seconds`, `last_access`), probe errors and token-like material. An anonymous response that still carries any of those is a defect to fix, not a permission; `cluster status` sends the token when the repo `.env` has one.
 - Treat CLI status as an HTTP consumer of edge status APIs, not a secondary status implementation.
 - Usage endpoints (`/usage`, `/usage/report`, `/usage/events`) are disabled (404) until `TF_EDGE_ADMIN_TOKEN` is set, then the page is anonymous while data paths require the bearer token; client API keys (`TF_USER_*`) authorize inference only, never usage.
 

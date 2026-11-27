@@ -45,7 +45,12 @@ FORBIDDEN_ANONYMOUS_KEYS = (
 
 
 @pytest.fixture
-def status_config(monkeypatch, tmp_path) -> edge.EdgeProxyConfig:
+def status_config_ssh_calls() -> list[str]:
+    return []
+
+
+@pytest.fixture
+def status_config(monkeypatch, tmp_path, status_config_ssh_calls) -> edge.EdgeProxyConfig:
     """One healthy inference node behind a gateway, with every live probe faked."""
     cluster_config = ClusterConfig(
         services=ServiceConfig(edge_port=40116, olla_port=40115),
@@ -77,7 +82,11 @@ def status_config(monkeypatch, tmp_path) -> edge.EdgeProxyConfig:
     monkeypatch.setattr(edge, "_latest_olla_release_version", lambda *, timeout=5.0: "v0.0.28")
     monkeypatch.setattr(edge, "_latest_omlx_release_version", lambda *, timeout=5.0: "v0.4.2")
     monkeypatch.setattr(edge, "_gateway_olla_version", lambda _config: "v0.0.27")
-    monkeypatch.setattr(edge, "_macos_version", lambda _node, *, timeout: "15.6.1")
+    def fake_macos_version(node, *, timeout):
+        status_config_ssh_calls.append(node.host)
+        return "15.6.1"
+
+    monkeypatch.setattr(edge, "_macos_version", fake_macos_version)
     monkeypatch.setattr(edge, "_omlx_version", lambda _node, *, timeout: "0.4.2.dev2")
     monkeypatch.setattr(
         edge,
@@ -160,7 +169,7 @@ def _assert_no_detail(payload: dict[str, object]) -> None:
 
 
 def test_anonymous_status_hides_clients_memory_layout_and_node_addressing(
-    status_config, get_status
+    status_config, get_status, status_config_ssh_calls
 ) -> None:
     status, payload = get_status(status_config)
 
@@ -172,7 +181,9 @@ def test_anonymous_status_hides_clients_memory_layout_and_node_addressing(
     assert payload["inference"][0]["health"] == "ok"
     assert payload["inference"][0]["models"] == "ok"
     assert payload["inference"][0]["omlx_version"] == "0.4.2.dev2"
-    assert payload["inference"][0]["macos_version"] == "15.6.1"
+    # An anonymous answer skips the SSH probe that fills macos_version.
+    assert payload["inference"][0]["macos_version"] == "unknown"
+    assert status_config_ssh_calls == []
     assert payload["inference"][0]["served_models"] == ["memory"]
     assert payload["gateway"]["name"] == "rock"
     assert payload["gateway"]["olla_version"] == "v0.0.27"
@@ -189,7 +200,9 @@ def test_anonymous_status_hides_clients_memory_layout_and_node_addressing(
     assert payload["build"] == {"version": "unknown", "commit": "unknown", "dirty": "unknown"}
 
 
-def test_status_with_admin_token_returns_the_full_detail(status_config, get_status) -> None:
+def test_status_with_admin_token_returns_the_full_detail(
+    status_config, get_status, status_config_ssh_calls
+) -> None:
     status_config.usage_admin_token = "admin-secret"
 
     status, payload = get_status(status_config, token="admin-secret")
@@ -197,6 +210,8 @@ def test_status_with_admin_token_returns_the_full_detail(status_config, get_stat
     assert status == 200
     assert payload["active_edge_requests"] == [{"client_id": "alice", "model": "memory"}]
     node = payload["inference"][0]
+    assert node["macos_version"] == "15.6.1"
+    assert status_config_ssh_calls == ["msm1.lan"]
     assert node["host"] == "msm1.lan"
     assert node["admin_url"] == "http://msm1.lan:8018/admin"
     assert node["errors"] == []
@@ -232,7 +247,7 @@ def test_status_stays_anonymous_when_the_edge_has_no_admin_token(
 def test_anonymous_status_does_not_name_the_failing_host(monkeypatch, status_config, get_status) -> None:
     """A /status failure must not hand an anonymous caller a node host or port."""
 
-    def boom(*, config, target):
+    def boom(*, config, target, detail=True):
         raise OSError("ssh: Could not resolve hostname msm1.lan")
 
     monkeypatch.setattr(edge, "build_edge_status_payload", boom)

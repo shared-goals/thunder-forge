@@ -1082,14 +1082,24 @@ def _resolve_status_targets(
     return gateway_names, cache_names, inference_names
 
 
-def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = None) -> dict[str, object]:
+def build_edge_status_payload(
+    *, config: EdgeProxyConfig, target: str | None = None, detail: bool = True
+) -> dict[str, object]:
+    """Build the status payload. `detail=False` skips the probes only a full view needs.
+
+    An anonymous caller gets liveness, so it pays for neither the SSH `sw_vers` calls nor the
+    upstream release lookups; the fields those fill read "unknown" instead.
+    """
     if config.cluster_config is None:
         raise ValueError("edge status requires cluster_config")
 
     cluster_config = config.cluster_config
     gateway_names, cache_names, inference_names = _resolve_status_targets(cluster_config, target)
-    latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
-    latest_omlx = _latest_omlx_release_version(timeout=min(config.status_timeout, 5.0))
+    if detail:
+        latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
+        latest_omlx = _latest_omlx_release_version(timeout=min(config.status_timeout, 5.0))
+    else:
+        latest_olla = latest_omlx = ""
 
     gateway_payload: dict[str, object] | None = None
     if gateway_names:
@@ -1115,7 +1125,11 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         {
             "name": node_id,
             "host": cluster_config.nodes[node_id].host,
-            "macos_version": _macos_version(cluster_config.nodes[node_id], timeout=config.status_timeout),
+            "macos_version": (
+                _macos_version(cluster_config.nodes[node_id], timeout=config.status_timeout)
+                if detail
+                else "unknown"
+            ),
         }
         for node_id in cache_names
     ]
@@ -1176,7 +1190,9 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
                 "health": "ok" if result.health_ok else "fail",
                 "models": "ok" if result.models_ok else "fail",
                 "omlx_version": omlx_version,
-                "macos_version": _macos_version(runtime_node, timeout=config.status_timeout),
+                "macos_version": (
+                    _macos_version(runtime_node, timeout=config.status_timeout) if detail else "unknown"
+                ),
                 "served_models": served_models,
                 "hot_loaded_models": hot_loaded_models,
                 "model_statuses": model_statuses,
@@ -1800,7 +1816,7 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 authorized = usage_request_authorized(config, dict(self.headers.items()))
                 try:
                     target = parse_qs(urlsplit(self.path).query).get("target", [""])[0].strip() or None
-                    payload = build_edge_status_payload(config=config, target=target)
+                    payload = build_edge_status_payload(config=config, target=target, detail=authorized)
                 except (ValueError, RuntimeError, httpx.HTTPError, OSError) as exc:
                     # The failure text names hosts and ports, so it is detail, not liveness.
                     detail = f"status_unavailable: {exc}" if authorized else "status_unavailable"

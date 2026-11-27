@@ -352,6 +352,8 @@ leak into proxy logs) and answer `401` without it.
   `hot_loaded_models` (alias names only, no sizes or access times); the gateway keeps `name`,
   `olla_version`, `latest_olla_version` and `upgrade`; cache nodes keep `name` and `macos_version`
 
+An anonymous request also skips the probes only the full view needs: no SSH `sw_vers` per node and
+no upstream release lookups, so `macos_version`, `latest_olla_version` and `upgrade` read `unknown`.
 A `503` for an anonymous caller says only `status_unavailable`, without the failing host in the text.
 Live client identities (`active_edge_requests`, i.e. who is generating against which alias right now),
 live load (`summary.active_requests`, `waiting_requests`, `traffic_state`), memory turnover
