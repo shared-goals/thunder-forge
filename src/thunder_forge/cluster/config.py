@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from thunder_forge import __version__
 from thunder_forge.cluster.ports import (
     DEFAULT_EDGE_PORT,
     DEFAULT_OLLA_PORT,
@@ -40,6 +41,7 @@ DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
+BUILD_INFO_GIT_TIMEOUT_SECONDS = 5.0
 
 
 class RuntimeType(StrEnum):
@@ -1004,6 +1006,35 @@ def default_cluster_config_path(repo_root: Path) -> Path:
 
 def generated_olla_config_path(repo_root: Path) -> Path:
     return repo_root / GENERATED_CONFIG_DIR / GENERATED_OLLA_CONFIG_FILENAME
+
+
+def resolve_build_info(repo_root: Path | None = None) -> dict[str, object]:
+    """Best-effort provenance of the code being executed: package version plus git commit."""
+    root = repo_root
+    if root is None:
+        try:
+            root = find_repo_root()
+        except FileNotFoundError:
+            root = None
+    commit = _git_stdout(root, "rev-parse", "HEAD")
+    dirty = bool(commit) and bool(_git_stdout(root, "status", "--porcelain"))
+    return {"version": __version__, "commit": commit, "dirty": dirty}
+
+
+def _git_stdout(repo_root: Path | None, *args: str) -> str:
+    """Return stripped git stdout, or an empty string when git or the checkout is unavailable."""
+    if repo_root is None:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            timeout=BUILD_INFO_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def find_repo_root() -> Path:

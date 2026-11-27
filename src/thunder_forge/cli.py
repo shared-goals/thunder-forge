@@ -45,7 +45,7 @@ from thunder_forge.cluster.bootstrap import (
     ensure_olla_binary,
     write_generated_olla_config,
 )
-from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig
+from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig, resolve_build_info
 from thunder_forge.cluster.edge import (
     EDGE_USER_PREFIX,
     USAGE_TOKEN_ENV,
@@ -3991,6 +3991,7 @@ def edge_serve(
 
     client_ids = sorted({client.client_id for client in clients_by_key.values()})
     usage_admin_token = os.environ.get(USAGE_TOKEN_ENV, "").strip() or None
+    build_info = resolve_build_info(repo_root)
 
     edge_proxy_config = EdgeProxyConfig(
         olla_base_url=resolved_olla_base_url,
@@ -4002,6 +4003,7 @@ def edge_serve(
         usage_admin_token=usage_admin_token,
         usage_access_log_path=access_log_path,
         usage_node_metrics_path=metrics_path,
+        build=build_info,
         inspector=EdgeInspectorConfig(
             enabled=cluster_config.services.edge_inspector_enabled,
             output_dir=(
@@ -4012,6 +4014,12 @@ def edge_serve(
         ),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
+    typer.echo(
+        "build: "
+        f"version={build_info['version']} "
+        f"commit={build_info['commit'] or 'unknown'} "
+        f"dirty={'yes' if build_info['dirty'] else 'no'}"
+    )
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")
     typer.echo(f"api_key_count: {len(clients_by_key)}")

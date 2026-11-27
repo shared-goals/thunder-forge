@@ -121,6 +121,8 @@ class EdgeProxyConfig:
     usage_admin_token: str | None = None
     usage_access_log_path: Path | None = None
     usage_node_metrics_path: Path | None = None
+    # Resolved once at `edge serve` startup; empty when the caller did not supply it.
+    build: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -1185,6 +1187,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
     return {
         "ok": ok,
         "target": target or "all",
+        "build": dict(config.build),
         "health": {"ok": ok},
         "gateway": gateway_payload,
         "cache": cache_payloads,

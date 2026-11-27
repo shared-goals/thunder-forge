@@ -6,6 +6,7 @@ from textwrap import dedent
 import pytest
 import yaml as yaml_lib
 
+from thunder_forge import __version__
 from thunder_forge.cluster.config import (
     DEFAULT_EDGE_ACCESS_LOG,
     DEFAULT_EDGE_HOST,
@@ -15,6 +16,7 @@ from thunder_forge.cluster.config import (
     lint_cluster_config,
     load_cluster_config,
     parse_cluster_config,
+    resolve_build_info,
 )
 
 
@@ -821,6 +823,20 @@ def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, t
     with pytest.raises(FileNotFoundError) as exc_info:
         find_repo_root()
     assert "tfconfig.yaml" in str(exc_info.value)
+
+
+def test_resolve_build_info_degrades_to_empty_commit_without_git(monkeypatch, tmp_path: Path) -> None:
+    import thunder_forge.cluster.config as config_module
+
+    missing_checkout = {"version": __version__, "commit": "", "dirty": False}
+    assert resolve_build_info(tmp_path) == missing_checkout
+
+    def _no_git(*args, **kwargs):
+        raise FileNotFoundError("git not installed")
+
+    monkeypatch.setattr(config_module.subprocess, "run", _no_git)
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: tmp_path)
+    assert resolve_build_info() == missing_checkout
 
 
 def test_parse_model_info() -> None:

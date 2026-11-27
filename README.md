@@ -331,6 +331,8 @@ make edge-keys EDGE_CLIENTS="opencode hindsight"
 
 `edge serve` loads all `TF_USER_<CLIENT>` entries and accepts requests with `Authorization: Bearer <api-key>`. The access log records the mapped `client_id`, model, endpoint, status, and latency, but never the API key. `edge smoke --client-id hindsight` reads that client's key from `TF_USER_HINDSIGHT`; `make edge-usage` summarizes the JSONL access log.
 
+`edge serve` also resolves the build it is about to execute once at startup: the package version from `thunder_forge.__version__` plus the git commit of the checkout being run, read with `git -C <repo_root> rev-parse HEAD` (unavailable git or checkout leaves the commit empty instead of blocking startup). It prints a single `build: version=... commit=... dirty=...` startup line, and `GET /status` exposes the same values under a top-level `"build": {"version", "commit", "dirty"}` key, so a restart can be traced in the service log and matched to a deployment. The commit is read from the checkout on the host that runs the edge, not from a built artifact.
+
 The reverse proxy in front of the edge (Caddy on `rock`, reached through gost) must forward `/usage` and
 `/usage/assets/*` to the edge port; that proxy config lives outside this repository.
 
@@ -474,6 +476,7 @@ The following sources are the first places to look when debugging routing or bui
 | `GET /usage` on TF edge | Browser dashboard: requests by node/hour, latency percentiles, peak parallel requests, node load, model memory (Chart.js served by the edge, no CDN) | Open `https://<edge>/usage` and paste `TF_EDGE_ADMIN_TOKEN` once |
 | `GET /usage/report` on TF edge | Same aggregates as `usage report --json` over HTTP, optional `?user=<client>` filter; `users.known` lists configured identities | `curl -H 'Authorization: Bearer <token>' '<edge>/usage/report?period=today&user=hermes'` |
 | `GET /usage/events` on TF edge | Raw log lines for one period: `source=access` (default) or `source=node-metrics` | `curl -OJ -H 'Authorization: Bearer <token>' '<edge>/usage/events?period=2026-06-02&source=node-metrics'` |
+| `GET /status` on TF edge | Running build (`version`, `commit`, `dirty`) plus the cluster snapshot: gateway/inference health, oMLX versions, hot-loaded models, readiness | `curl '<edge>/status'` |
 | `logs/olla-40115.stdout.log` | Olla startup config, discovered endpoints, model filters, sticky-session settings, and routed request decisions | Read the log directly if available; it is a useful operational trace |
 | `GET /internal/health` | Olla liveness/ready status | Probe Olla directly |
 | `GET /internal/status/endpoints` | Which endpoints are healthy/routable | Probe Olla directly |
