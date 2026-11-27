@@ -623,7 +623,7 @@ def ensure_olla_session_id(headers: dict[str, str], *, request_id: str, client_i
     return EdgeSessionID(value="")
 
 
-def classify_edge_failure(exc: Exception, *, headers_sent: bool) -> tuple[int, str]:
+def classify_edge_failure(exc: httpx.HTTPError, *, headers_sent: bool) -> tuple[int, str]:
     """Map an upstream httpx failure to the client status and the log error kind.
 
     Timeouts are the edge failing to hear from Olla in time (504); connect and
