@@ -60,9 +60,10 @@ def test_trim_jsonl_by_age_keeps_records_appended_by_a_live_writer(tmp_path: Pat
 
     result = trim_jsonl_by_age(path, retention_days=3, now=datetime(2026, 6, 5, tzinfo=UTC))
 
-    assert result.skipped is True
-    assert result.removed_lines == 0
-    assert original_read_text(path).splitlines() == [old_record, live_record]
+    # The append happened after the read: it must survive the swap, and the old record must not.
+    assert result.skipped is False
+    assert result.removed_lines == 1
+    assert original_read_text(path).splitlines() == [live_record]
 
 
 def test_trim_jsonl_by_age_does_not_count_blank_lines_as_removed(tmp_path: Path) -> None:
@@ -208,3 +209,43 @@ def test_trim_local_logs_leaves_plain_text_olla_log_alone(tmp_path: Path) -> Non
     assert str(olla_log) not in [result.path for result in summary.jsonl_results]
     assert str(olla_log) not in [result.path for result in summary.file_results]
     assert olla_log.read_text() == "INFO proxy request routed\n\n2026-06-01T00:00:00Z still plain text\n"
+
+
+def test_trim_jsonl_by_age_keeps_mode_and_owner_when_asked(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps({"timestamp": "2026-06-01T00:00:00+00:00"}) + "\n")
+    os.chmod(path, 0o640)
+
+    result = trim_jsonl_by_age(path, retention_days=3, now=datetime(2026, 6, 5, tzinfo=UTC))
+
+    assert result.skipped is False
+    assert path.stat().st_mode & 0o777 == 0o640
+
+
+def test_trim_jsonl_by_age_skips_a_directory_it_cannot_write(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    path = log_dir / "events.jsonl"
+    path.write_text(json.dumps({"timestamp": "2026-06-01T00:00:00+00:00"}) + "\n")
+    os.chmod(log_dir, 0o500)
+
+    try:
+        result = trim_jsonl_by_age(path, retention_days=3, now=datetime(2026, 6, 5, tzinfo=UTC))
+    finally:
+        os.chmod(log_dir, 0o700)
+
+    assert result.skipped is True
+    assert result.removed_lines == 0
+
+
+def test_prune_file_if_older_than_removes_a_symlinked_logs_target(tmp_path: Path) -> None:
+    real = tmp_path / "real.log.gz"
+    real.write_text("x")
+    _set_mtime(real, datetime(2026, 5, 1, tzinfo=UTC))
+    link = tmp_path / "link.log.gz"
+    link.symlink_to(real)
+
+    result = prune_file_if_older_than(link, retention_days=3, now=datetime(2026, 6, 5, tzinfo=UTC))
+
+    assert result.removed is True
+    assert not real.exists(), "the target must go, not just the link"
