@@ -456,11 +456,20 @@ uv run thunder-forge usage check --window 15m --include-client-errors --json
 make usage-check 15m
 ```
 
-`usage check` reads the log resolved from `services.edge.access_log` (default `logs/tf-edge-access.jsonl`), keeps
-the records whose `timestamp` falls inside `--window` (default `15m`; suffix `s`, `m`, or `h`), and compares the
-failure ratio against `--max-failure-rate` (default `0.05`). It counts `status_code >= 500` unless
-`--include-client-errors` widens that to `>= 400`, and below `--min-requests` (default `5`) it reports
-`insufficient data` instead of breaching.
+`usage check` reads the log resolved from `services.edge.access_log` (default `logs/tf-edge-access.jsonl`),
+or `--access-log <path>`, keeps the records whose `timestamp` falls inside `--window` (default `15m`;
+suffix `s`, `m`, or `h`), and compares the failure ratio against `--max-failure-rate` (default `0.05`).
+A record counts as a failure when `status_code >= 500`, when `--include-client-errors` widens that to
+`>= 400`, or when it carries a cluster `error_kind` — the same rule `usage report` counts with, so a
+stream that died after its headers (`status_code: 200`) is a failure here too. A `client_aborted` row is
+not: that is the client's own choice. Below `--min-requests` (default `5`) it reports `insufficient
+data` instead of breaching.
+
+`--json` prints one object: `window_seconds`, `requests`, `failures`, `failure_rate`, `threshold`,
+`min_requests`, `breached`, `insufficient_data`, `statuses`, `log_path`, `checked_at`.
+
+Each run reads the whole log file in memory, whatever retention has left; at a few thousand records a day
+that is milliseconds, and it is the reason a scheduled `usage trim-logs` matters.
 
 Exit codes:
 
