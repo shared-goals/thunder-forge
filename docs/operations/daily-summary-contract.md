@@ -211,8 +211,10 @@ The SQL script emits daily tables for:
 - by node/hour: request split
 - by model: requests, consumed time
 
-No table carries a token count: the script projects a `tokens` column, but the access record has no
-token keys, so the column reads `0` for every row (not "unknown", not a measurement).
+No table carries a token count. The script used to project a `tokens` column from
+`total_tokens`/`prompt_tokens`/`completion_tokens`, which the access record does not carry: the
+column did not exist, so `read_json_auto` failed to bind and `make usage-duckdb` errored out on a
+current log. The projection is gone until the edge collects tokens.
 - node hot-loaded summary from collected snapshots
 
 ## Guardrails
@@ -221,9 +223,8 @@ token keys, so the column reads `0` for every row (not "unknown", not a measurem
   ADR 0002 (see its MVP guardrails)
 - the edge dashboard is a read-only view over the same JSONL files, not a second store
 - edge traffic is the request source of truth for now
-- token fields exist nowhere in the log, so the `tokens` column the DuckDB script projects is `0`
-  for every row until the edge collects them (README, Minimal Metric Strategy). A `0` there means
-  "not collected", not "no tokens used".
+- token fields exist nowhere in the log; the DuckDB script no longer projects a `tokens` column at
+  all, and adding one back needs the edge to collect tokens first (README, Minimal Metric Strategy)
 - hot-loaded model sets come from oMLX model status snapshots
 
 ## Evolution

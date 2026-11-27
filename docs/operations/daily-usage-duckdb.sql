@@ -9,20 +9,14 @@ with request_rows as (
         client_id,
         regexp_extract(olla_endpoint, '^([^-]+)-omlx-', 1) as node_id,
         model,
-        cast(latency_ms as bigint) as latency_ms,
-        coalesce(
-            cast(total_tokens as bigint),
-            cast(prompt_tokens as bigint) + cast(completion_tokens as bigint),
-            0
-        ) as tokens
+        cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
     where cast(timestamp as date) = cast($period as date)
 )
 select
     client_id,
     count(*) as requests,
-    sum(latency_ms) as consumed_ms,
-    sum(tokens) as tokens
+    sum(latency_ms) as consumed_ms
 from request_rows
 group by client_id
 order by requests desc, client_id;
@@ -34,20 +28,14 @@ with request_rows as (
         client_id,
         regexp_extract(olla_endpoint, '^([^-]+)-omlx-', 1) as node_id,
         model,
-        cast(latency_ms as bigint) as latency_ms,
-        coalesce(
-            cast(total_tokens as bigint),
-            cast(prompt_tokens as bigint) + cast(completion_tokens as bigint),
-            0
-        ) as tokens
+        cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
     where cast(timestamp as date) = cast($period as date)
 )
 select
     node_id,
     count(*) as requests,
-    sum(latency_ms) as consumed_ms,
-    sum(tokens) as tokens
+    sum(latency_ms) as consumed_ms
 from request_rows
 where node_id <> ''
 group by node_id
@@ -60,12 +48,7 @@ with request_rows as (
         client_id,
         regexp_extract(olla_endpoint, '^([^-]+)-omlx-', 1) as node_id,
         model,
-        cast(latency_ms as bigint) as latency_ms,
-        coalesce(
-            cast(total_tokens as bigint),
-            cast(prompt_tokens as bigint) + cast(completion_tokens as bigint),
-            0
-        ) as tokens
+        cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
     where cast(timestamp as date) = cast($period as date)
 ),
@@ -118,12 +101,7 @@ with request_rows as (
         client_id,
         regexp_extract(olla_endpoint, '^([^-]+)-omlx-', 1) as node_id,
         model,
-        cast(latency_ms as bigint) as latency_ms,
-        coalesce(
-            cast(total_tokens as bigint),
-            cast(prompt_tokens as bigint) + cast(completion_tokens as bigint),
-            0
-        ) as tokens
+        cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
     where cast(timestamp as date) = cast($period as date)
 )
@@ -143,20 +121,14 @@ with request_rows as (
         client_id,
         regexp_extract(olla_endpoint, '^([^-]+)-omlx-', 1) as node_id,
         model,
-        cast(latency_ms as bigint) as latency_ms,
-        coalesce(
-            cast(total_tokens as bigint),
-            cast(prompt_tokens as bigint) + cast(completion_tokens as bigint),
-            0
-        ) as tokens
+        cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
     where cast(timestamp as date) = cast($period as date)
 )
 select
     model,
     count(*) as requests,
-    sum(latency_ms) as consumed_ms,
-    sum(tokens) as tokens
+    sum(latency_ms) as consumed_ms
 from request_rows
 where model <> ''
 group by model
