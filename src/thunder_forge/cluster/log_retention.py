@@ -92,7 +92,7 @@ def trim_jsonl_by_age(
     current_now = now or datetime.now(UTC)
     cutoff = current_now - timedelta(days=retention_days)
     before_stat = path.stat()
-    original_lines = path.read_text().splitlines()
+    original_lines = path.read_text(encoding="utf-8").splitlines()
     kept_lines: list[str] = []
     before = 0
 
@@ -128,12 +128,18 @@ def trim_jsonl_by_age(
 
 def _replace_if_unchanged(path: Path, kept_lines: list[str], *, before_stat: os.stat_result) -> bool:
     """Swap kept_lines in place of path, unless the file changed or vanished since before_stat."""
-    temp_path: Path | None = None
+    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temp_path = Path(temp_name)
     try:
-        fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-        temp_path = Path(temp_name)
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write("\n".join(kept_lines) + ("\n" if kept_lines else ""))
+            handle.flush()
+            os.fsync(handle.fileno())
+        # The new inode must keep the log's owner and mode, or the serving process cannot append.
+        try:
+            os.chown(temp_path, before_stat.st_uid, before_stat.st_gid)
+        except (AttributeError, PermissionError):
+            pass
         os.chmod(temp_path, before_stat.st_mode & 0o777)
         try:
             current_stat = path.stat()
@@ -144,8 +150,7 @@ def _replace_if_unchanged(path: Path, kept_lines: list[str], *, before_stat: os.
         os.replace(temp_path, path)
         return True
     finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+        temp_path.unlink(missing_ok=True)
 
 
 def prune_file_if_older_than(

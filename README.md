@@ -379,6 +379,7 @@ What the command touches:
 
 - `logs/tf-edge-access.jsonl` and `logs/tf-node-metrics.jsonl` are trimmed by record `timestamp`. The kept records go to a temp file that is swapped in with `os.replace`, and the swap is abandoned when the source changed since it was read: a file that grew under a live writer is left intact and reported as `skipped_jsonl_files`. The check and the swap are not one atomic step, so a writer that already holds the file open can still land a record in the replaced inode.
 - `logs/*.stdout.log`, `logs/*.stderr.log` and `logs/*.log.gz` are pruned whole once their mtime is older than the retention window.
+- A file that changed during the run is left alone and named in a `Warning:` line on stderr, so a scheduled trim that could not run says so instead of reporting a quiet zero.
 - `logs/olla.log` is plain text without record timestamps, so it is not a retention target and is never rewritten or deleted.
 
 Print daily summary from structured logs:

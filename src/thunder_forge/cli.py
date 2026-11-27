@@ -313,29 +313,6 @@ def _usage_metrics_log_path(repo_root: Path, metrics_log: Path | None) -> Path:
     return _repo_relative_path(repo_root, metrics_log)
 
 
-def _trim_logs_with_policy(
-    *,
-    repo_root: Path,
-    config: ClusterConfig,
-    node_metrics_path: Path,
-    retention_days: int | None,
-) -> tuple[int, int, int, int]:
-    days = retention_days if retention_days is not None else config.services.log_retention_days
-    if days <= 0:
-        typer.echo("Error: retention days must be positive", err=True)
-        raise typer.Exit(1)
-    summary = trim_local_logs(
-        repo_root=repo_root,
-        config=config,
-        node_metrics_log_path=node_metrics_path,
-        retention_days=days,
-    )
-    jsonl_removed = sum(result.removed_lines for result in summary.jsonl_results)
-    file_removed = sum(1 for result in summary.file_results if result.removed)
-    skipped = sum(1 for result in summary.jsonl_results if result.skipped)
-    return days, jsonl_removed, file_removed, skipped
-
-
 def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> list[dict[str, object]]:
     snapshots: list[dict[str, object]] = []
     for node_id, node in sorted(config.compute_nodes.items()):
@@ -3789,17 +3766,27 @@ def usage_trim_logs(
 ) -> None:
     """Trim local TF logs with one shared retention policy."""
     config, repo_root = _load_config()
-    metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
-    days, jsonl_removed, file_removed, skipped = _trim_logs_with_policy(
+    days = retention_days if retention_days is not None else config.services.log_retention_days
+    if days <= 0:
+        typer.echo("Error: retention days must be positive", err=True)
+        raise typer.Exit(1)
+    summary = trim_local_logs(
         repo_root=repo_root,
         config=config,
-        node_metrics_path=metrics_path,
-        retention_days=retention_days,
+        node_metrics_log_path=_usage_metrics_log_path(repo_root, node_metrics_log),
+        retention_days=days,
     )
+    skipped = [result.path for result in summary.jsonl_results if result.skipped]
     typer.echo(f"retention_days: {days}")
-    typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-    typer.echo(f"pruned_log_files: {file_removed}")
-    typer.echo(f"skipped_jsonl_files: {skipped}")
+    typer.echo(f"trimmed_jsonl_records: {sum(result.removed_lines for result in summary.jsonl_results)}")
+    typer.echo(f"pruned_log_files: {sum(1 for result in summary.file_results if result.removed)}")
+    typer.echo(f"skipped_jsonl_files: {len(skipped)}")
+    if skipped:
+        # A busy log makes the swap impossible; say so instead of reporting a quiet success.
+        typer.echo(
+            "Warning: left these logs intact because they changed during the run: " + ", ".join(skipped),
+            err=True,
+        )
 
 
 @olla_app.command("smoke")
