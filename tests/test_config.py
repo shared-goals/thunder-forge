@@ -934,3 +934,18 @@ def test_parse_model_rejects_obsolete_serving_key() -> None:
                 "nodes": {},
             }
         )
+
+
+def test_resolve_build_info_ignores_a_git_environment_pointing_elsewhere(tmp_path: Path, monkeypatch) -> None:
+    """GIT_DIR overrides -C, so an inherited one would report another repository's HEAD."""
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    subprocess.run(["git", "-C", str(other), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+    info = resolve_build_info(Path(__file__).resolve().parent.parent)
+
+    assert info["commit"] != subprocess.run(
+        ["git", "-C", str(other), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()

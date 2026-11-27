@@ -1010,6 +1010,10 @@ def generated_olla_config_path(repo_root: Path) -> Path:
     return repo_root / GENERATED_CONFIG_DIR / GENERATED_OLLA_CONFIG_FILENAME
 
 
+def _without_git_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def resolve_build_info(repo_root: Path) -> dict[str, object]:
     """Provenance of the code being executed: package version, git commit and tree state.
 
@@ -1026,6 +1030,9 @@ def resolve_build_info(repo_root: Path) -> dict[str, object]:
             capture_output=True,
             text=True,
             timeout=BUILD_INFO_GIT_TIMEOUT_SECONDS,
+            # GIT_DIR and friends override -C, which would report another repository's HEAD
+            # as a plausible-looking build.
+            env=_without_git_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return unknown
@@ -1051,9 +1058,12 @@ def find_repo_root() -> Path:
             capture_output=True,
             text=True,
             check=True,
+            # Startup runs this before the listener binds: a wedged git must not hang the edge.
+            timeout=BUILD_INFO_GIT_TIMEOUT_SECONDS,
+            env=_without_git_environment(),
         )
         return Path(result.stdout.strip())
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.SubprocessError):
         pass
     current = Path.cwd()
     for parent in [current, *current.parents]:
