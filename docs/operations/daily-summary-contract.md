@@ -139,14 +139,14 @@ Aggregation honours `operations.usage.exclude_models` and
 
 - Config key: `services.log_retention_days`
 - Default: `3`
-- Entry point: `thunder-forge usage trim-logs` only. Retention never runs inside `edge serve`; trimming a log that a live process appends to loses records.
+- Entry point: `thunder-forge usage trim-logs` only. Retention never runs inside `edge serve` or `usage collect-node-metrics`; trimming a log that a live process appends to loses records.
 - Scope: local TF-managed logs
   - `logs/tf-edge-access.jsonl`
   - `logs/tf-node-metrics.jsonl`
   - `logs/*.stdout.log`, `logs/*.stderr.log`, `logs/*.log.gz`
 - Behavior:
-  - JSONL files are trimmed by record `timestamp`; blank lines are neither counted as removed records nor rewritten away
-  - the trimmed file is written next to the original and swapped with `os.replace`, and only if size and mtime are unchanged since the read - a file that grew under a live writer is skipped and reported as `skipped_jsonl_files`
+  - JSONL files are trimmed by record `timestamp`; blank lines are not counted as removed records, and a file with no expired record is not rewritten at all (blank lines survive such a run, and are dropped as collateral when the file is rewritten)
+  - the trimmed file is written next to the original and swapped with `os.replace`, and only if size and mtime are unchanged since the read - a file that grew under a live writer is skipped and reported as `skipped_jsonl_files`. The size/mtime check and the swap are not atomic with respect to a writer that already holds the file open
   - plain/archive logs are pruned whole by file mtime
   - `logs/olla.log` is plain text without record timestamps, so it is not a retention target; this command never rewrites or deletes it
 

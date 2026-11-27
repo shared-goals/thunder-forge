@@ -1,8 +1,10 @@
 """Shared local log retention helpers for Thunder Forge.
 
 Retention is intentionally file-based and lightweight:
-- Structured JSONL logs are trimmed by per-record timestamp, and only when the file is
-  unchanged between read and replace, so a live writer cannot lose appended records.
+- Structured JSONL logs are trimmed by per-record timestamp, and the rewrite is skipped when
+  the file changed since it was read, so a run never overwrites records it did not see. The
+  check-then-swap still leaves a sub-second window for a writer that already holds the file open:
+  if that matters, coordinate the writer instead of trusting this helper.
 - Plain text and archive service logs (`*.stdout.log`, `*.stderr.log`, `*.log.gz`) are
   pruned whole by file mtime.
 - `logs/olla.log` is plain text without record timestamps, so it is not a retention
@@ -80,7 +82,6 @@ def trim_jsonl_by_age(
     path: Path,
     *,
     retention_days: int,
-    timestamp_key: str = "timestamp",
     now: datetime | None = None,
 ) -> JsonlTrimResult:
     if not path.exists():
@@ -108,7 +109,7 @@ def trim_jsonl_by_age(
             kept_lines.append(line)
             continue
 
-        timestamp = _parse_timestamp(payload.get(timestamp_key))
+        timestamp = _parse_timestamp(payload.get("timestamp"))
         if timestamp is None or timestamp >= cutoff:
             kept_lines.append(line)
 

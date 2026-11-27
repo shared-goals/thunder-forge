@@ -314,6 +314,30 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
     assert payload["hot_loaded_count"] == 1
 
 
+def test_usage_collect_node_metrics_never_trims_logs(tmp_path: Path, monkeypatch) -> None:
+    """Retention has one entry point: the collector must not rewrite a log the edge writes."""
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        nodes={},
+    )
+
+    def fake_trim(*args: object, **kwargs: object) -> tuple[int, int, int, int]:
+        raise AssertionError("usage collect-node-metrics must not trim logs")
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(cli_module, "_trim_logs_with_policy", fake_trim)
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics", "--once"])
+
+    assert result.exit_code == 0, result.output
+    assert "trimmed_jsonl_records" not in result.stdout
+    assert "retention_days" not in result.stdout
+
+
 def test_usage_collect_node_metrics_maps_hot_loaded_runtime_ids_to_aliases(tmp_path: Path, monkeypatch) -> None:
     import thunder_forge.cli as cli_module
 

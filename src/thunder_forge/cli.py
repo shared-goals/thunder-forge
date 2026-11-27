@@ -3746,11 +3746,6 @@ def usage_collect_node_metrics(
         "--continuous/--once",
         help="Run continuously. Default is one collection run.",
     ),
-    retention_days: int | None = typer.Option(
-        None,
-        "--retention-days",
-        help="Override log retention days. Defaults to tfconfig services.log_retention_days (3).",
-    ),
 ) -> None:
     """Collect usage snapshots per inference node for hot-loaded model reporting."""
     config, repo_root = _load_config()
@@ -3763,23 +3758,14 @@ def usage_collect_node_metrics(
 
     while True:
         run_count += 1
-        days, jsonl_removed, file_removed, skipped = _trim_logs_with_policy(
-            repo_root=repo_root,
-            config=config,
-            node_metrics_path=metrics_path,
-            retention_days=retention_days,
-        )
-
+        # No retention here: `usage trim-logs` is the only trimmer, so this collector never
+        # rewrites a log the edge is appending to.
         snapshots = _collect_node_metric_snapshots(config, timeout=timeout)
         _append_snapshots(metrics_path, snapshots)
 
         typer.echo(f"output: {metrics_path}")
         typer.echo(f"run: {run_count}")
         typer.echo(f"samples_written: {len(snapshots)}")
-        typer.echo(f"retention_days: {days}")
-        typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-        typer.echo(f"pruned_log_files: {file_removed}")
-        typer.echo(f"skipped_jsonl_files: {skipped}")
         _print_snapshot_summary(snapshots)
 
         if not continuous:
