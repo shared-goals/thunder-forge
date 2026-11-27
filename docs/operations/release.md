@@ -3,7 +3,8 @@
 Mechanical part of the rule in `AGENTS.md` under "Versioned publication".
 
 1. In the release pull request, before it merges: bump `__version__` in `src/thunder_forge/__init__.py` and
-   `version` in `pyproject.toml` to the same number, add the `CHANGELOG.md` section for it, then refresh the
+   `version` in `pyproject.toml` to the same number, rename the `## Unreleased` section of `CHANGELOG.md` to
+   `## v<version> - <date>`, then refresh the
    lockfile — `uv lock` — and commit the updated `uv.lock` with the bump. The root package version is pinned
    in `uv.lock`, so a bump without it leaves `uv lock --check` failing and lets the next `uv run` rewrite
    the lockfile on `main`.
