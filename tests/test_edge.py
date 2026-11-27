@@ -321,6 +321,26 @@ def test_build_edge_status_payload_reports_the_running_build(monkeypatch) -> Non
     assert payload["build"] == {"version": "0.2.0", "commit": "abc1234", "dirty": True}
 
 
+def test_build_edge_status_payload_reports_an_unknown_build_when_none_was_supplied(monkeypatch) -> None:
+    import thunder_forge.cluster.edge as edge_module
+
+    cluster_config = ClusterConfig(
+        services=ServiceConfig(edge_port=40116, olla_port=40115),
+        nodes={"rock": Node(host="rock.lan", ram_gb=32, roles=[NodeRole.GATEWAY], user="shag")},
+    )
+    config = EdgeProxyConfig(
+        olla_base_url="http://rock.lan:40115", clients_by_key={}, cluster_config=cluster_config
+    )
+
+    monkeypatch.setattr(edge_module, "_latest_olla_release_version", lambda *, timeout=5.0: "v0.0.28")
+    monkeypatch.setattr(edge_module, "_latest_omlx_release_version", lambda *, timeout=5.0: "")
+    monkeypatch.setattr(edge_module, "_gateway_olla_version", lambda _config: "v0.0.28")
+
+    payload = build_edge_status_payload(config=config)
+
+    assert payload["build"] == {"version": "unknown", "commit": "unknown", "dirty": "unknown"}
+
+
 def test_build_edge_status_payload_hides_unmanaged_runtime_ids(monkeypatch, tmp_path) -> None:
     import thunder_forge.cluster.edge as edge_module
 

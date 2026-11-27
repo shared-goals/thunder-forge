@@ -2297,8 +2297,14 @@ def _print_cluster_status_payload(
     view = _status_view(payload)
     summary = payload.get("summary")
     gateway = payload.get("gateway")
+    build = payload.get("build")
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {payload.get('target', 'all')}")
+    if isinstance(build, dict) and build:
+        typer.echo(
+            f"build: version={build.get('version', 'unknown')} "
+            f"commit={build.get('commit', 'unknown')} dirty={build.get('dirty', 'unknown')}"
+        )
     typer.echo("")
     typer.echo("summary:")
     typer.echo(f"  nodes: {view['healthy_count']}/{len(view['inference_nodes'])} healthy")
@@ -3985,12 +3991,9 @@ def edge_serve(
         ),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
-    dirty_state = build_info["dirty"]
     typer.echo(
         "build: "
-        f"version={build_info['version']} "
-        f"commit={build_info['commit']} "
-        f"dirty={'unknown' if dirty_state is None else ('yes' if dirty_state else 'no')}"
+        f"version={build_info['version']} commit={build_info['commit']} dirty={build_info['dirty']}"
     )
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")

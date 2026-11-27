@@ -41,9 +41,9 @@ DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
-BUILD_INFO_GIT_TIMEOUT_SECONDS = 5.0
+BUILD_INFO_GIT_TIMEOUT_SECONDS = 3.0
 # Published by a caller that has no build information at all: visible, never plausible.
-UNKNOWN_BUILD_INFO: dict[str, object] = {"version": "unknown", "commit": "unknown", "dirty": None}
+UNKNOWN_BUILD_INFO: dict[str, object] = {"version": "unknown", "commit": "unknown", "dirty": "unknown"}
 
 
 class RuntimeType(StrEnum):
@@ -1011,31 +1011,34 @@ def generated_olla_config_path(repo_root: Path) -> Path:
 
 
 def resolve_build_info(repo_root: Path) -> dict[str, object]:
-    """Best-effort provenance of the code being executed: package version plus git commit.
+    """Provenance of the code being executed: package version, git commit and tree state.
 
-    `git -C` resolves the enclosing repository, so an edge installed inside an unrelated clone
-    reports that clone's HEAD. Unknown values stay visibly unknown: `commit` is the string
-    "unknown" and `dirty` is None when git or the checkout cannot be read.
+    One `git status --porcelain=v2 --branch` call answers both the commit and whether the tree
+    is dirty. `git -C` resolves the enclosing repository, so an edge installed inside an
+    unrelated clone reports that clone's HEAD. Anything unreadable stays visibly unknown.
     """
-    commit = _git_stdout(repo_root, "rev-parse", "HEAD")
-    # An empty or missing answer leaves the tree state unknown, never "clean".
-    status = _git_stdout(repo_root, "status", "--porcelain") if commit else None
-    dirty = None if status is None else bool(status)
-    return {"version": __version__, "commit": commit or "unknown", "dirty": dirty}
-
-
-def _git_stdout(repo_root: Path, *args: str) -> str | None:
-    """Return stripped git stdout, or None when git or the checkout answers nothing."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_root), *args],
+            ["git", "-C", str(repo_root), "status", "--porcelain=v2", "--branch"],
             capture_output=True,
             text=True,
             timeout=BUILD_INFO_GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
+        return {"version": __version__, "commit": "unknown", "dirty": "unknown"}
+    if result.returncode != 0:
+        return {"version": __version__, "commit": "unknown", "dirty": "unknown"}
+
+    commit = ""
+    dirty = "no"
+    for line in result.stdout.splitlines():
+        if line.startswith("# branch.oid "):
+            commit = line.removeprefix("# branch.oid ").strip()
+        elif line.strip() and not line.startswith("#"):
+            dirty = "yes"
+    if not commit or commit == "(initial)":
+        return {"version": __version__, "commit": "unknown", "dirty": "unknown"}
+    return {"version": __version__, "commit": commit, "dirty": dirty}
 
 
 def find_repo_root() -> Path:

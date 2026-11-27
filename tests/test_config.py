@@ -826,35 +826,49 @@ def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, t
     assert "tfconfig.yaml" in str(exc_info.value)
 
 
-def test_resolve_build_info_reports_unknown_without_git(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_build_info_reports_unknown_when_git_is_unavailable(monkeypatch, tmp_path: Path) -> None:
     import thunder_forge.cluster.config as config_module
-
-    unknown_build = {"version": __version__, "commit": "unknown", "dirty": None}
-    assert resolve_build_info(tmp_path) == unknown_build
 
     def _no_git(*args, **kwargs):
         raise FileNotFoundError("git not installed")
 
     monkeypatch.setattr(config_module.subprocess, "run", _no_git)
-    assert resolve_build_info(tmp_path) == unknown_build
+
+    assert resolve_build_info(tmp_path) == {
+        "version": __version__,
+        "commit": "unknown",
+        "dirty": "unknown",
+    }
 
 
-def test_resolve_build_info_reports_dirty_unknown_when_status_fails(monkeypatch, tmp_path: Path) -> None:
-    """A clean-looking `dirty: false` must never stand in for a status read that failed."""
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("# branch.oid abc1234\n", {"commit": "abc1234", "dirty": "no"}),
+        ("# branch.oid abc1234\n? new.log\n", {"commit": "abc1234", "dirty": "yes"}),
+        ("# branch.oid (initial)\n", {"commit": "unknown", "dirty": "unknown"}),
+        ("", {"commit": "unknown", "dirty": "unknown"}),
+    ],
+)
+def test_resolve_build_info_reads_the_commit_and_the_tree_state(
+    monkeypatch, tmp_path: Path, stdout: str, expected: dict[str, str]
+) -> None:
+    """One git call answers both facts, and an unreadable answer is never a clean tree."""
     import thunder_forge.cluster.config as config_module
 
-    calls: list[tuple[str, ...]] = []
+    seen: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
-        calls.append(tuple(argv[3:]))
-        if tuple(argv[3:]) == ("rev-parse", "HEAD"):
-            return subprocess.CompletedProcess(argv, 0, stdout="abc1234\n", stderr="")
-        raise subprocess.TimeoutExpired(argv, 1)
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(config_module.subprocess, "run", fake_run)
 
-    assert resolve_build_info(tmp_path) == {"version": __version__, "commit": "abc1234", "dirty": None}
-    assert calls == [("rev-parse", "HEAD"), ("status", "--porcelain")]
+    result = resolve_build_info(tmp_path)
+
+    assert result == {"version": __version__, **expected}
+    assert len(seen) == 1
+    assert seen[0][-3:] == ["status", "--porcelain=v2", "--branch"]
 
 
 def test_parse_model_info() -> None:
