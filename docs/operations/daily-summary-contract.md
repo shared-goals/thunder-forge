@@ -81,7 +81,7 @@ named in `errors` as `no configured alias for runtime model: <id>`, which is how
 
 `hot_loaded_models` lists every configured alias of a loaded runtime model, while `loaded_models`
 carries one row per loaded runtime model, using its first alias, so the two counts agree only when
-a runtime model has a single alias. A node that lists no models writes `hot_loaded_count: 0` and
+a runtime model has a single alias. A node that lists no models and has nothing loaded writes `hot_loaded_count: 0` and
 `loaded_models: []`, which is indistinguishable from a probe that found nothing loaded.
 
 ## Summary Contract
