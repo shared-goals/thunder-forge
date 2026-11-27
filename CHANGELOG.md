@@ -4,12 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-
 ### Changed
 
 - Log retention is operator-run only: `edge serve` and `usage collect-node-metrics` no longer trim, and the
   collector lost `--retention-days`. `usage trim-logs` splices live appends instead of skipping a growing log,
   keeps owner and mode, follows symlinks, and exits `1` when a file had to be skipped.
+- Edge access records carry `error_kind`, `stream` and `headers_sent`, so a failure Olla never answered is
+  distinguishable from one it did. `--timeout` cannot be set below the Olla connect plus backend budget
+  (`OLLA_CONNECT_TIMEOUT_SECONDS` + `OLLA_BACKEND_TIMEOUT_SECONDS`, 125 s by default).
 
 ### Added
 
