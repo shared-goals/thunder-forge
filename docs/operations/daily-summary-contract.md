@@ -72,11 +72,12 @@ Expected keys:
 - `loaded_models` (`id` alias, `actual_size` bytes, `idle_seconds` per loaded model)
 - `errors`
 
-Only models declared for **this node** in the cluster configuration are recorded. A runtime that
-reports extra entries — tool adapters such as `MarkItDown`, or a configured model whose
-`runtime_model_id` has drifted — has them dropped from `hot_loaded_models` and `loaded_models`,
-the same way `GET /status` drops them. A dropped entry is named in `errors` as
-`no configured alias for runtime model: <id>`, so drift stays visible instead of vanishing.
+`hot_loaded_models` lists only aliases declared for **this node** in the cluster configuration, the
+same membership rule `GET /status` uses. A runtime entry with no configured alias is dropped when it
+holds no memory — tool adapters such as `MarkItDown` report none — and kept under its raw runtime id
+in `loaded_models` when it does, so a hand-loaded model cannot hide its footprint. A kept entry is
+named in `errors` as `no configured alias for runtime model: <id>`, which is how a drifted
+`runtime_model_id` shows up; a dropped tool adapter adds nothing to `errors`.
 
 `hot_loaded_models` lists every configured alias of a loaded runtime model, while `loaded_models`
 carries one row per loaded runtime model, using its first alias, so the two counts agree only when

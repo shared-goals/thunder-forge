@@ -528,8 +528,61 @@ def test_usage_collect_node_metrics_skips_unmanaged_runtime_entries(tmp_path: Pa
     assert payload["hot_loaded_models"] == ["agent"]
     assert payload["hot_loaded_count"] == 1
     assert [entry["id"] for entry in payload["loaded_models"]] == ["agent"]
-    # The dropped entry is named in errors instead of disappearing without a trace.
-    assert payload["errors"] == ["no configured alias for runtime model: MarkItDown"]
+    # A tool adapter with no memory is dropped and no longer counts as a node error.
+    assert payload["errors"] == []
+
+
+def test_usage_collect_node_metrics_keeps_an_unaliased_model_that_holds_memory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A hand-loaded model must not hide its footprint just because it has no configured alias."""
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={},
+        nodes={
+            "msm1": Node(
+                host="msm1-wifi.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=[],
+            )
+        },
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda *args, **kwargs: OmlxHealthResult(
+            base_url="http://msm1-wifi.lan:8018",
+            health_ok=True,
+            models_ok=True,
+            status_ok=True,
+            models=["mlx-community/hand-loaded"],
+            model_statuses={
+                "mlx-community/hand-loaded": {"loaded": True, "last_access": 100.0, "actual_size": 40 * 1024**3},
+            },
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads((repo / "logs" / "tf-node-metrics.jsonl").read_text().splitlines()[0])
+    assert payload["hot_loaded_models"] == []
+    assert payload["hot_loaded_count"] == 0
+    assert payload["loaded_models"][0]["id"] == "mlx-community/hand-loaded"
+    assert payload["loaded_models"][0]["actual_size"] == 40 * 1024**3
+    assert payload["errors"] == [
+        "no configured alias for runtime model: mlx-community/hand-loaded"
+    ]
 
 
 def test_usage_collect_node_metrics_counts_aliases_not_rows(tmp_path: Path, monkeypatch) -> None:

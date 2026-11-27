@@ -335,14 +335,15 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         for runtime_id, status in sorted(health.model_statuses.items()):
             if not isinstance(status, dict) or status.get("loaded") is not True:
                 continue
-            # Unmanaged runtime entries (tools such as MarkItDown) are not models of this cluster:
-            # they carry no alias and no memory, and they inflated hot_loaded_count. A configured
-            # model whose runtime id drifted shows up here too, so name it instead of hiding it.
+            # A runtime entry with no configured alias is a tool adapter (MarkItDown reports no
+            # memory) or a drifted model. Memory is the tell: an entry holding RAM stays in the
+            # snapshot under its raw runtime id, so a hand-loaded model cannot hide the footprint.
             aliases = aliases_by_runtime.get(runtime_id)
+            if not aliases and not _as_non_negative_int(status.get("actual_size")):
+                continue
             if not aliases:
                 unmanaged_loaded.append(runtime_id)
-                continue
-            entry: dict[str, object] = {"id": aliases[0]}
+            entry: dict[str, object] = {"id": aliases[0] if aliases else runtime_id}
             actual_size = _as_non_negative_int(status.get("actual_size"))
             if actual_size is not None:
                 entry["actual_size"] = actual_size
