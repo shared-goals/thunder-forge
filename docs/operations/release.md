@@ -1,20 +1,23 @@
 # Release Publication Steps
 
-The rules live in `AGENTS.md` under "Versioned publication". This file is only the mechanical part:
-run these steps when publishing, nothing else.
+Mechanical part of the rule in `AGENTS.md` under "Versioned publication".
 
-## Steps
-
-1. Bump the version in both places, so they stay equal:
-   - `__version__` in `src/thunder_forge/__init__.py`
-   - `version` in `pyproject.toml`
-2. Add a `CHANGELOG.md` entry for the new version: what changed and why, in the words the release
-   notes will reuse.
-3. Confirm the owner merged the change to `main`. Do not merge it yourself.
-4. Tag the merged commit and push the tag:
+1. In the pull request, before it merges: bump `__version__` in `src/thunder_forge/__init__.py`
+   and `version` in `pyproject.toml` to the same number, and add the `CHANGELOG.md` entry for it.
+2. The owner merges the pull request.
+3. Verify the merged tree carries that version; stop here if it does not:
 
    ```bash
-   git tag -a v<version> -m "v<version>"
+   git fetch origin --tags
+   git show origin/main:src/thunder_forge/__init__.py | grep __version__
+   git show origin/main:pyproject.toml | grep '^version'
+   git show origin/main:CHANGELOG.md | head -20
+   ```
+
+4. Tag the **merged** commit — `origin/main`, not whatever is checked out — and push the tag:
+
+   ```bash
+   git tag -a v<version> origin/main -m "v<version>"
    git push origin v<version>
    ```
 
@@ -24,15 +27,11 @@ run these steps when publishing, nothing else.
    gh release create v<version> --title v<version> --notes-file <notes.md>
    ```
 
-6. Verify the four agree before calling the change published:
+6. Verify the four agree, and that the tag is on the merged commit:
 
    ```bash
-   git fetch origin --tags
-   git rev-parse HEAD                             # must equal the tagged commit
-   git rev-parse origin/main                      # merged commit
-   git rev-list -n 1 v<version>                   # tagged commit: must match
-   git cat-file -t v<version>                     # "tag", not "commit"
-   uv run python -c "import thunder_forge; print(thunder_forge.__version__)"
-   grep -n '^version' pyproject.toml
+   git rev-list -n 1 v<version>    # must equal the line below
+   git rev-parse origin/main
+   git cat-file -t v<version>      # "tag", not "commit"
    gh release view v<version>
    ```
