@@ -1,7 +1,7 @@
 # Daily Summary Contract
 
 **Status:** Implemented (MVP)  
-**Last Updated:** 2026-06-02  
+**Last Updated:** 2026-11-27  
 **Owner:** Thunder Forge
 
 ## Overview
@@ -48,7 +48,7 @@ Expected keys:
 - `status_code`
 - `latency_ms`
 - `olla_endpoint`
-- optional token fields: `prompt_tokens`, `completion_tokens`, `total_tokens`
+- no token fields: the edge records neither prompt nor completion tokens, so no cost per record
 
 ### Node Snapshot JSONL
 
@@ -87,9 +87,6 @@ Expected keys:
 - `consumed_ms.by_user`
 - `consumed_ms.by_node`
 - `consumed_ms.by_model`
-- `tokens.by_user` (when available)
-- `tokens.by_node` (when available)
-- `tokens.by_model` (when available)
 - `latency_ms.by_hour` (nearest-rank `p50`, `p95`, `max`, and `count` per 0-23 bucket; with
   `period=all` the buckets are hour-of-day across every retained day, not distinct days)
 - `concurrency.peak_by_hour` (maximum overlapping request intervals per 0-23 bucket; an
@@ -176,7 +173,8 @@ The SQL script emits daily tables for:
   ADR 0002 (see its MVP guardrails)
 - the edge dashboard is a read-only view over the same JSONL files, not a second store
 - edge traffic is the request source of truth for now
-- token fields are optional and consumed only when present
+- token fields exist nowhere in the log, so every `tokens.*` column the DuckDB script projects is
+  null until the edge collects them (README, Minimal Metric Strategy)
 - hot-loaded model sets come from oMLX model status snapshots
 
 ## Evolution
