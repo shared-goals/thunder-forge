@@ -3796,10 +3796,12 @@ def usage_trim_logs(
     if skipped:
         # A busy log makes the swap impossible; say so instead of reporting a quiet success.
         typer.echo(
-            "Warning: left these logs intact because they changed or could not be safely rewritten: "
+            "Warning: left these logs intact because they were rotated or could not be rewritten: "
             + ", ".join(skipped),
             err=True,
         )
+        # Retention that did not happen is not a success: let the cron wrapper see it.
+        raise typer.Exit(1)
 
 
 @olla_app.command("smoke")
