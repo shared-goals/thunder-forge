@@ -36,7 +36,7 @@ Thunder Forge is the control plane for a private inference cluster, not a librar
 These rules apply to any change on the running cluster (nodes, edge, Olla, tfconfig, deployment) as opposed to in-repo development.
 
 - The cluster serves live traffic. Default to read-only: `make status`, `make usage`, `/health`, `/status`, `/usage/report` and `/usage/events` with the admin token, and reading `logs/*.jsonl`.
-- Mutating actions need an explicit instruction for that exact target, and these lists are examples, not the whole set: `make restart`, `make sync`, `make prune`, `make bootstrap`, `make model`, `make config`, `make edge-keys` (it mints a live API key), `make usage-trim` and the `usage collect-node-metrics` collector (both delete log records past `services.log_retention_days`), installing or removing a runtime, changing `tfconfig.yaml` on a host, killing a process, changing model placement, deleting cached models. A mutating target without a node argument means every node — name the node. Propose options with trade-offs and wait for the operator's decision instead of executing them.
+- Mutating actions need an explicit instruction for that exact target, and these lists are examples, not the whole set: `make restart`, `make sync`, `make prune`, `make bootstrap`, `make model`, `make config`, `make edge-keys` (it mints a live API key), `make usage-trim` and the `usage collect-node-metrics` collector (both delete log records past `services.log_retention_days`), installing or removing a runtime, changing `tfconfig.yaml` on a host, killing a process, changing model placement, deleting cached models. `make restart`, `make bootstrap` and `make sync` given no node mean the gateway and every inference node — name the node. Propose options with trade-offs and wait for the operator's decision instead of executing them.
 - Load the operational runbook or skill for this cluster before acting on live infrastructure; do not guess hosts, ports, paths or deployment conventions.
 - Diagnose before acting: read the file-backed evidence (`logs/tf-edge-access.jsonl`, `logs/tf-node-metrics.jsonl`, Olla logs) and attribute the failing layer before proposing a fix.
 - Prefer hostname conventions (`.lan` FQDNs) over raw IPs in configs and probes.
@@ -44,13 +44,13 @@ These rules apply to any change on the running cluster (nodes, edge, Olla, tfcon
 - Keep rollback cheap: leave old config entries as comments for a one-edit rollback, and copy a node settings file before editing it.
 - Merged code is not a deployed cluster. Keep four separate statements: implemented, published (PR merged), deployed (which commit is running), observed (what the logs and `/status` show). Never report the first as evidence of the last.
 - Secrets: API keys, `TF_USER_*` values, `TF_EDGE_ADMIN_TOKEN`, SSH keys and `.env` content stay out of configs, commits, chat output, tests, docs, logs and PR bodies. They live in the repo `.env`, which `edge serve` loads; the LaunchAgent holds none. Use synthetic fixtures.
-- Model aliases are a public contract. Adding an alias is a compatible change; removing or renaming one needs a stated reason and one change that updates `tfconfig.yaml`, docs, every client configuration you know about, and a check that traffic to the old name has stopped. An alias that is merely broken for a client is worse than an alias that was never published.
+- Model aliases are a public contract. Adding an alias is a compatible change; removing or renaming one needs a stated reason and one change that updates `tfconfig.yaml`, docs, every client configuration you know about, and a check that traffic to the old name has stopped.
 - Access and node-metric logs are personal data: client ids, client IPs and usage patterns. `logs/*.jsonl` never enters Git, raw log lines do not leave the owner's machines, and no field may carry prompt content, keys or headers.
 
 ## Checks
 
 - Gate before publishing: `uv run pytest -q` and `uv run ruff check .` (`make dev-check` runs the tests plus `make dev-lint`, which covers `src/thunder_forge` and `tests`).
-- A change to a config key, a payload field, a log field or a CLI flag updates the documentation that describes it in the same PR. An undocumented field drifts within days.
+- A change to a config key, a payload field, a log field or a CLI flag updates the documentation that describes it in the same PR.
 - New non-trivial logic — a branch, a loop, a parser, a report aggregation, anything about money, privacy or data retention — ships with a test, or with an assert-based self-check when a test is impractical.
 - Anything that touches the serving path is exercised from a worktree, never from the serving checkout.
 - Say in the PR body what was verified, how it was verified, and what was not verified. Unverified claims state their limit instead of being dropped.
@@ -62,9 +62,10 @@ These rules apply to any change on the running cluster (nodes, edge, Olla, tfcon
 
 ## Versioned publication
 
-- Every change published to `main` carries a version: a bump in both `__version__` (`src/thunder_forge/__init__.py`) and `version` (`pyproject.toml`), a `CHANGELOG.md` entry, an annotated tag `v<version>` on that commit, and a GitHub release with the same notes. The four must agree.
+- One release is one version: a bump in both `__version__` (`src/thunder_forge/__init__.py`) and `version` (`pyproject.toml`), a refreshed `uv.lock`, a `CHANGELOG.md` section, an annotated tag `v<version>` on the merged commit, and a GitHub release with the same notes. Those must agree: a tag whose tree declares another version, or a lockfile another one, is a broken release.
+- A published change without a version of its own is carried by the next release; its `CHANGELOG.md` entry lands with the change, the bump and the tag with the release.
 - PATCH by default, for fixes, tests, documentation and rules that do not extend or deprecate the public contract. MINOR for a compatible addition or deprecation of that contract — a new model alias, a new endpoint, a changed payload field — or a substantial functional slice. MAJOR only after 1.0; until then an incompatible change needs an explicit contract decision and the next MINOR.
-- Merging and releasing belong to the owner: an agent stops at the merged PR and says the release is pending. The owner groups related commits into one release; each later published change gets its own version and tag. Preserve published tags.
+- Merging and releasing belong to the owner: an agent stops at the merged PR and says the release is pending. The owner cuts the release that carries the pending entries. Preserve published tags.
 - Read `docs/operations/release.md` when publishing a version: it holds the commands and the verification.
 
 ## Commit Naming
