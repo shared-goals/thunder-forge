@@ -334,7 +334,7 @@ make edge-keys EDGE_CLIENTS="opencode hindsight"
 The reverse proxy in front of the edge (Caddy on `rock`, reached through gost) must forward `/usage` and
 `/usage/assets/*` to the edge port; that proxy config lives outside this repository.
 
-Read-only usage endpoints stay disabled until `TF_EDGE_ADMIN_TOKEN` is set in the environment of `edge serve` (launchd `EnvironmentVariables` or the shell that started it). With a token, `GET /usage` serves the browser dashboard, `GET /usage/report?period=<YYYY-MM-DD|today|all>` returns the aggregated JSON, and `GET /usage/events?period=...` downloads the matching access-log lines as ndjson. While the token is unset all three answer `404 not_found`. Once it is set, `GET /usage` serves the HTML page
+Read-only usage endpoints stay disabled until `TF_EDGE_ADMIN_TOKEN` is set in the environment of `edge serve` — from the repo `.env`, which it loads, or the shell that started it, but not the launchd plist, whose environment every local process can read. With a token, `GET /usage` serves the browser dashboard, `GET /usage/report?period=<YYYY-MM-DD|today|all>` returns the aggregated JSON, and `GET /usage/events?period=...` downloads the matching access-log lines as ndjson. While the token is unset all three answer `404 not_found`. Once it is set, `GET /usage` serves the HTML page
 anonymously - it carries no data and a browser navigation cannot send an `Authorization` header - while
 `/usage/report` and `/usage/events` require `Authorization: Bearer <token>` (never a query token, which would
 leak into proxy logs) and answer `401` without it.
