@@ -82,7 +82,8 @@ Expected keys:
   are never logged, so only the client identity is ever exposed
 - `requests.total`
 - `requests.unauthenticated` (records whose `client_id` is the unauthenticated marker, e.g. a
-  rejected key or scanner traffic; kept inside `total`, named instead of silently dropped)
+  rejected key or scanner traffic; counted even when `exclude_unauthenticated` keeps them out of
+  every other breakdown, so a scanner run stays visible)
 - `requests.by_user`
 - `requests.by_node` (`"unknown"` collects records with no `X-Olla-Endpoint` attribution, so the
   bucket sums to `requests.total`)

@@ -426,10 +426,11 @@ Summary dimensions include:
 Failure and coverage signals in the same summary:
 
 - `requests.by_status`: histogram of `status_code` responses, and `failures_total` for `status_code >= 400`
+  plus any row that carries an `error_kind` — a stream that died after its headers still reads `200`
 - residual buckets keep the breakdowns honest: `requests.by_node["unknown"]` (no endpoint attribution),
   `requests.by_model["unknown"]` (empty model, for example `/v1/models`), and
-  `requests.unauthenticated` (records carrying the unauthenticated marker, non-zero only while
-  `operations.usage.exclude_unauthenticated` is off)
+  `requests.unauthenticated` (records carrying the unauthenticated marker, counted even when
+  `operations.usage.exclude_unauthenticated` keeps them out of the other breakdowns)
 - every breakdown sums to `requests.total` except the model ones, which still omit models listed in
   `operations.usage.exclude_models` by design
 - `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, so an idle hour reads

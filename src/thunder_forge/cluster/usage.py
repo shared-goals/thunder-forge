@@ -352,6 +352,9 @@ def summarize_daily_usage(
             continue
         client_id = client_id.strip()
         unauthenticated = client_id == _UNAUTHENTICATED_CLIENT_ID
+        if unauthenticated:
+            # Counted before the filter, so a scanner run stays visible while the summary is clean.
+            requests_unauthenticated += 1
         if exclude_unauthenticated and unauthenticated:
             continue
 
@@ -365,11 +368,12 @@ def summarize_daily_usage(
 
         requests_total += 1
         consumed_ms_total += latency_ms
-        if unauthenticated:
-            requests_unauthenticated += 1
         status_code = _as_non_negative_int(payload.get("status_code"))
         requests_by_status[str(status_code) if status_code is not None else "unknown"] += 1
-        if status_code is not None and status_code >= 400:
+        # A row that carries an error_kind did not complete, even when its status reads 200:
+        # a stream that died after the headers, or a client that hung up mid-stream.
+        error_kind = payload.get("error_kind")
+        if (status_code is not None and status_code >= 400) or (isinstance(error_kind, str) and error_kind):
             failures_total += 1
         # Records without an endpoint attribution still count; the residual bucket makes
         # the breakdown add up to requests.total instead of hiding them.
