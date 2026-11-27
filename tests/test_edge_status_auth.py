@@ -34,6 +34,13 @@ FORBIDDEN_ANONYMOUS_KEYS = (
     "public_host",
     "admin_url",
     "errors",
+    # live load and memory turnover, gated behind the admin token
+    "active_requests",
+    "waiting_requests",
+    "traffic_state",
+    "recently_used_models",
+    "stale_loaded_models",
+    "recent_idle_threshold_seconds",
 )
 
 
@@ -169,7 +176,17 @@ def test_anonymous_status_hides_clients_memory_layout_and_node_addressing(
     assert payload["inference"][0]["served_models"] == ["memory"]
     assert payload["gateway"]["name"] == "rock"
     assert payload["gateway"]["olla_version"] == "v0.0.27"
+    assert set(payload["summary"]) == {
+        "inference_total",
+        "inference_healthy",
+        "loaded_models",
+        "loading_models",
+        "readiness",
+        "latest_omlx_version",
+        "omlx_upgrade_hint",
+    }
     assert payload["summary"]["loaded_models"] == 1
+    assert payload["build"] == {"version": "unknown", "commit": "unknown", "dirty": "unknown"}
 
 
 def test_status_with_admin_token_returns_the_full_detail(status_config, get_status) -> None:

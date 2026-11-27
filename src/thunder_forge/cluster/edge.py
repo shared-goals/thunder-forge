@@ -1287,6 +1287,18 @@ STATUS_PUBLIC_NODE_KEYS = (
     "hot_loaded_models",
 )
 
+# The summary carries live load and memory turnover beside the readiness verdict; an anonymous
+# caller gets the readiness inputs and nothing that describes what the cluster is doing right now.
+STATUS_PUBLIC_SUMMARY_KEYS = (
+    "inference_total",
+    "inference_healthy",
+    "loaded_models",
+    "loading_models",
+    "readiness",
+    "latest_omlx_version",
+    "omlx_upgrade_hint",
+)
+
 
 def public_status_payload(payload: dict[str, object]) -> dict[str, object]:
     """Reduce a status payload to what an anonymous liveness/version check needs.
@@ -1295,7 +1307,12 @@ def public_status_payload(payload: dict[str, object]) -> dict[str, object]:
     alias, the cluster's model memory layout and access times, node hosts, admin
     URLs or per-node probe errors; the full payload needs the admin bearer token.
     """
-    public = {key: payload[key] for key in ("ok", "target", "summary", "build") if key in payload}
+    public = {key: payload[key] for key in ("ok", "target", "build") if key in payload}
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        public["summary"] = {
+            key: value for key, value in summary.items() if key in STATUS_PUBLIC_SUMMARY_KEYS
+        }
     for role in ("gateway", "cache", "inference"):
         nodes = payload.get(role)
         if isinstance(nodes, dict):

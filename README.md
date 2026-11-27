@@ -344,14 +344,22 @@ leak into proxy logs) and answer `401` without it.
 ### Status Endpoint
 
 `GET /health` and `GET /status` stay anonymous. An anonymous `GET /status` is a liveness/version check:
-`ok`, `target`, the `summary` block, and per node its `name`, `health`, `models`, `omlx_version`,
-`macos_version`, `served_models` and `hot_loaded_models` (alias names only, no sizes or access times);
-the gateway keeps `name`, `olla_version`, `latest_olla_version` and `upgrade`, and cache nodes keep `name`
-and `macos_version`. A `503` for an anonymous caller says only `status_unavailable`, without the failing
-host in the text. Live client identities (`active_edge_requests`, i.e. who is generating
-against which alias right now), the per-node `model_statuses` (`runtime_id`, `actual_size`, `idle_seconds`,
-`last_access`), node `host`/`admin_url` and per-node `errors` are only returned to a request that carries
-`Authorization: Bearer <TF_EDGE_ADMIN_TOKEN>` - the same admin token as the usage data paths. An invalid or
+
+- `ok`, `target`, `build` (version, commit, dirty — see below)
+- `summary` with `inference_total`, `inference_healthy`, `loaded_models`, `loading_models`,
+  `readiness`, `latest_omlx_version` and `omlx_upgrade_hint`
+- per node `name`, `health`, `models`, `omlx_version`, `macos_version`, `served_models` and
+  `hot_loaded_models` (alias names only, no sizes or access times); the gateway keeps `name`,
+  `olla_version`, `latest_olla_version` and `upgrade`; cache nodes keep `name` and `macos_version`
+
+A `503` for an anonymous caller says only `status_unavailable`, without the failing host in the text.
+Live client identities (`active_edge_requests`, i.e. who is generating against which alias right now),
+live load (`summary.active_requests`, `waiting_requests`, `traffic_state`), memory turnover
+(`recently_used_models`, `stale_loaded_models`, `recent_idle_threshold_seconds`), the per-node
+`model_statuses` (`runtime_id`, `actual_size`, `idle_seconds`, `last_access`), node `host`,
+`public_host` and `admin_url`, the top-level `health` block and per-node `errors` are only returned to
+a request that carries `Authorization: Bearer <TF_EDGE_ADMIN_TOKEN>` - the same admin token as the
+usage data paths. An invalid or
 missing token is treated as anonymous: it never reveals the detail and never becomes an error on this route, so
 liveness monitoring keeps working without credentials even when a token is configured. `thunder-forge cluster
 status` (`make status`) sends the token when the repo `.env` has one and otherwise prints the reduced payload.
