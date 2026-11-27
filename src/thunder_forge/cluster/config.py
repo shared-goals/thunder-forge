@@ -19,6 +19,7 @@ from thunder_forge.cluster.ports import (
     parse_port,
     resolve_port,
 )
+from thunder_forge.cluster.usage import DEFAULT_STICKY_IDLE_TTL_SECONDS
 
 TF_CONFIG_FILENAME = "tfconfig.yaml"
 TF_CONFIG_EXAMPLE_FILENAME = "tfconfig.example.yaml"
@@ -40,9 +41,6 @@ DEFAULT_SYNC_RESTART_RUNTIME = True
 DEFAULT_SMOKE_TIMEOUT = 30.0
 DEFAULT_USAGE_EXCLUDE_MODELS = ["MarkItDown"]
 DEFAULT_USAGE_EXCLUDE_UNAUTHENTICATED = False
-# Sliding window of Olla sticky sessions; usage accounting reads the same number to decide
-# when a session lost its node affinity and therefore lost its warm prefix cache.
-DEFAULT_STICKY_IDLE_TTL_SECONDS = 600
 
 
 class RuntimeType(StrEnum):

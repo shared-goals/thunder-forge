@@ -13,9 +13,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from thunder_forge.cluster.config import DEFAULT_STICKY_IDLE_TTL_SECONDS
-
 _DEFAULT_MODELS_EXCLUDED_FROM_USAGE = {"markitdown"}
+# Sliding window of Olla sticky sessions. The generated Olla config writes this number and cold/warm
+# accounting reads it, so the constant lives here: the aggregator stays importable without config.
+DEFAULT_STICKY_IDLE_TTL_SECONDS = 600
 
 
 def resolve_usage_period(raw: str) -> str:
@@ -156,7 +157,7 @@ class CacheBucket:
         }
 
 
-def _cache_latency(values: list[int]) -> dict[str, int]:
+def _latency_core(values: list[int]) -> dict[str, int]:
     return {
         "count": len(values),
         "p50": nearest_rank_percentile(values, 50),
@@ -428,12 +429,7 @@ def summarize_daily_usage(
     }
 
     latency_ms_by_hour: dict[str, dict[str, int]] = {
-        hour: {
-            "count": len(values),
-            "p50": nearest_rank_percentile(values, 50),
-            "p95": nearest_rank_percentile(values, 95),
-            "max": max(values),
-        }
+        hour: {**_latency_core(values), "max": max(values)}
         for hour, values in sorted(latency_values_by_hour.items())
     }
     peak_concurrency_by_hour: dict[str, int] = {
@@ -568,9 +564,9 @@ def summarize_daily_usage(
         cache_total=CacheBucket.from_counts(cache_total_counts),
         cache_by_hour={hour: CacheBucket.from_counts(counts) for hour, counts in sorted(cache_by_hour.items())},
         cache_by_client=cache_by_client_payload,
-        cache_latency_total={kind: _cache_latency(values) for kind, values in sorted(cache_latency_values.items())},
+        cache_latency_total={kind: _latency_core(values) for kind, values in sorted(cache_latency_values.items())},
         cache_latency_by_hour={
-            hour: {kind: _cache_latency(values) for kind, values in sorted(kinds.items())}
+            hour: {kind: _latency_core(values) for kind, values in sorted(kinds.items())}
             for hour, kinds in sorted(cache_latency_values_by_hour.items())
         },
         peak_concurrency_by_hour=peak_concurrency_by_hour,
