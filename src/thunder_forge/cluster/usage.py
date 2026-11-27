@@ -434,12 +434,12 @@ def summarize_daily_usage(
 
         session_id = payload.get("sticky_id")
         session_key = session_id.strip() if isinstance(session_id, str) else ""
+        if started_at is None:
+            # No start time: the turn cannot be placed in time, so it stays outside the split.
+            continue
         if not session_key:
             # Rule 1: least-connections may pick another node on every turn.
             cold = True
-        elif started_at is None:
-            # Rules 2 and 3 need a start time, so the turn stays outside the cold/warm split.
-            continue
         else:
             previous_started_at = last_seen_by_session.get(session_key)
             cold = _is_cold(started_at, previous_started_at)
