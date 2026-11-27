@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import hmac
 import json
-import math
 import os
 import platform
 import re
@@ -52,7 +51,13 @@ from thunder_forge.cluster.services import (
 )
 from thunder_forge.cluster.ssh import ssh_run
 from thunder_forge.cluster.status import normalize_model_statuses
-from thunder_forge.cluster.usage import extract_hot_loaded_models
+from thunder_forge.cluster.usage import (
+    extract_hot_loaded_models,
+    nearest_rank_percentile,
+    resolve_usage_period,
+    select_usage_events,
+    summarize_daily_usage,
+)
 
 STATUS_RECENT_IDLE_SECONDS = 60
 
@@ -112,6 +117,10 @@ class EdgeProxyConfig:
     status_timeout: float = 8.0
     max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
     inspector: EdgeInspectorConfig | None = None
+    # Usage endpoints stay disabled (404) until an admin token is configured.
+    usage_admin_token: str | None = None
+    usage_access_log_path: Path | None = None
+    usage_node_metrics_path: Path | None = None
 
 
 @dataclass
@@ -491,14 +500,6 @@ def _active_request_payload(config: EdgeProxyConfig) -> list[dict[str, str]]:
     return [{"client_id": client_id, "model": model} for client_id, model in requests if model]
 
 
-def _nearest_rank_percentile(values: list[int], percentile: float) -> int:
-    if not values:
-        return 0
-    sorted_values = sorted(values)
-    rank = max(1, math.ceil((percentile / 100) * len(sorted_values)))
-    return sorted_values[rank - 1]
-
-
 def summarize_edge_usage(access_log_path: Path) -> EdgeUsageSummary:
     """Summarize TF edge JSONL access logs by authenticated client id."""
     records: dict[str, dict[str, object]] = defaultdict(
@@ -578,8 +579,8 @@ def summarize_edge_usage(access_log_path: Path) -> EdgeUsageSummary:
                 failures=int(record["failures"]),
                 models=dict(models.most_common()),
                 endpoints=dict(endpoints.most_common()),
-                latency_ms_p50=_nearest_rank_percentile(latencies, 50),
-                latency_ms_p95=_nearest_rank_percentile(latencies, 95),
+                latency_ms_p50=nearest_rank_percentile(latencies, 50),
+                latency_ms_p95=nearest_rank_percentile(latencies, 95),
             )
         )
 
@@ -691,12 +692,6 @@ def _catalog_alias_ids(model_catalog: list[EdgeModelCatalogEntry]) -> set[str]:
     return {entry.id for entry in model_catalog}
 
 
-def _as_non_negative_int(raw: object) -> int | None:
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return None
-    return raw if raw >= 0 else None
-
-
 def _requests_streaming_response(method: str, body: bytes) -> bool:
     if method.upper() != "POST":
         return False
@@ -710,6 +705,202 @@ def _json_response(status_code: int, payload: dict[str, object]) -> EdgeProxyRes
         headers={"Content-Type": "application/json"},
         body=json.dumps(payload, separators=(",", ":")).encode(),
     )
+
+
+def build_usage_response(
+    *,
+    config: EdgeProxyConfig,
+    method: str,
+    raw_path: str,
+    headers: dict[str, str],
+) -> EdgeProxyResponse:
+    """Answer one /usage request: page, assets, report or raw log download."""
+    normalized_path = urlsplit(raw_path).path
+    if not usage_endpoints_enabled(config):
+        # Invisible until configured, whatever the method or path.
+        return _json_response(404, {"error": "not_found"})
+    if normalized_path == "/usage":
+        return build_usage_asset_response("usage.html") if method == "GET" else _method_not_allowed()
+    if normalized_path.startswith("/usage/assets/"):
+        if method != "GET":
+            return _method_not_allowed()
+        return build_usage_asset_response(normalized_path.removeprefix("/usage/assets/"))
+    if normalized_path not in ("/usage/report", "/usage/events"):
+        return _json_response(404, {"error": "not_found"})
+    # Authorize before anything else on the data paths, so a wrong method cannot
+    # confirm that they exist.
+    if not usage_request_authorized(config, headers):
+        return _json_response(401, {"error": "unauthorized"})
+    if method != "GET":
+        return _method_not_allowed()
+    query = parse_qs(urlsplit(raw_path).query)
+    try:
+        period = resolve_usage_period((query.get("period") or [""])[0])
+    except ValueError:
+        return _json_response(400, {"error": "invalid_period"})
+    if normalized_path == "/usage/events":
+        return _usage_events_response(config=config, query=query, period=period)
+    return _usage_report_response(config=config, period=period, client_ids=resolve_usage_clients(query))
+
+
+def _method_not_allowed() -> EdgeProxyResponse:
+    return _json_response(405, {"error": "method_not_allowed"})
+
+
+def _usage_log_size(config: EdgeProxyConfig, log_path: Path | None) -> int | None:
+    """Size of a usage log, or None when the path is not configured."""
+    if log_path is None:
+        return None
+    try:
+        return log_path.stat().st_size
+    except OSError:
+        return None
+
+
+def resolve_usage_clients(query: dict[str, list[str]]) -> list[str]:
+    """Read `?user=` filters; repeated and comma-separated values are both accepted."""
+    clients: list[str] = []
+    for value in query.get("user", []):
+        clients.extend(item.strip() for item in value.split(",") if item.strip())
+    return clients
+
+
+def _usage_report_response(
+    *,
+    config: EdgeProxyConfig,
+    period: str,
+    client_ids: list[str],
+) -> EdgeProxyResponse:
+    size = _usage_log_size(config, config.usage_access_log_path)
+    if size is None:
+        return _json_response(503, {"error": "usage_access_log_unavailable"})
+    if period == "all" and size > USAGE_LOG_MAX_BYTES:
+        # Aggregating every retained day reads the whole file into memory.
+        return _json_response(413, {"error": "usage_report_too_large"})
+    try:
+        return _json_response(
+            200,
+            build_usage_report_payload(config=config, period=period, client_ids=client_ids),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _json_response(503, {"error": f"usage_unavailable: {exc}"})
+
+
+def _usage_events_response(
+    *,
+    config: EdgeProxyConfig,
+    query: dict[str, list[str]],
+    period: str,
+) -> EdgeProxyResponse:
+    source = (query.get("source") or ["access"])[0].strip() or "access"
+    if source not in USAGE_EVENT_SOURCES:
+        return _json_response(400, {"error": "invalid_source"})
+    log_path = config.usage_access_log_path if source == "access" else config.usage_node_metrics_path
+    if log_path is None:
+        return _json_response(503, {"error": f"usage_{source.replace('-', '_')}_log_unavailable"})
+    if period == "all":
+        # Buffering every retained day would spike the process that serves inference.
+        return _json_response(400, {"error": "period_too_broad"})
+    size = _usage_log_size(config, log_path)
+    if size is None:
+        return _json_response(503, {"error": "usage_unavailable: log is unreadable"})
+    if size > USAGE_LOG_MAX_BYTES:
+        # The body is built in memory, so refuse before reading the file.
+        return _json_response(413, {"error": "usage_events_too_large"})
+    try:
+        records = select_usage_events(log_path, period=period)
+    except OSError as exc:
+        return _json_response(503, {"error": f"usage_unavailable: {exc}"})
+    body = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
+    return _bytes_response(
+        200,
+        body.encode(),
+        content_type="application/x-ndjson; charset=utf-8",
+        filename=f"{USAGE_EVENT_SOURCES[source]}-{period}.jsonl",
+    )
+
+
+def _bytes_response(
+    status_code: int,
+    body: bytes,
+    *,
+    content_type: str,
+    filename: str | None = None,
+) -> EdgeProxyResponse:
+    headers = {"Content-Type": content_type}
+    if filename is not None:
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return EdgeProxyResponse(status_code=status_code, headers=headers, body=body)
+
+
+USAGE_TOKEN_ENV = "TF_EDGE_ADMIN_TOKEN"
+USAGE_ASSETS_DIR = Path(__file__).resolve().parent / "static"
+USAGE_ASSET_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript",
+    ".txt": "text/plain; charset=utf-8",
+}
+USAGE_LOG_MAX_BYTES = 32 * 1024 * 1024
+USAGE_EVENT_SOURCES = {
+    "access": "tf-edge-access",
+    "node-metrics": "tf-node-metrics",
+}
+
+
+def usage_endpoints_enabled(config: EdgeProxyConfig) -> bool:
+    """Usage endpoints stay invisible until an admin token is configured."""
+    return bool(config.usage_admin_token)
+
+
+def usage_request_authorized(config: EdgeProxyConfig, headers: dict[str, str]) -> bool:
+    """True when the request carries the configured admin token.
+
+    Callers check `usage_endpoints_enabled` first. The token is accepted only as a bearer
+    header: a query token would end up in proxy access logs, browser history, and links.
+    """
+    provided = _bearer_token(_header_value(headers, "Authorization"))
+    expected = config.usage_admin_token or ""
+    if not provided or not expected:
+        return False
+    # compare_digest rejects non-ASCII str arguments, so compare bytes.
+    return hmac.compare_digest(provided.encode(), expected.encode())
+
+
+def build_usage_asset_response(name: str) -> EdgeProxyResponse:
+    """Serve one vendored dashboard asset, refusing anything outside the static directory."""
+    asset = USAGE_ASSETS_DIR / name
+    if name != asset.name or not asset.is_file():
+        return _json_response(404, {"error": "not_found"})
+    content_type = USAGE_ASSET_CONTENT_TYPES.get(asset.suffix, "application/octet-stream")
+    return _bytes_response(200, asset.read_bytes(), content_type=content_type)
+
+
+def build_usage_report_payload(
+    *,
+    config: EdgeProxyConfig,
+    period: str,
+    client_ids: list[str] | None = None,
+) -> dict[str, object]:
+    """Aggregate the edge logs into the payload the usage dashboard renders.
+
+    `client_ids` filters by authenticated client identity; API keys are never part of the log.
+    """
+    if config.usage_access_log_path is None:
+        raise RuntimeError("usage access log is not configured")
+    if config.cluster_config is None:
+        raise RuntimeError("usage report requires a cluster config")
+    usage_settings = config.cluster_config.operations.usage
+    summary = summarize_daily_usage(
+        config.usage_access_log_path,
+        period=period,
+        node_metrics_path=config.usage_node_metrics_path,
+        excluded_models=usage_settings.exclude_models,
+        exclude_unauthenticated=usage_settings.exclude_unauthenticated,
+        client_ids=client_ids,
+        # Configured identities, whether or not they sent anything in this period.
+        known_client_ids=sorted({client.client_id for client in config.clients_by_key.values()}),
+    )
+    return summary.to_json_dict()
 
 
 def _extract_version_token(raw_output: str) -> str:
@@ -1485,6 +1676,16 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     return
                 status_code = 200 if payload.get("ok") else 503
                 self._send_edge_response(_json_response(status_code, payload))
+                return
+            if normalized_path == "/usage" or normalized_path.startswith("/usage/"):
+                self._send_edge_response(
+                    build_usage_response(
+                        config=config,
+                        method=self.command,
+                        raw_path=self.path,
+                        headers=dict(self.headers.items()),
+                    )
+                )
                 return
             headers = dict(self.headers.items())
             try:

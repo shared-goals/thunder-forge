@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Thunder Forge usage</title>
+<script src="/usage/assets/chart.umd.min.js"></script>
+<style>
+  body { background:#14161a; color:#e8eaed; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         margin:0; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:16px 0 24px; }
+  input,button { background:#1e2126; color:#e8eaed; border:1px solid #333941; border-radius:6px;
+                 padding:6px 10px; font:inherit; }
+  button { cursor:pointer; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:20px; }
+  .card { background:#1a1d22; border:1px solid #262b33; border-radius:10px; padding:14px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:#9aa4b2;
+             margin:0 0 10px; }
+  canvas { max-height:260px; }
+  .muted { color:#8b95a3; font-size:12px; }
+  .error { color:#ff8a80; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td,th { text-align:left; padding:3px 6px; border-bottom:1px solid #262b33; }
+  th { color:#9aa4b2; font-weight:500; }
+</style>
+</head>
+<body>
+<h1>Thunder Forge usage</h1>
+<div class="muted" id="meta">loading...</div>
+<div class="bar">
+  <input id="period" size="12" placeholder="YYYY-MM-DD / all">
+  <select id="user"><option value="">all users</option></select>
+  <button id="reload">Load</button>
+  <button id="download">download access log</button>
+  <button id="downloadNode">download node samples</button>
+  <button id="forget" title="Drop the stored token">sign out</button>
+</div>
+<div class="grid">
+  <div class="card"><h2>Requests per hour by node</h2><canvas id="nodeChart"></canvas></div>
+  <div class="card"><h2>Latency p50 / p95 / max per hour</h2><canvas id="latencyChart"></canvas></div>
+  <div class="card"><h2>Peak parallel requests per hour</h2><canvas id="concurrencyChart"></canvas></div>
+  <div class="card"><h2>Node load: max active requests per hour</h2><canvas id="loadChart"></canvas></div>
+  <div class="card"><h2>Requests per hour by user</h2><canvas id="userChart"></canvas></div>
+  <div class="card"><h2>Consumed time by user</h2><canvas id="consumedChart"></canvas></div>
+  <div class="card"><h2>Requests by model</h2><canvas id="modelChart"></canvas></div>
+  <div class="card"><h2>Loaded model memory</h2><div id="memory"></div></div>
+</div>
+<script>
+const storeKey = "tf-usage-token";
+const params = new URLSearchParams(location.search);
+const el = (id) => document.getElementById(id);
+const colors = ["#4c9aff", "#7ee787", "#ffa657", "#d2a8ff", "#ff7b72", "#56d4dd"];
+const charts = {};
+
+function currentPeriod() {
+  return el("period").value.trim() || "today";
+}
+
+function token() {
+  let value = localStorage.getItem(storeKey);
+  if (!value) {
+    value = prompt("TF admin token") || "";
+    if (value) localStorage.setItem(storeKey, value);
+  }
+  return value;
+}
+const esc = (value) => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function draw(id, config) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(el(id), config);
+}
+
+const options = {
+  responsive: true,
+  interaction: { mode: "index" },
+  scales: {
+    x: { grid: { color: "#262b33" }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+    y: { grid: { color: "#262b33" }, beginAtZero: true },
+  },
+};
+const line = (datasets, labels) => ({ type: "line", data: { labels, datasets }, options });
+const bar = (labels, values, label, color, yTicks) => ({
+  type: "bar",
+  data: { labels, datasets: [{ label, data: values, backgroundColor: color }] },
+  options: yTicks
+    ? { ...options, scales: { ...options.scales, y: { ...options.scales.y, ticks: yTicks } } }
+    : options,
+});
+const series = (entries) => entries.map(([name, values], i) => ({
+  label: name,
+  data: values,
+  borderColor: colors[i % colors.length],
+  tension: 0.2,
+}));
+
+let pendingUser = params.get("user") || "";
+
+async function load() {
+  const period = currentPeriod();
+  const auth = token();
+  // ?user=<client> makes a filtered view linkable, and applies only to the first load.
+  const selectedUser = el("user").value || pendingUser;
+  const query = "?period=" + encodeURIComponent(period)
+    + (selectedUser ? "&user=" + encodeURIComponent(selectedUser) : "");
+  const response = await fetch("/usage/report" + query, {
+    headers: { Authorization: "Bearer " + auth },
+  });
+  if (!response.ok) {
+    el("meta").innerHTML = "<span class=error>HTTP " + response.status + "</span>";
+    return;
+  }
+  const data = await response.json();
+  const byHour = data.requests.by_hour || {};
+  const lat = data.latency_ms.by_hour || {};
+  const conc = data.concurrency.peak_by_hour || {};
+  const byNodeHour = data.requests.by_node_hour || {};
+  const nodeMetrics = data.node_metrics || {};
+  const loadByHour = nodeMetrics.load_by_hour || {};
+  // Node samples exist for hours with no edge traffic, so the axis is the union.
+  const hours = [...new Set([...Object.keys(byHour), ...Object.keys(loadByHour)])].sort();
+  const memory = nodeMetrics.model_memory || {};
+  const nodeIds = [...new Set(Object.keys(byNodeHour))].sort();
+  const loadNodes = [...new Set(Object.values(loadByHour).flatMap((v) => Object.keys(v)))].sort();
+
+  const selected = data.users.selected || [];
+  el("meta").textContent = [
+    data.period,
+    "requests " + data.requests.total,
+    "consumed " + (data.consumed_ms.total / 3600000).toFixed(1) + " h",
+    "nodes " + Object.keys(data.requests.by_node).length,
+    selected.length ? "user " + selected.join(", ") : "",
+    data.period === "all" ? "all days merged into hour-of-day buckets" : "",
+    selected.length ? "node load and memory stay cluster-wide" : "",
+  ].filter(Boolean).join(" \u00b7 ");
+
+  const userSelect = el("user");
+  const users = ["", ...[...new Set([...(data.users.available || []), ...(data.users.known || [])])].sort()];
+  userSelect.innerHTML = users.map((name) => (
+    "<option value=\"" + esc(name) + "\">" + esc(name || "all users") + "</option>"
+  )).join("");
+  userSelect.value = users.includes(selectedUser) ? selectedUser : "";
+  pendingUser = "";
+
+  draw("nodeChart", line(series(nodeIds.map((node) => [
+    node, hours.map((hour) => (byNodeHour[node] || {})[hour] || 0),
+  ])), hours));
+
+  draw("latencyChart", line(series([
+    ["p50 ms", hours.map((hour) => (lat[hour] || {}).p50 ?? null)],
+    ["p95 ms", hours.map((hour) => (lat[hour] || {}).p95 ?? null)],
+    ["max ms", hours.map((hour) => (lat[hour] || {}).max ?? null)],
+  ]), hours));
+
+  draw("concurrencyChart", bar(hours, hours.map((hour) => conc[hour] ?? 0),
+    "peak parallel", colors[3] + "99"));
+
+  draw("loadChart", line(series(loadNodes.map((node) => [
+    node, hours.map((hour) => ((loadByHour[hour] || {})[node] || {}).active_max || 0),
+  ])), hours));
+
+  const userHours = [...new Set(Object.values(byHour)
+    .flatMap((bucket) => Object.keys(bucket.by_user || {})))].sort();
+  draw("userChart", line(series(userHours.map((user) => [
+    user, hours.map((hour) => (((byHour[hour] || {}).by_user || {})[user] || 0)),
+  ])), hours));
+
+  const consumedByUser = data.consumed_ms.by_user || {};
+  draw("consumedChart", bar(Object.keys(consumedByUser),
+    Object.values(consumedByUser).map((ms) => +(ms / 3600000).toFixed(2)),
+    "hours", colors[4] + "99", { precision: 1, maxTicksLimit: 5 }));
+
+  const byModel = data.requests.by_model || {};
+  draw("modelChart", bar(Object.keys(byModel), Object.values(byModel),
+    "requests", colors[5] + "99"));
+
+  const rows = Object.entries(memory).flatMap(([node, models]) => Object.entries(models)
+    .map(([model, item]) => [node, model, (item.actual_size / 2 ** 30).toFixed(1), item.idle_seconds ?? "\u2013"]));
+  if (!rows.length) {
+    el("memory").innerHTML = "<span class=muted>no node samples for this period</span>";
+    return;
+  }
+  const head = "<tr><th>node</th><th>model</th><th>GiB</th><th>idle s</th></tr>";
+  const body = rows.map((row) => "<tr><td>" + row.map(esc).join("</td><td>") + "</td></tr>").join("");
+  const sampledAt = Object.values(nodeMetrics.model_memory_sampled_at || {}).sort().pop() || "";
+  const note = sampledAt
+    ? "<div class=muted>last node sample " + esc(sampledAt.slice(11, 19)) + " " + esc(sampledAt.slice(19)) + "</div>"
+    : "";
+  el("memory").innerHTML = "<table>" + head + body + "</table>" + note;
+}
+
+el("reload").onclick = load;
+el("user").onchange = load;
+async function downloadEvents(source, prefix) {
+  const period = currentPeriod();
+  const query = "?period=" + encodeURIComponent(period) + "&source=" + source;
+  const response = await fetch("/usage/events" + query, {
+    headers: { Authorization: "Bearer " + token() },
+  });
+  if (!response.ok) {
+    el("meta").innerHTML = "<span class=error>download HTTP " + response.status + "</span>";
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(await response.blob());
+  link.download = "tf-" + prefix + "-" + period + ".jsonl";
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+el("download").onclick = () => downloadEvents("access", "edge-access");
+el("downloadNode").onclick = () => downloadEvents("node-metrics", "node-metrics");
+el("forget").onclick = () => { localStorage.removeItem(storeKey); location.reload(); };
+const initial = params.get("period");
+if (initial) el("period").value = initial;
+load();
+</script>
+</body>
+</html>

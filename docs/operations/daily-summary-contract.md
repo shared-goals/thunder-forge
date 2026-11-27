@@ -63,12 +63,19 @@ Expected keys:
 - `status_ok`
 - `hot_loaded_models` (status entries where `loaded=true`, ordered by latest access)
 - `hot_loaded_count`
+- `active_requests` (oMLX status value, `null` when unavailable)
+- `waiting_requests` (oMLX status value, `null` when unavailable)
+- `loaded_models` (`id`, `actual_size` bytes, `idle_seconds` per loaded model)
 - `errors`
 
 ## Summary Contract
 
 `usage report --json` returns a summary with:
 
+- `users.available` (every client identity seen in the period, regardless of the filter),
+  `users.selected` (the applied `?user=` filter) and `users.known` (every configured
+  `TF_USER_<NAME>` identity, so a client with no traffic today is still selectable). API keys
+  are never logged, so only the client identity is ever exposed
 - `requests.total`
 - `requests.by_user`
 - `requests.by_node`
@@ -83,9 +90,50 @@ Expected keys:
 - `tokens.by_user` (when available)
 - `tokens.by_node` (when available)
 - `tokens.by_model` (when available)
+- `latency_ms.by_hour` (nearest-rank `p50`, `p95`, `max`, and `count` per 0-23 bucket; with
+  `period=all` the buckets are hour-of-day across every retained day, not distinct days)
+- `concurrency.peak_by_hour` (maximum overlapping request intervals per 0-23 bucket; an
+  interval belongs to the hour the request finished in)
+- `node_metrics.load_by_hour` (per hour and node: `samples`, `active_max`, `active_avg`,
+  `waiting_max`, taken from node snapshots)
+- `node_metrics.model_memory` (latest snapshot per node: `{model: {actual_size, idle_seconds}}`)
+- `node_metrics.model_memory_sampled_at` (snapshot `timestamp` behind each node's memory numbers)
 - `invalid_lines`
 
 `consumed_ms` is defined as sum of edge-observed `latency_ms`.
+
+## HTTP Contract
+
+The edge serves the same aggregates read-only when `TF_EDGE_ADMIN_TOKEN` is set in the
+edge environment. Without the token all three paths answer `404 not_found`, so the
+endpoints stay invisible. With the token, `GET /usage` is anonymous (the page holds no
+data, and browser navigation cannot send an `Authorization` header), while
+`/usage/report` and `/usage/events` answer `401 unauthorized` to a wrong or missing token.
+Response codes on the data paths: `401 unauthorized` without a valid token, `400 invalid_period` for a
+malformed `period`, `400 invalid_source` for an unknown `source`, `400 period_too_broad` for `period=all`
+on `/usage/events`, `413 usage_events_too_large` / `413 usage_report_too_large` when the log exceeds 32 MiB
+(checked before the file is read), and `503 usage_access_log_unavailable` when the access log is
+missing or unreadable for any period, `405 method_not_allowed` for a non-GET request that carries a valid
+token, and `503` when a log is missing or unreadable. Authentication is checked before the method on the
+data paths, so an unauthenticated request cannot confirm that they exist. `/usage` and `/usage/assets/*`
+are anonymous and GET-only.
+
+| Path | Response |
+|---|---|
+| `GET /usage` | HTML dashboard rendering the report below; Chart.js is served from `/usage/assets/chart.umd.min.js`, not a CDN |
+| `GET /usage/report?period=<YYYY-MM-DD\|today\|all>[&user=<client>[,<client>]]` | `usage report --json` payload, optionally narrowed to authenticated client identities |
+| `GET /usage/events?period=...&source=access\|node-metrics` | matching JSONL lines (`source` defaults to `access`), `Content-Disposition: attachment`; `period=all` is refused with `400 period_too_broad` |
+| `GET /usage/assets/<file>` | vendored dashboard assets (`usage.html`, `chart.umd.min.js`); `404` for anything else |
+
+`?user=` accepts a client identity, repeated or comma-separated; it narrows requests, consumed time,
+latency and concurrency. Node load and model memory come from node snapshots, which have no client
+dimension, so they stay cluster-wide - the dashboard says so when a filter is active.
+
+`period` defaults to the edge host's local date. Authentication accepts only
+`Authorization: Bearer <token>`: a `?token=` query would be recorded by the Caddy/gost
+access logs, browser history, and any pasted link.
+Aggregation honours `operations.usage.exclude_models` and
+`operations.usage.exclude_unauthenticated`, like the CLI.
 
 ## Retention Contract
 
@@ -124,7 +172,9 @@ The SQL script emits daily tables for:
 
 ## Guardrails
 
-- no PostgreSQL, no queue, no dashboard for MVP
+- no PostgreSQL, no queue, no dashboard for MVP; the read-only usage page is the exception recorded in
+  ADR 0002 (see its MVP guardrails)
+- the edge dashboard is a read-only view over the same JSONL files, not a second store
 - edge traffic is the request source of truth for now
 - token fields are optional and consumed only when present
 - hot-loaded model sets come from oMLX model status snapshots

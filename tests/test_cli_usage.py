@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from textwrap import dedent
 
@@ -68,7 +69,7 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setattr(cli_module, "_usage_report_default_period", lambda: "2026-06-02")
+    monkeypatch.setattr(cli_module, "resolve_usage_period", lambda _raw: "2026-06-02")
 
     result = runner.invoke(app, ["usage", "report", "--json"])
 
@@ -176,7 +177,7 @@ def test_usage_report_cli_excludes_unauthenticated_from_tfconfig(tmp_path: Path,
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setattr(cli_module, "_usage_report_default_period", lambda: "2026-06-02")
+    monkeypatch.setattr(cli_module, "resolve_usage_period", lambda _raw: "2026-06-02")
 
     result = runner.invoke(app, ["usage", "report", "--json"])
 
@@ -231,7 +232,7 @@ def test_usage_report_cli_text_formats_numbers_and_omits_consumed_breakdowns(tmp
     import thunder_forge.cluster.config as config_module
 
     monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
-    monkeypatch.setattr(cli_module, "_usage_report_default_period", lambda: "2026-06-02")
+    monkeypatch.setattr(cli_module, "resolve_usage_period", lambda _raw: "2026-06-02")
 
     result = runner.invoke(app, ["usage", "report"])
 
@@ -282,7 +283,8 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
             model_statuses={
                 "coder": {
                     "loaded": True,
-                    "last_access": 200.0,
+                    "last_access": time.time() - 30,
+                    "actual_size": 96680000000.4,
                 }
             },
         ),
@@ -303,6 +305,11 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
     assert "gpu_utilization" not in payload
     assert payload["health_ok"] is True
     assert payload["models_ok"] is True
+    # idle_seconds is derived from last_access: oMLX never sends it.
+    assert 29 <= payload["loaded_models"][0]["idle_seconds"] <= 120
+    assert payload["loaded_models"][0]["actual_size"] == 96680000000
+    assert payload["active_requests"] is None
+    assert payload["waiting_requests"] is None
     assert payload["hot_loaded_models"] == ["coder"]
     assert payload["hot_loaded_count"] == 1
 

@@ -4,6 +4,8 @@
 
 Accepted for MVP design.
 
+Amendment 2026-11-26: one read-only usage page (`GET /usage`) is allowed; see the guardrail exception below.
+
 ## Context
 
 ADR 0001 chose oMLX as the node-level runtime for Thunder Forge v2. The next question is the frontend/router shape once direct oMLX health is proven.
@@ -168,6 +170,13 @@ Trade-offs:
 - Keep tracing off by default.
 - Prefer structured JSON logs for accounting before adding a database.
 - Do not add PostgreSQL, a web UI, dynamic key management, or quota products until file/log-backed accounting proves insufficient.
+  - Exception agreed 2026-11-26 at the operator's request: `GET /usage` on the TF edge serves one read-only
+    HTML page over the aggregates already derived from `logs/tf-edge-access.jsonl` and
+    `logs/tf-node-metrics.jsonl`. It adds no store, no writes, and no charting backend; charts render in the
+    browser from the same JSON that `usage report --json` returns. The page itself is anonymous and holds no
+    data; `/usage/report` and `/usage/events` require `TF_EDGE_ADMIN_TOKEN` as a bearer header, and all usage
+    paths answer `404` while that token is unset. Chart.js is vendored under
+    `src/thunder_forge/cluster/static/`, so no third-party script runs against the edge origin.
 - Smoke direct oMLX first, then Olla, then TF edge, then Caddy routing.
 
 ## Acceptance criteria
