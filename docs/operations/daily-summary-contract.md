@@ -69,19 +69,23 @@ Expected keys:
 - `hot_loaded_count`
 - `active_requests` (oMLX status value, `null` when unavailable)
 - `waiting_requests` (oMLX status value, `null` when unavailable)
-- `loaded_models` (`id` alias, `actual_size` bytes, `idle_seconds` per loaded model)
+- `loaded_models` (`id` alias, or the raw runtime id when no alias is configured; `actual_size` bytes; `idle_seconds` per loaded model)
 - `errors`
 
 `hot_loaded_models` lists only aliases declared for **this node** in the cluster configuration, the
 same membership rule `GET /status` uses. A runtime entry with no configured alias is dropped when it
 holds no memory — tool adapters such as `MarkItDown` report none — and kept under its raw runtime id
 in `loaded_models` when it does, so a hand-loaded model cannot hide its footprint. A kept entry is
-named in `errors` as `no configured alias for runtime model: <id>`, which is how a drifted
-`runtime_model_id` shows up; a dropped tool adapter adds nothing to `errors`.
+named in `errors` as `no configured alias for runtime model: <id>`. That entry cannot tell a
+hand-loaded model from a `runtime_model_id` that drifted away from the configuration — both look the
+same — so expect one per node per collection run for a node that runs a hand-loaded model; a dropped tool
+adapter adds nothing to `errors`. Nothing in `usage report` reads this list: it is visible in the raw
+`logs/tf-node-metrics.jsonl` or through `usage events --source node-metrics`.
 
 `hot_loaded_models` lists every configured alias of a loaded runtime model, while `loaded_models`
 carries one row per loaded runtime model, using its first alias, so the two counts agree only when
-a runtime model has a single alias. A node that lists no models and has nothing loaded writes `hot_loaded_count: 0` and
+a runtime model has a single alias. `hot_loaded_count` counts aliases, so a kept model that has no
+alias appears in `loaded_models` only and leaves that count at `0` beside its memory row. A node that lists no models and has nothing loaded writes `hot_loaded_count: 0` and
 `loaded_models: []`, which is indistinguishable from a probe that found nothing loaded.
 
 ## Summary Contract
@@ -106,12 +110,14 @@ a runtime model has a single alias. A node that lists no models and has nothing 
 - `requests.by_hour` (all 24 hour buckets 00-23, each bucket carries `requests`, `consumed_ms`,
   `by_model`, and `by_user` so one view answers when/what/who; hours without traffic are present
   with zeros, so a silent hour is visible)
-- `requests.by_node_hour` (same 24 hour buckets per node, zero-filled the same way; a record with
-  no parsable timestamp lands in an extra `"unknown"` bucket in both hour breakdowns, so
-  `by_node_hour` still sums to `requests.total`)
-- `failures_total` (top level: records with `status_code >= 400`, plus any record whose
-  `error_kind` is a cluster failure — a stream that died after its headers keeps
-  `status_code: 200`; `client_aborted` is the client's own choice and is not counted)
+- `requests.by_node_hour` (same 24 hour buckets per node, keyed by hour of day so `period=all` sums the same hour across days, zero-filled the same way; for `period=all` a
+  record with no parsable timestamp lands in an extra `"unknown"` bucket in both hour breakdowns, so
+  `by_node_hour` still sums to `requests.total`. A dated period keeps only records whose timestamp it
+  can parse, so the sum still matches: an undated record is outside every day)
+- `failures_total` (top level: records with `status_code >= 400`, plus any record whose `error_kind`
+  is a cluster failure, so it is not the count of non-2xx rows — a stream that died after its headers
+  is recorded with the status it was given and a `stream_aborted` kind; `client_aborted` is the
+  client's own choice and is not counted)
 - `consumed_ms.total`
 - `consumed_ms.by_user`
 - `consumed_ms.by_node`
@@ -128,13 +134,16 @@ a runtime model has a single alias. A node that lists no models and has nothing 
   retained records of the period, `null` when the period holds none; they ignore the `?user=`
   filter and describe the log, not the filtered view)
 - `partial` (true when the requested period is older than the oldest day in the log — the period
-  is missing, not empty — or when it is the oldest day **and** its first record starts after
-  00:00:59; minute granularity, so a cut inside the first minute is not flagged) Retention cuts the file at an absolute `now - N days` instant, so the
-  oldest day is the only one it can truncate. The flag is a warning, not proof: an idle morning
-  looks the same as a truncated morning)
+  is missing, not empty — when the log holds no dated record at all, or when it is the oldest day
+  **and** its first record starts after 00:00:59; minute granularity, so a cut inside the first
+  minute is not flagged). Retention cuts the file at an absolute `now - N days` instant, so the
+  oldest day is the only one it can truncate; the flag is a warning, not proof, because an idle
+  morning looks the same as a truncated one
 - `invalid_lines`
 
-`consumed_ms` is defined as sum of edge-observed `latency_ms`.
+`consumed_ms` is the sum of edge-observed `latency_ms`: wall time at the edge, so a streaming request's
+time ends when the last byte reaches the client and includes client backpressure. It is not model
+service time, and it is not time a client waited in a queue in front of the edge.
 
 ## CLI Exit Codes
 
@@ -196,8 +205,8 @@ Aggregation honours `operations.usage.exclude_models` and
 Run parameterized daily SQL directly on JSONL:
 
 ```bash
-duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
-  -cmd ".param set period 2026-06-02" \
+duckdb -cmd ".mode table" -cmd ".headers on" \
+  -cmd "set variable period='2026-06-02'" \
   -f docs/operations/daily-usage-duckdb.sql
 
 # or
@@ -211,12 +220,10 @@ The SQL script emits daily tables for:
 - by hour: requests with model and user split
 - by node/hour: request split
 - by model: requests, consumed time
-
-No table carries a token count. The script used to project a `tokens` column from
-`total_tokens`/`prompt_tokens`/`completion_tokens`, which the access record does not carry: the
-column did not exist, so `read_json_auto` failed to bind and `make usage-duckdb` errored out on a
-current log. The projection is gone until the edge collects tokens.
 - node hot-loaded summary from collected snapshots
+
+No table carries a token count: the access record has no token field (see Guardrails), so the script
+projects none.
 
 ## Guardrails
 

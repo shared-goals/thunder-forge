@@ -1,6 +1,7 @@
 -- Daily usage analysis over Thunder Forge JSONL logs.
 -- Required parameter: period (YYYY-MM-DD), set via:
---   .param set period 2026-06-02
+--   set variable period = '2026-06-02';
+-- Read it as getvariable('period'); the quotes matter, or DuckDB binds 2026-06-02 as an integer.
 
 -- 1) requests by user
 with request_rows as (
@@ -11,7 +12,7 @@ with request_rows as (
         model,
         cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
-    where cast(timestamp as date) = cast($period as date)
+    where cast(timestamp as date) = cast(getvariable('period') as date)
 )
 select
     client_id,
@@ -30,7 +31,7 @@ with request_rows as (
         model,
         cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
-    where cast(timestamp as date) = cast($period as date)
+    where cast(timestamp as date) = cast(getvariable('period') as date)
 )
 select
     node_id,
@@ -50,7 +51,7 @@ with request_rows as (
         model,
         cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
-    where cast(timestamp as date) = cast($period as date)
+    where cast(timestamp as date) = cast(getvariable('period') as date)
 ),
 hour_counts as (
     select
@@ -103,7 +104,7 @@ with request_rows as (
         model,
         cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
-    where cast(timestamp as date) = cast($period as date)
+    where cast(timestamp as date) = cast(getvariable('period') as date)
 )
 select
     node_id,
@@ -123,7 +124,7 @@ with request_rows as (
         model,
         cast(latency_ms as bigint) as latency_ms
     from read_json_auto('logs/tf-edge-access.jsonl', ignore_errors=true)
-    where cast(timestamp as date) = cast($period as date)
+    where cast(timestamp as date) = cast(getvariable('period') as date)
 )
 select
     model,
@@ -141,6 +142,6 @@ select
         round(avg(cast(hot_loaded_count as double)), 2) as hot_loaded_avg,
         max(cast(hot_loaded_count as bigint)) as hot_loaded_max
 from read_json_auto('logs/tf-node-metrics.jsonl', ignore_errors=true)
-where cast(timestamp as date) = cast($period as date)
+where cast(timestamp as date) = cast(getvariable('period') as date)
 group by node_id
 order by node_id;

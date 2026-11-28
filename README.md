@@ -464,27 +464,30 @@ Summary dimensions include:
 Failure and coverage signals in the same summary:
 
 - `requests.by_status`: histogram of `status_code` responses, and `failures_total` for `status_code >= 400`
-  plus any row whose `error_kind` is a cluster failure — a stream that died after its headers still
-  reads `200`. `client_aborted` is not counted: that failure is the client's own choice
+  plus any row whose `error_kind` is a cluster failure, which is why the count is not the same as the
+  number of non-2xx rows. `client_aborted` is not counted: that failure is the client's own choice
 - residual buckets keep the breakdowns honest: `requests.by_node["unknown"]` (no endpoint attribution),
   `requests.by_model["unknown"]` (empty model, for example `/v1/models`), and
   `requests.unauthenticated` (records carrying the unauthenticated marker, counted even when
   `operations.usage.exclude_unauthenticated` keeps them out of the other breakdowns)
 - every breakdown sums to `requests.total` except the model ones, which still omit models listed in
   `operations.usage.exclude_models` by design
-- `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, so an idle hour reads
-  as a zero instead of vanishing from the day; a record with no parsable timestamp lands in an extra
-  `"unknown"` bucket instead of being dropped
+- `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, keyed by hour of day: with
+  `--period all` the same hour of different days is summed into one bucket, so 16:00 is the total of every
+  16:00 in the log, not one day's. An idle hour reads
+  as a zero instead of vanishing; with `--period all` a record with no parsable timestamp
+  lands in an extra `"unknown"` bucket instead of being dropped, while a dated period can only judge a
+  record by the timestamp it lacks, so that record is left out
 - `coverage.first_record_at` / `coverage.last_record_at` and `partial: true` when the period is older
-  than the oldest day in the log (missing, not empty) or when it is the oldest day and its first
-  record starts after the first minute, which is the day retention can truncate
+  than the oldest day in the log (missing, not empty), when the log holds no dated record at all, or
+  when it is the oldest day and its first record starts after the first minute, which is the day
+  retention can truncate
 
 Two things the summary deliberately cannot answer. The access log carries no token counts and no
 first-token timestamp, so there is no cost per client and no "how long until the answer started"
 figure; [Minimal Metric Strategy](#minimal-metric-strategy) lists the first-token timestamp still to
-collect, and nothing collects tokens at all. `consumed_ms` is wall time at the edge, so a streaming
-request's time ends when the last byte reaches the client and includes client backpressure; it is not
-model service time.
+collect, and nothing collects tokens at all. `consumed_ms` is edge-observed `latency_ms`, not model
+service time; `docs/operations/daily-summary-contract.md` carries the exact definition.
 
 ### Minimal Metric Strategy
 
@@ -591,8 +594,8 @@ Data-source decision:
 For ad hoc SQL analysis, use DuckDB directly over JSONL:
 
 ```bash
-duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
-	-cmd ".param set period 2026-06-02" \
+duckdb -cmd ".mode table" -cmd ".headers on" \
+	-cmd "set variable period='2026-06-02'" \
 	-f docs/operations/daily-usage-duckdb.sql
 
 # or
