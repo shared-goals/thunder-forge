@@ -630,3 +630,15 @@ def test_summary_counts_unauthenticated_rows_the_filter_excludes(tmp_path: Path)
 
     assert kept.requests_total == 1
     assert kept.requests_unauthenticated == 1
+
+
+def test_summary_marks_an_undated_log_as_partial_for_a_dated_period(tmp_path: Path) -> None:
+    """An empty log covers no period; reporting `partial: false` would read as a quiet day."""
+    access_log = tmp_path / "access.jsonl"
+    access_log.write_text("")
+    period = (datetime.now(UTC) - timedelta(days=2)).date().isoformat()
+
+    summary = summarize_daily_usage(access_log, period=period, excluded_models=[])
+
+    assert summary.requests_total == 0
+    assert summary.partial is True

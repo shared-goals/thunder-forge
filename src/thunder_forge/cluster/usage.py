@@ -265,7 +265,6 @@ class DailyUsageSummary:
             },
             # Records that failed on the cluster side: status_code >= 400, plus a stream that died
             # after its headers (status 200). A client abort is not counted.
-
             "failures_total": self.failures_total,
             "coverage": {
                 "first_record_at": self.coverage_first_record_at,
@@ -354,16 +353,17 @@ def summarize_daily_usage(
             continue
         client_id = client_id.strip()
         unauthenticated = client_id == _UNAUTHENTICATED_CLIENT_ID
-        if unauthenticated:
-            # Counted before the filter, so a scanner run stays visible while the summary is clean.
-            requests_unauthenticated += 1
-        if exclude_unauthenticated and unauthenticated:
-            continue
 
         latency_ms = payload.get("latency_ms")
         if not isinstance(latency_ms, int):
             invalid_lines += 1
             continue
+        if unauthenticated:
+            # Counted before the filter, so a scanner run stays visible while the summary is clean,
+            # but only for a record the summary would otherwise count.
+            requests_unauthenticated += 1
+            if exclude_unauthenticated:
+                continue
         seen_clients.add(client_id)
         if selected_clients is not None and client_id not in selected_clients:
             continue
@@ -469,9 +469,7 @@ def summarize_daily_usage(
                 hot_loaded_models = [
                     item.strip()
                     for item in raw_models
-                    if isinstance(item, str)
-                    and item.strip()
-                    and _include_model_in_usage(item, excluded_model_names)
+                    if isinstance(item, str) and item.strip() and _include_model_in_usage(item, excluded_model_names)
                 ]
             hot_loaded_count = _as_non_negative_int(payload.get("hot_loaded_count"))
             if isinstance(raw_models, list):
@@ -559,13 +557,18 @@ def summarize_daily_usage(
         partial=bool(
             period
             # A period wholly older than the retained log is missing, not empty.
-            and ((oldest_day is not None and period < oldest_day) or (
-                oldest_day == period
-                and first_record_at is not None
-                # Minute granularity on purpose: a cut landing inside the first minute is the
-                # only truncation retention can produce that close to midnight.
-                and (first_record_at.hour, first_record_at.minute) != (0, 0)
-            ))
+            and (
+                # No dated record at all: nothing covers this period, not even an empty one.
+                oldest_day is None
+                or period < oldest_day
+                or (
+                    oldest_day == period
+                    and first_record_at is not None
+                    # Minute granularity on purpose: a cut landing inside the first minute is the
+                    # only truncation retention can produce that close to midnight.
+                    and (first_record_at.hour, first_record_at.minute) != (0, 0)
+                )
+            )
         ),
         coverage_first_record_at=first_record_at.isoformat() if first_record_at is not None else None,
         coverage_last_record_at=last_record_at.isoformat() if last_record_at is not None else None,

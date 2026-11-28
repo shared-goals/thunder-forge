@@ -441,11 +441,13 @@ Failure and coverage signals in the same summary:
 - every breakdown sums to `requests.total` except the model ones, which still omit models listed in
   `operations.usage.exclude_models` by design
 - `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, so an idle hour reads
-  as a zero instead of vanishing from the day; a record with no parsable timestamp lands in an extra
-  `"unknown"` bucket instead of being dropped
+  as a zero instead of vanishing from the day; with `--period all` a record with no parsable timestamp
+  lands in an extra `"unknown"` bucket instead of being dropped, while a dated period can only judge a
+  record by the timestamp it lacks, so that record is left out
 - `coverage.first_record_at` / `coverage.last_record_at` and `partial: true` when the period is older
-  than the oldest day in the log (missing, not empty) or when it is the oldest day and its first
-  record starts after the first minute, which is the day retention can truncate
+  than the oldest day in the log (missing, not empty), when the log holds no dated record at all, or
+  when it is the oldest day and its first record starts after the first minute, which is the day
+  retention can truncate
 
 ### Minimal Metric Strategy
 
