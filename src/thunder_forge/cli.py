@@ -3845,7 +3845,7 @@ def usage_check(
         )
     except OverflowError:
         # Exit 1 is "breach": an unrepresentable window must not page anyone.
-        typer.echo(f"Error: window {window!r} or --max-staleness is too large", err=True)
+        typer.echo("Error: --window or --max-staleness is too large", err=True)
         raise typer.Exit(2)
     failure_floor = 400 if include_client_errors else 500
     requests = 0

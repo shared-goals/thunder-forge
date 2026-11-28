@@ -300,3 +300,17 @@ def test_usage_check_reads_a_log_without_any_config_beside_it(tmp_path: Path, mo
 
     assert result.exit_code == 1, result.output
     assert json.loads(result.stdout)["log_path"] == str(log)
+
+
+def test_usage_check_survives_a_log_cut_mid_character(tmp_path: Path, monkeypatch) -> None:
+    """A copy taken off the host can be truncated mid-UTF-8; that is a skipped line, not an exit 1."""
+    log = tmp_path / "copied.jsonl"
+    log.write_bytes(b'{"timestamp": "2026-11-27T10:00:00+00:00", "status_code": 200}\n\xff\xfe\n')
+
+    result = runner.invoke(
+        app, ["usage", "check", "--access-log", str(log), "--window", "9999h", "--json"]
+    )
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["requests"] == 1

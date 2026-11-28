@@ -478,9 +478,9 @@ outage, not a small sample.
 `min_requests`, `breached`, `insufficient_data`, `stale`, `statuses`, `log_path`, `checked_at`,
 `newest_record_at`. The last one is the newest record in the whole log, outside the window too.
 
-`--max-staleness 30m` turns silence into a breach: when the newest record is older than that (seconds,
-minutes or hours, like `--window`), the edge stopped writing and no request failure can show it. Leave it
-off on a cluster that is idle overnight.
+`--max-staleness` turns silence into a breach: when the newest record is older than that (seconds,
+minutes or hours, like `--window`), the edge stopped writing and no request failure can show it. Pick it
+longer than the quietest night this cluster has, or leave it off; `8h` is the cron example's choice.
 
 Each run reads the whole log file in memory, whatever retention has left; at a few thousand records a day
 that is milliseconds, and it is the reason a scheduled `usage trim-logs` matters.
@@ -496,7 +496,7 @@ Exit codes:
 Run it from a host that can read the log, for example every five minutes from cron:
 
 ```cron
-*/5 * * * * cd /mnt/samsung/thunder-forge && uv run thunder-forge usage check --window 15m --max-staleness 30m >> logs/usage-check.log 2>&1 || logger -t tf-usage-check "usage check breached"
+*/5 * * * * cd /mnt/samsung/thunder-forge && uv run thunder-forge usage check --window 15m --max-staleness 8h >> logs/usage-check.log 2>&1 || logger -t tf-usage-check "usage check exit $?"
 ```
 
 Summary dimensions include:

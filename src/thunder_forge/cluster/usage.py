@@ -112,7 +112,8 @@ def _load_jsonl_lines(path: Path) -> tuple[list[dict[str, object]], int]:
     if not path.exists():
         return records, invalid_lines
 
-    for line in path.read_text().splitlines():
+    # A log copied off a host can be cut mid-character; a decode error must not exit as a breach.
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.strip():
             continue
         try:
