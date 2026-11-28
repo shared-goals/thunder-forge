@@ -136,7 +136,7 @@ usage-duckdb:
 		echo 'duckdb is not installed. Install duckdb CLI first.'; \
 		exit 2; \
 	fi
-	duckdb -readonly -cmd ".mode table" -cmd ".headers on" -cmd ".param set period $(if $(strip $(ARG)),$(ARG),$(shell date -u +%F))" -f docs/operations/daily-usage-duckdb.sql
+	duckdb -cmd ".mode table" -cmd ".headers on" -cmd "set variable period='$(if $(strip $(ARG)),$(ARG),$(shell date +%F))'" -f docs/operations/daily-usage-duckdb.sql
 
 export:
 	$(UV) thunder-forge cluster export $(if $(strip $(ARG)),"$(ARG)")

@@ -30,7 +30,14 @@ from uuid import uuid4
 
 import httpx
 
-from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole
+from thunder_forge.cluster.config import (
+    OLLA_BACKEND_TIMEOUT_SECONDS,
+    OLLA_CONNECT_TIMEOUT_SECONDS,
+    UNKNOWN_BUILD_INFO,
+    ClusterConfig,
+    Node,
+    NodeRole,
+)
 from thunder_forge.cluster.model_aliases import map_runtime_models_to_aliases
 from thunder_forge.cluster.omlx import check_omlx_health
 from thunder_forge.cluster.ports import DEFAULT_EDGE_PORT, DEFAULT_OLLA_PORT, local_base_url, resolve_port
@@ -67,6 +74,10 @@ EDGE_DEFAULT_PORT = DEFAULT_EDGE_PORT
 EDGE_LAUNCHD_LABEL_PREFIX = "com.thunder-forge.edge"
 EDGE_DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 EDGE_MAX_STREAM_CAPTURE_BYTES = 1024 * 1024
+EDGE_DEFAULT_TIMEOUT_SECONDS = 180.0
+# A shorter edge timeout answers 504 while Olla keeps generating, so the client retries work the
+# node is still doing. The floor is Olla's connect attempt plus its backend wait.
+EDGE_MIN_TIMEOUT_SECONDS = OLLA_CONNECT_TIMEOUT_SECONDS + OLLA_BACKEND_TIMEOUT_SECONDS
 
 _ENV_LINE_RE = re.compile(
     r"^(?P<prefix>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<sep>\s*=\s*)(?P<value>.*?)(?P<suffix>\s*)$"
@@ -113,7 +124,7 @@ class EdgeProxyConfig:
     active_requests_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     model_catalog: list[EdgeModelCatalogEntry] = field(default_factory=list)
     # Leave room for Olla's 120-second backend timeouts and connection attempts.
-    timeout: float = 180.0
+    timeout: float = EDGE_DEFAULT_TIMEOUT_SECONDS
     status_timeout: float = 8.0
     max_body_bytes: int = EDGE_DEFAULT_MAX_BODY_BYTES
     inspector: EdgeInspectorConfig | None = None
@@ -121,6 +132,8 @@ class EdgeProxyConfig:
     usage_admin_token: str | None = None
     usage_access_log_path: Path | None = None
     usage_node_metrics_path: Path | None = None
+    # Resolved once at `edge serve` startup; a caller that supplies nothing publishes "unknown".
+    build: dict[str, object] = field(default_factory=lambda: dict(UNKNOWN_BUILD_INFO))
 
 
 @dataclass
@@ -237,6 +250,10 @@ class EdgeAccessLog:
     Deliberately excludes API keys and request/response bodies. Prompt content is
     private; MVP accounting only needs client/model/path/status/latency and the
     Olla endpoint attribution header when available.
+
+    The failure fields separate what one `status_code` cannot: `stream` marks a request
+    that reached the streaming path, `headers_sent` marks a failure that came after the
+    response status and headers reached the client, and `error_kind` the vocabulary below.
     """
 
     timestamp: str
@@ -249,9 +266,12 @@ class EdgeAccessLog:
     sticky_id: str = ""
     client_ip: str = ""
     olla_endpoint: str = ""
+    stream: bool = False
+    headers_sent: bool = False
+    error_kind: str = ""
 
-    def to_json_dict(self) -> dict[str, str | int]:
-        payload: dict[str, str | int] = {
+    def to_json_dict(self) -> dict[str, str | int | bool]:
+        payload: dict[str, str | int | bool] = {
             "timestamp": self.timestamp,
             "client_id": self.client_id,
             "sticky_id": self.sticky_id,
@@ -261,7 +281,10 @@ class EdgeAccessLog:
             "status_code": self.status_code,
             "client_ip": self.client_ip,
             "path": self.path,
-            "request_id": self.request_id
+            "request_id": self.request_id,
+            "stream": self.stream,
+            "headers_sent": self.headers_sent,
+            "error_kind": self.error_kind
         }
         return payload
 
@@ -610,6 +633,24 @@ def ensure_olla_session_id(headers: dict[str, str], *, request_id: str, client_i
     return EdgeSessionID(value="")
 
 
+def classify_edge_failure(exc: httpx.HTTPError, *, headers_sent: bool) -> tuple[int, str]:
+    """Map an upstream httpx failure to the client status and the log error kind.
+
+    Timeouts are the edge failing to hear from Olla in time (504); connect and
+    network errors are Olla unreachable (502). Once headers are out the client
+    already holds a partial answer, so the kind is `stream_aborted` instead.
+    """
+    # ConnectTimeout is a TimeoutException, not a ConnectError, so the connect family is
+    # asked first: a connection that never opened is unreachable Olla, not a slow answer.
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.NetworkError)):
+        status_code, error_kind = 502, "edge_connect"
+    elif isinstance(exc, httpx.TimeoutException):
+        status_code, error_kind = 504, "edge_timeout"
+    else:
+        status_code, error_kind = 502, "upstream_error"
+    return status_code, "stream_aborted" if headers_sent else error_kind
+
+
 def build_edge_access_log(
     *,
     request_id: str,
@@ -621,6 +662,9 @@ def build_edge_access_log(
     client_ip: str = "",
     sticky_id: str = "",
     olla_endpoint: str = "",
+    stream: bool = False,
+    headers_sent: bool = False,
+    error_kind: str = "",
     api_key: str = "",
 ) -> EdgeAccessLog:
     """Build a secret-free access/accounting log record."""
@@ -636,6 +680,9 @@ def build_edge_access_log(
         status_code=status_code,
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
+        stream=stream,
+        headers_sent=headers_sent,
+        error_kind=error_kind,
     )
 
 
@@ -1037,14 +1084,24 @@ def _resolve_status_targets(
     return gateway_names, cache_names, inference_names
 
 
-def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = None) -> dict[str, object]:
+def build_edge_status_payload(
+    *, config: EdgeProxyConfig, target: str | None = None, detail: bool = True
+) -> dict[str, object]:
+    """Build the status payload. `detail=False` skips the probes only a full view needs.
+
+    An anonymous caller gets liveness, so it pays for neither the SSH `sw_vers` calls nor the
+    upstream release lookups; the fields those fill read "unknown" instead.
+    """
     if config.cluster_config is None:
         raise ValueError("edge status requires cluster_config")
 
     cluster_config = config.cluster_config
     gateway_names, cache_names, inference_names = _resolve_status_targets(cluster_config, target)
-    latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
-    latest_omlx = _latest_omlx_release_version(timeout=min(config.status_timeout, 5.0))
+    if detail:
+        latest_olla = _latest_olla_release_version(timeout=min(config.status_timeout, 5.0))
+        latest_omlx = _latest_omlx_release_version(timeout=min(config.status_timeout, 5.0))
+    else:
+        latest_olla = latest_omlx = ""
 
     gateway_payload: dict[str, object] | None = None
     if gateway_names:
@@ -1070,7 +1127,11 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         {
             "name": node_id,
             "host": cluster_config.nodes[node_id].host,
-            "macos_version": _macos_version(cluster_config.nodes[node_id], timeout=config.status_timeout),
+            "macos_version": (
+                _macos_version(cluster_config.nodes[node_id], timeout=config.status_timeout)
+                if detail
+                else "unknown"
+            ),
         }
         for node_id in cache_names
     ]
@@ -1131,7 +1192,9 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
                 "health": "ok" if result.health_ok else "fail",
                 "models": "ok" if result.models_ok else "fail",
                 "omlx_version": omlx_version,
-                "macos_version": _macos_version(runtime_node, timeout=config.status_timeout),
+                "macos_version": (
+                    _macos_version(runtime_node, timeout=config.status_timeout) if detail else "unknown"
+                ),
                 "served_models": served_models,
                 "hot_loaded_models": hot_loaded_models,
                 "model_statuses": model_statuses,
@@ -1174,6 +1237,9 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         )
     elif unknown_count:
         omlx_upgrade_hint = "check (unknown versions present)"
+    elif not detail:
+        # The release lookup was skipped for this caller, so alignment is not a fact here.
+        omlx_upgrade_hint = "unknown (release lookup skipped)"
     else:
         omlx_upgrade_hint = "no (versions aligned)"
 
@@ -1185,6 +1251,7 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
     return {
         "ok": ok,
         "target": target or "all",
+        "build": dict(config.build),
         "health": {"ok": ok},
         "gateway": gateway_payload,
         "cache": cache_payloads,
@@ -1226,6 +1293,56 @@ def build_edge_status_payload(*, config: EdgeProxyConfig, target: str | None = N
         },
         "active_edge_requests": _active_request_payload(config),
     }
+
+
+STATUS_PUBLIC_NODE_KEYS = (
+    "name",
+    "health",
+    "models",
+    "olla_version",
+    "latest_olla_version",
+    "upgrade",
+    "omlx_version",
+    "macos_version",
+    "served_models",
+)
+
+# The summary carries live load and memory turnover beside the readiness verdict; an anonymous
+# caller gets the readiness inputs and nothing that describes what the cluster is doing right now.
+STATUS_PUBLIC_SUMMARY_KEYS = (
+    "inference_total",
+    "inference_healthy",
+    "loaded_models",
+    "readiness",
+    "latest_omlx_version",
+    "omlx_upgrade_hint",
+)
+
+
+def public_status_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Reduce a status payload to what an anonymous liveness/version check needs.
+
+    Anonymous callers must not learn which clients are generating against which
+    alias, the cluster's model memory layout and access times, node hosts, admin
+    URLs or per-node probe errors; the full payload needs the admin bearer token.
+    """
+    public = {key: payload[key] for key in ("ok", "target", "build") if key in payload}
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        public["summary"] = {
+            key: value for key, value in summary.items() if key in STATUS_PUBLIC_SUMMARY_KEYS
+        }
+    for role in ("gateway", "cache", "inference"):
+        nodes = payload.get(role)
+        if isinstance(nodes, dict):
+            public[role] = {key: value for key, value in nodes.items() if key in STATUS_PUBLIC_NODE_KEYS}
+        elif isinstance(nodes, list):
+            public[role] = [
+                {key: value for key, value in node.items() if key in STATUS_PUBLIC_NODE_KEYS}
+                for node in nodes
+                if isinstance(node, dict)
+            ]
+    return public
 
 
 def edge_models_payload(model_catalog: list[EdgeModelCatalogEntry]) -> dict[str, object]:
@@ -1521,6 +1638,9 @@ def _record_edge_access_event(
     status_code: int,
     started: float,
     olla_endpoint: str = "",
+    stream: bool = False,
+    headers_sent: bool = False,
+    error_kind: str = "",
 ) -> None:
     if config.access_log_sink is None:
         return
@@ -1535,6 +1655,9 @@ def _record_edge_access_event(
         status_code=status_code,
         latency_ms=latency_ms,
         olla_endpoint=olla_endpoint,
+        stream=stream,
+        headers_sent=headers_sent,
+        error_kind=error_kind,
     )
     config.access_log_sink(json.dumps(log_record.to_json_dict(), separators=(",", ":")))
 
@@ -1546,6 +1669,9 @@ def _record_edge_access(
     path: str,
     status_code: int,
     olla_endpoint: str = "",
+    stream: bool = False,
+    headers_sent: bool = False,
+    error_kind: str = "",
 ) -> None:
     _record_edge_access_event(
         config,
@@ -1558,6 +1684,9 @@ def _record_edge_access(
         status_code=status_code,
         started=upstream.started,
         olla_endpoint=olla_endpoint,
+        stream=stream,
+        headers_sent=headers_sent,
+        error_kind=error_kind,
     )
 
 
@@ -1620,14 +1749,16 @@ def proxy_edge_request(
                     path=path,
                     error=str(exc),
                 )
+            status_code, error_kind = classify_edge_failure(exc, headers_sent=False)
             _record_edge_access(
                 config,
                 upstream=upstream,
                 path=path,
-                status_code=502,
+                status_code=status_code,
+                error_kind=error_kind,
             )
             _unregister_active_request(config, upstream.request_id)
-            return _json_response(502, {"error": f"upstream_failed: {exc}"})
+            return _json_response(status_code, {"error": f"upstream_failed: {exc}"})
 
     if inspector is not None and inspector.enabled:
         _write_edge_inspector_entry(
@@ -1683,12 +1814,19 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                 if self.command != "GET":
                     self._send_edge_response(_json_response(405, {"error": "method_not_allowed"}))
                     return
+                # Same admin bearer token as /usage*: it unlocks the full detail and
+                # never turns /status into an error, so liveness monitoring stays anonymous.
+                authorized = usage_request_authorized(config, dict(self.headers.items()))
                 try:
                     target = parse_qs(urlsplit(self.path).query).get("target", [""])[0].strip() or None
-                    payload = build_edge_status_payload(config=config, target=target)
+                    payload = build_edge_status_payload(config=config, target=target, detail=authorized)
                 except (ValueError, RuntimeError, httpx.HTTPError, OSError) as exc:
-                    self._send_edge_response(_json_response(503, {"error": f"status_unavailable: {exc}"}))
+                    # The failure text names hosts and ports, so it is detail, not liveness.
+                    detail = f"status_unavailable: {exc}" if authorized else "status_unavailable"
+                    self._send_edge_response(_json_response(503, {"error": detail}))
                     return
+                if not authorized:
+                    payload = public_status_payload(payload)
                 status_code = 200 if payload.get("ok") else 503
                 self._send_edge_response(_json_response(status_code, payload))
                 return
@@ -1783,7 +1921,13 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
 
             logged = False
 
-            def record_stream(status_code: int, *, olla_endpoint: str = "") -> None:
+            def record_stream(
+                status_code: int,
+                *,
+                olla_endpoint: str = "",
+                headers_sent: bool = False,
+                error_kind: str = "",
+            ) -> None:
                 nonlocal logged
                 if logged:
                     return
@@ -1793,6 +1937,9 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                     path=self.path,
                     status_code=status_code,
                     olla_endpoint=olla_endpoint,
+                    stream=True,
+                    headers_sent=headers_sent,
+                    error_kind=error_kind,
                 )
                 logged = True
 
@@ -1820,7 +1967,12 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                             headers_sent = True
                         except OSError as exc:
                             if self._is_client_disconnect(exc):
-                                record_stream(response.status_code, olla_endpoint=olla_endpoint)
+                                record_stream(
+                                    response.status_code,
+                                    olla_endpoint=olla_endpoint,
+                                    headers_sent=headers_sent,
+                                    error_kind="client_aborted",
+                                )
                                 return
                             raise
                         for chunk in response.iter_bytes():
@@ -1834,7 +1986,12 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                                     self.wfile.flush()
                                 except OSError as exc:
                                     if self._is_client_disconnect(exc):
-                                        record_stream(response.status_code, olla_endpoint=olla_endpoint)
+                                        record_stream(
+                                            response.status_code,
+                                            olla_endpoint=olla_endpoint,
+                                            headers_sent=headers_sent,
+                                            error_kind="client_aborted",
+                                        )
                                         if captured_body is not None:
                                             _write_edge_inspector_entry(
                                                 config,
@@ -1872,11 +2029,17 @@ def serve_edge_proxy(*, host: str, port: int, config: EdgeProxyConfig) -> None:
                         path=self.path,
                         error=str(exc),
                     )
-                record_stream(502, olla_endpoint=olla_endpoint)
+                status_code, error_kind = classify_edge_failure(exc, headers_sent=headers_sent)
+                record_stream(
+                    status_code,
+                    olla_endpoint=olla_endpoint,
+                    headers_sent=headers_sent,
+                    error_kind=error_kind,
+                )
                 if headers_sent:
                     self.close_connection = True
                 else:
-                    self._send_edge_response(_json_response(502, {"error": f"upstream_failed: {exc}"}))
+                    self._send_edge_response(_json_response(status_code, {"error": f"upstream_failed: {exc}"}))
             finally:
                 _unregister_active_request(config, upstream.request_id)
 

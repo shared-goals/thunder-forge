@@ -1,11 +1,13 @@
 """Tests for config parsing, validation, and generation."""
 
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 import yaml as yaml_lib
 
+from thunder_forge import __version__
 from thunder_forge.cluster.config import (
     DEFAULT_EDGE_ACCESS_LOG,
     DEFAULT_EDGE_HOST,
@@ -15,6 +17,7 @@ from thunder_forge.cluster.config import (
     lint_cluster_config,
     load_cluster_config,
     parse_cluster_config,
+    resolve_build_info,
 )
 
 
@@ -823,6 +826,53 @@ def test_find_repo_root_ignores_node_assignments_without_tfconfig(monkeypatch, t
     assert "tfconfig.yaml" in str(exc_info.value)
 
 
+def test_resolve_build_info_reports_unknown_when_git_is_unavailable(monkeypatch, tmp_path: Path) -> None:
+    import thunder_forge.cluster.config as config_module
+
+    def _no_git(*args, **kwargs):
+        raise FileNotFoundError("git not installed")
+
+    monkeypatch.setattr(config_module.subprocess, "run", _no_git)
+
+    assert resolve_build_info(tmp_path) == {
+        "version": __version__,
+        "commit": "unknown",
+        "dirty": "unknown",
+    }
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("# branch.oid abc1234\n", {"commit": "abc1234", "dirty": "no"}),
+        ("# branch.oid abc1234\n? new.log\n", {"commit": "abc1234", "dirty": "yes"}),
+        ("# branch.oid (initial)\n", {"commit": "unknown", "dirty": "unknown"}),
+        ("", {"commit": "unknown", "dirty": "unknown"}),
+    ],
+)
+def test_resolve_build_info_reads_the_commit_and_the_tree_state(
+    monkeypatch, tmp_path: Path, stdout: str, expected: dict[str, str]
+) -> None:
+    """One git call answers both facts, and an unreadable answer is never a clean tree."""
+    import thunder_forge.cluster.config as config_module
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(config_module.subprocess, "run", fake_run)
+    (tmp_path / ".git").mkdir()
+
+    result = resolve_build_info(tmp_path)
+
+    assert result == {"version": __version__, **expected}
+    assert len(seen) == 1
+    # One call answers both facts, and -unormal keeps untracked files in the answer.
+    assert seen[0][3:] == ["status", "--porcelain=v2", "--branch", "-unormal"]
+
+
 def test_parse_model_info() -> None:
     """model_info is parsed into ModelInfo dataclass."""
     raw = {
@@ -885,3 +935,33 @@ def test_parse_model_rejects_obsolete_serving_key() -> None:
                 "nodes": {},
             }
         )
+
+
+def test_resolve_build_info_ignores_a_git_environment_pointing_elsewhere(tmp_path: Path, monkeypatch) -> None:
+    """GIT_DIR overrides -C, so an inherited one would report another repository's HEAD."""
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    subprocess.run(["git", "-C", str(other), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+    info = resolve_build_info(Path(__file__).resolve().parent.parent)
+
+    assert info["commit"] != subprocess.run(
+        ["git", "-C", str(other), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_resolve_build_info_does_not_borrow_the_enclosing_repository(tmp_path: Path) -> None:
+    """A deploy without .git sits inside some other repo on the host; its HEAD is not this code."""
+    deployed = tmp_path / "outer" / "deploy"
+    deployed.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(tmp_path / "outer")], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "outer"), "commit", "-q", "--allow-empty", "-m", "x"], check=True
+    )
+
+    info = resolve_build_info(deployed)
+
+    assert info["commit"] == "unknown"
+    assert info["dirty"] == "unknown"

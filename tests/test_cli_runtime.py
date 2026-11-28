@@ -1251,6 +1251,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
             "omlx_upgrade_hint": "no (versions aligned)",
         },
         "active_edge_requests": [{"client_id": "shag", "model": "memory"}],
+        "build": {"version": "0.2.0", "commit": "abc1234", "dirty": "no"},
     }
     monkeypatch.setattr(cli_module, "_fetch_cluster_status_payload", lambda config, *, target: payload)
 
@@ -1258,6 +1259,7 @@ def test_cluster_status_reports_inference_health(tmp_path: Path, monkeypatch) ->
 
     assert result.exit_code == 0
     assert "Thunder Forge cluster status" in result.stdout
+    assert "build: version=0.2.0 commit=abc1234 dirty=no" in result.stdout
     assert "infer-03: health=ok models=ok" in result.stdout
     assert "macos_version: 15.6.1" in result.stdout
     assert "omlx_version: 0.4.2.dev2" in result.stdout
@@ -2773,3 +2775,35 @@ def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monke
     assert "/Users/shag/.local/bin/omlx" in result.stdout
     assert "bootout" in result.stdout
     assert "bootstrap" in result.stdout
+
+
+def test_status_view_reads_counts_the_anonymous_edge_publishes() -> None:
+    """The reduced payload carries no per-model statuses; inventing zeros would read as a cold cluster."""
+    from thunder_forge.cli import _status_view
+
+    reduced = {
+        "summary": {"inference_total": 1, "inference_healthy": 1, "loaded_models": 1, "readiness": "warm"},
+        "inference": [{"name": "msm1", "health": "ok", "models": "ok"}],
+    }
+
+    view = _status_view(reduced)
+
+    assert view["loaded_count"] == 1
+    assert view["distinct_count"] == "-"
+
+
+def test_rich_status_shows_the_counts_the_anonymous_edge_publishes(capsys) -> None:
+    """The default `cluster status` must not print 0 loaded over a payload that said 1."""
+    from rich.console import Console
+
+    from thunder_forge.cli import _print_cluster_status_rich
+
+    reduced = {
+        "summary": {"inference_total": 1, "inference_healthy": 1, "loaded_models": 1, "readiness": "warm"},
+        "inference": [{"name": "msm1", "health": "ok", "models": "ok"}],
+    }
+
+    _print_cluster_status_rich(reduced, console=Console(width=200))
+
+    written = capsys.readouterr().out
+    assert "Distinct models 0" not in written
