@@ -48,6 +48,7 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
                 "model": "coder",
                 "latency_ms": 100,
                 "olla_endpoint": "msm1-omlx-live",
+                "status_code": 200,
             }
         )
         + "\n"
@@ -80,14 +81,56 @@ def test_usage_report_cli_emits_json_summary(tmp_path: Path, monkeypatch) -> Non
     assert payload["requests"]["by_user"] == {"alice": 1}
     assert payload["requests"]["by_user_model"] == {"alice": {"coder": 1}}
     assert payload["requests"]["by_node"] == {"msm1": 1}
-    assert payload["requests"]["by_node_hour"] == {"msm1": {"08": 1}}
+    by_node_hour = payload["requests"]["by_node_hour"]
+    assert len(by_node_hour["msm1"]) == 24
+    assert by_node_hour["msm1"]["08"] == 1
+    assert by_node_hour["msm1"]["04"] == 0
     assert payload["requests"]["by_model"] == {"coder": 1}
-    assert payload["requests"]["by_hour"] == {
-        "08": {"requests": 1, "consumed_ms": 100, "by_model": {"coder": 1}, "by_user": {"alice": 1}}
+    assert payload["requests"]["by_status"] == {"200": 1}
+    assert payload["failures_total"] == 0
+    assert payload["requests"]["unauthenticated"] == 0
+    assert payload["coverage"] == {
+        "first_record_at": "2026-06-02T08:15:00+00:00",
+        "last_record_at": "2026-06-02T08:15:00+00:00",
     }
+    assert payload["partial"] is True
+    by_hour = payload["requests"]["by_hour"]
+    assert len(by_hour) == 24
+    assert by_hour["08"] == {
+        "requests": 1, "consumed_ms": 100, "by_model": {"coder": 1}, "by_user": {"alice": 1}
+    }
+    assert by_hour["04"] == {"requests": 0, "consumed_ms": 0, "by_model": {}, "by_user": {}}
     assert payload["consumed_ms"]["total"] == 100
     assert payload["node_metrics"]["hot_loaded_models"] == {"msm1": ["coder", "agent"]}
     assert payload["node_metrics"]["hot_loaded_count"] == {"msm1": 2}
+
+
+def test_usage_report_cli_fails_when_the_access_log_is_missing(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    (repo / "tfconfig.yaml").write_text(
+        dedent(
+            """\
+            services:
+              edge:
+                access_log: logs/tf-edge-access.jsonl
+            models: {}
+            nodes: {}
+        """
+        )
+    )
+    (repo / "logs").mkdir()
+
+    import thunder_forge.cluster.config as config_module
+
+    monkeypatch.setattr(config_module, "find_repo_root", lambda: repo)
+
+    for args in (["usage", "report", "--json"], ["usage", "report"]):
+        result = runner.invoke(app, args)
+
+        # A missing log is an error, not a quiet day with zero requests.
+        assert result.exit_code == 2, result.output
+        assert "access log not found" in result.output
+        assert str(repo / "logs" / "tf-edge-access.jsonl") in result.output
 
 
 def test_usage_report_cli_accepts_all_period(tmp_path: Path, monkeypatch) -> None:
@@ -259,6 +302,12 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
 
     config = ClusterConfig(
         services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={
+            "coder": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.6-35B-A3B-4bit"),
+                runtime_model_id="coder",
+            ),
+        },
         nodes={
             "msm1": Node(
                 host="msm1-wifi.lan",
@@ -266,6 +315,7 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
                 roles=[NodeRole.INFERENCE],
                 user="shag",
                 runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["coder"],
             )
         },
     )
@@ -312,6 +362,57 @@ def test_usage_collect_node_metrics_writes_snapshot_jsonl(tmp_path: Path, monkey
     assert payload["waiting_requests"] is None
     assert payload["hot_loaded_models"] == ["coder"]
     assert payload["hot_loaded_count"] == 1
+
+
+def test_usage_trim_logs_warns_when_a_live_log_moved_under_it(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+    from thunder_forge.cluster.log_retention import JsonlTrimResult, LogTrimSummary
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"), nodes={})
+    path = str(repo / "logs" / "tf-edge-access.jsonl")
+    summary = LogTrimSummary(
+        retention_days=3,
+        cutoff="2026-06-02T00:00:00+00:00",
+        jsonl_results=[JsonlTrimResult(path=path, before_lines=5, after_lines=5, removed_lines=0, skipped=True)],
+        file_results=[],
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(cli_module, "trim_local_logs", lambda **kwargs: summary)
+
+    result = runner.invoke(app, ["usage", "trim-logs"])
+
+    # A skip is a retention failure, so cron must see a non-zero exit.
+    assert result.exit_code == 1, result.output
+    assert "skipped_jsonl_files: 1" in result.stdout
+    assert "Warning: left these logs intact" in result.stderr
+    assert path in result.stderr
+
+
+def test_usage_collect_node_metrics_never_trims_logs(tmp_path: Path, monkeypatch) -> None:
+    """Retention has one entry point: the collector must not rewrite a log the edge writes."""
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        nodes={},
+    )
+
+    def fake_trim(*args: object, **kwargs: object) -> object:
+        raise AssertionError("usage collect-node-metrics must not trim logs")
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(cli_module, "trim_local_logs", fake_trim)
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics", "--once"])
+
+    assert result.exit_code == 0, result.output
+    assert "trimmed_jsonl_records" not in result.stdout
+    assert "retention_days" not in result.stdout
 
 
 def test_usage_collect_node_metrics_maps_hot_loaded_runtime_ids_to_aliases(tmp_path: Path, monkeypatch) -> None:
@@ -372,3 +473,170 @@ def test_usage_collect_node_metrics_maps_hot_loaded_runtime_ids_to_aliases(tmp_p
     payload = json.loads(lines[0])
     assert payload["hot_loaded_models"] == ["agent", "agent-better"]
     assert payload["hot_loaded_count"] == 2
+
+
+def test_usage_collect_node_metrics_skips_unmanaged_runtime_entries(tmp_path: Path, monkeypatch) -> None:
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    logs_dir = repo / "logs"
+    logs_dir.mkdir()
+
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={
+            "agent": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.8-Flash-Next"),
+                runtime_model_id="Qwen3.8-Flash-Next-oQ3.5e-mtp",
+            ),
+        },
+        nodes={
+            "msm1": Node(
+                host="msm1-wifi.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["agent"],
+            )
+        },
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda *args, **kwargs: OmlxHealthResult(
+            base_url="http://msm1-wifi.lan:8018",
+            health_ok=True,
+            models_ok=True,
+            status_ok=True,
+            models=["Qwen3.8-Flash-Next-oQ3.5e-mtp", "MarkItDown"],
+            model_statuses={
+                "Qwen3.8-Flash-Next-oQ3.5e-mtp": {"loaded": True, "last_access": 100.0, "actual_size": 96680000000},
+                # MarkItDown is a tool entry the runtime reports with zero memory; it is not a
+                # model of this cluster and used to inflate hot_loaded_count.
+                "MarkItDown": {"loaded": True, "last_access": 100.0, "actual_size": 0},
+            },
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics"])
+
+    assert result.exit_code == 0
+    payload = json.loads((logs_dir / "tf-node-metrics.jsonl").read_text().splitlines()[0])
+    assert payload["hot_loaded_models"] == ["agent"]
+    assert payload["hot_loaded_count"] == 1
+    assert [entry["id"] for entry in payload["loaded_models"]] == ["agent"]
+    # A tool adapter with no memory is dropped and no longer counts as a node error.
+    assert payload["errors"] == []
+
+
+def test_usage_collect_node_metrics_keeps_an_unaliased_model_that_holds_memory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A hand-loaded model must not hide its footprint just because it has no configured alias."""
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={},
+        nodes={
+            "msm1": Node(
+                host="msm1-wifi.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=[],
+            )
+        },
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda *args, **kwargs: OmlxHealthResult(
+            base_url="http://msm1-wifi.lan:8018",
+            health_ok=True,
+            models_ok=True,
+            status_ok=True,
+            models=["mlx-community/hand-loaded"],
+            model_statuses={
+                "mlx-community/hand-loaded": {"loaded": True, "last_access": 100.0, "actual_size": 40 * 1024**3},
+            },
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads((repo / "logs" / "tf-node-metrics.jsonl").read_text().splitlines()[0])
+    assert payload["hot_loaded_models"] == []
+    assert payload["hot_loaded_count"] == 0
+    assert payload["loaded_models"][0]["id"] == "mlx-community/hand-loaded"
+    assert payload["loaded_models"][0]["actual_size"] == 40 * 1024**3
+    assert payload["errors"] == [
+        "no configured alias for runtime model: mlx-community/hand-loaded"
+    ]
+
+
+def test_usage_collect_node_metrics_counts_aliases_not_rows(tmp_path: Path, monkeypatch) -> None:
+    """Two aliases on one runtime id: hot_loaded_count counts aliases, loaded_models has one row."""
+    import thunder_forge.cli as cli_module
+
+    repo = tmp_path
+    (repo / "logs").mkdir()
+    config = ClusterConfig(
+        services=ServiceConfig(edge_access_log="logs/tf-edge-access.jsonl"),
+        models={
+            "stable": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.8-Flash-Next"),
+                runtime_model_id="Qwen3.8-Flash-Next-oQ3.5e-mtp",
+            ),
+            "agent": Model(
+                source=ModelSource(type="huggingface", repo="mlx-community/Qwen3.8-Flash-Next"),
+                runtime_model_id="Qwen3.8-Flash-Next-oQ3.5e-mtp",
+            ),
+        },
+        nodes={
+            "msm1": Node(
+                host="msm1-wifi.lan",
+                ram_gb=128,
+                roles=[NodeRole.INFERENCE],
+                user="shag",
+                runtime=NodeRuntime(type=RuntimeType.OMLX, port=8018),
+                models=["stable", "agent"],
+            )
+        },
+    )
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (config, repo), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "check_omlx_health",
+        lambda *args, **kwargs: OmlxHealthResult(
+            base_url="http://msm1-wifi.lan:8018",
+            health_ok=True,
+            models_ok=True,
+            status_ok=True,
+            models=["Qwen3.8-Flash-Next-oQ3.5e-mtp"],
+            model_statuses={
+                "Qwen3.8-Flash-Next-oQ3.5e-mtp": {"loaded": True, "last_access": 100.0, "actual_size": 96680000000},
+            },
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["usage", "collect-node-metrics"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads((repo / "logs" / "tf-node-metrics.jsonl").read_text().splitlines()[0])
+    assert payload["hot_loaded_models"] == ["stable", "agent"]
+    assert payload["hot_loaded_count"] == 2
+    assert [entry["id"] for entry in payload["loaded_models"]] == ["stable"]

@@ -26,6 +26,7 @@ from thunder_forge.cluster.edge import (
     build_edge_access_log,
     build_edge_clients_from_env,
     build_edge_status_payload,
+    classify_edge_failure,
     edge_api_key_from_env,
     edge_models_payload,
     ensure_edge_api_keys,
@@ -298,6 +299,40 @@ def test_build_edge_status_payload_reports_cluster_snapshot(monkeypatch, tmp_pat
     assert any(f"idle={idle} ram=13.0G" in line for line in plain_output)
 
 
+@pytest.mark.parametrize(
+    ("build", "expected"),
+    [
+        (
+            {"version": "0.2.0", "commit": "abc1234", "dirty": "yes"},
+            {"version": "0.2.0", "commit": "abc1234", "dirty": "yes"},
+        ),
+        (None, {"version": "unknown", "commit": "unknown", "dirty": "unknown"}),
+    ],
+)
+def test_build_edge_status_payload_reports_the_running_build(monkeypatch, build, expected) -> None:
+    """A supplied build is published as is; a caller that supplies none publishes unknown."""
+    import thunder_forge.cluster.edge as edge_module
+
+    cluster_config = ClusterConfig(
+        services=ServiceConfig(edge_port=40116, olla_port=40115),
+        nodes={"rock": Node(host="rock.lan", ram_gb=32, roles=[NodeRole.GATEWAY], user="shag")},
+    )
+    config = EdgeProxyConfig(
+        olla_base_url="http://rock.lan:40115",
+        clients_by_key={},
+        cluster_config=cluster_config,
+        **({} if build is None else {"build": build}),
+    )
+
+    monkeypatch.setattr(edge_module, "_latest_olla_release_version", lambda *, timeout=5.0: "v0.0.28")
+    monkeypatch.setattr(edge_module, "_latest_omlx_release_version", lambda *, timeout=5.0: "")
+    monkeypatch.setattr(edge_module, "_gateway_olla_version", lambda _config: "v0.0.28")
+
+    payload = build_edge_status_payload(config=config)
+
+    assert payload["build"] == expected
+
+
 def test_build_edge_status_payload_hides_unmanaged_runtime_ids(monkeypatch, tmp_path) -> None:
     import thunder_forge.cluster.edge as edge_module
 
@@ -408,6 +443,9 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
     assert payload["status_code"] == 200
     assert payload["latency_ms"] == 42
     assert payload["olla_endpoint"] == "infer-03-omlx-live"
+    assert payload["stream"] is False
+    assert payload["headers_sent"] is False
+    assert payload["error_kind"] == ""
     assert "api_key" not in payload
     assert "dev-secret" not in str(payload)
     assert list(payload) == [
@@ -421,12 +459,29 @@ def test_access_log_contains_accounting_fields_and_no_api_key() -> None:
         "client_ip",
         "path",
         "request_id",
+        "stream",
+        "headers_sent",
+        "error_kind",
     ]
 
     serialized = json.dumps(payload, separators=(",", ":"))
     assert serialized.startswith('{"timestamp":"')
     assert '"olla_endpoint":"infer-03-omlx-live"' in serialized
-    assert serialized.endswith(',"request_id":"req-1"}')
+    assert serialized.endswith(',"request_id":"req-1","stream":false,"headers_sent":false,"error_kind":""}')
+
+
+def test_classify_edge_failure_maps_the_closed_vocabulary() -> None:
+    request = httpx.Request("POST", "http://olla.test/v1/chat/completions")
+    cases = [
+        (httpx.ReadTimeout("fixture", request=request), False, 504, "edge_timeout"),
+        (httpx.ConnectError("fixture", request=request), False, 502, "edge_connect"),
+        (httpx.ConnectTimeout("fixture", request=request), False, 502, "edge_connect"),
+        (httpx.RemoteProtocolError("fixture", request=request), False, 502, "upstream_error"),
+        (httpx.ReadTimeout("fixture", request=request), True, 504, "stream_aborted"),
+        (httpx.ConnectError("fixture", request=request), True, 502, "stream_aborted"),
+    ]
+    for exc, headers_sent, status_code, error_kind in cases:
+        assert classify_edge_failure(exc, headers_sent=headers_sent) == (status_code, error_kind)
 
 
 def test_proxy_edge_request_rejects_missing_and_invalid_auth_without_calling_olla() -> None:
@@ -819,6 +874,9 @@ def test_proxy_edge_request_logs_forwarded_client_ip() -> None:
     assert result.status_code == 200
     logged = json.loads(logs[0])
     assert logged["client_ip"] == "203.0.113.10"
+    assert logged["stream"] is False
+    assert logged["headers_sent"] is False
+    assert logged["error_kind"] == ""
 
 
 def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
@@ -848,7 +906,40 @@ def test_proxy_edge_request_logs_upstream_failures_without_secret() -> None:
     assert logged["client_id"] == "client-a"
     assert logged["model"] == "memory"
     assert logged["status_code"] == 502
+    assert logged["stream"] is False
+    assert logged["headers_sent"] is False
+    assert logged["error_kind"] == "edge_connect"
     assert "dev-secret" not in logs[0]
+
+
+def test_proxy_edge_request_logs_upstream_timeout_as_504() -> None:
+    logs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("fixture read timeout", request=request)
+
+    config = EdgeProxyConfig(
+        olla_base_url="http://olla.local:40115",
+        clients_by_key={"dev-secret": EdgeClient(client_id="client-a")},
+        access_log_sink=logs.append,
+    )
+
+    result = proxy_edge_request(
+        method="POST",
+        path="/v1/chat/completions",
+        headers={"Authorization": "Bearer dev-secret", "Content-Type": "application/json"},
+        body=json.dumps({"model": "memory", "messages": []}).encode(),
+        config=config,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status_code == 504
+    assert len(logs) == 1
+    logged = json.loads(logs[0])
+    assert logged["status_code"] == 504
+    assert logged["error_kind"] == "edge_timeout"
+    assert logged["headers_sent"] is False
+    assert config.active_requests == {}
 
 
 def test_proxy_edge_request_writes_inspector_request_response_entries(tmp_path: Path) -> None:
