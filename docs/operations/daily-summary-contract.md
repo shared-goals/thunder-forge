@@ -69,15 +69,17 @@ Expected keys:
 - `hot_loaded_count`
 - `active_requests` (oMLX status value, `null` when unavailable)
 - `waiting_requests` (oMLX status value, `null` when unavailable)
-- `loaded_models` (`id` alias, `actual_size` bytes, `idle_seconds` per loaded model)
+- `loaded_models` (`id` alias, or the raw runtime id when no alias is configured; `actual_size` bytes; `idle_seconds` per loaded model)
 - `errors`
 
 `hot_loaded_models` lists only aliases declared for **this node** in the cluster configuration, the
 same membership rule `GET /status` uses. A runtime entry with no configured alias is dropped when it
 holds no memory — tool adapters such as `MarkItDown` report none — and kept under its raw runtime id
 in `loaded_models` when it does, so a hand-loaded model cannot hide its footprint. A kept entry is
-named in `errors` as `no configured alias for runtime model: <id>`, which is how a drifted
-`runtime_model_id` shows up; a dropped tool adapter adds nothing to `errors`.
+named in `errors` as `no configured alias for runtime model: <id>`. That entry cannot tell a
+hand-loaded model from a `runtime_model_id` that drifted away from the configuration — both look the
+same — so expect one per node and per day for a node that runs a hand-loaded model; a dropped tool
+adapter adds nothing to `errors`.
 
 `hot_loaded_models` lists every configured alias of a loaded runtime model, while `loaded_models`
 carries one row per loaded runtime model, using its first alias, so the two counts agree only when
