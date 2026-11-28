@@ -115,6 +115,7 @@ from thunder_forge.cluster.usage import (
     _as_non_negative_int,
     _parse_timestamp,
     extract_hot_loaded_models,
+    is_cluster_failure,
     resolve_usage_period,
     select_usage_events,
     summarize_daily_usage,
@@ -3802,7 +3803,6 @@ def usage_check(
     ),
 ) -> None:
     """Check recent edge failures against a threshold. Exit 1 on breach, 2 on error."""
-    config, repo_root = _load_config()
     try:
         window_seconds = _parse_usage_check_window(window)
     except ValueError:
@@ -3821,7 +3821,12 @@ def usage_check(
         except ValueError:
             typer.echo(f"Error: invalid --max-staleness {max_staleness!r}, expected like 15m or 2h", err=True)
             raise typer.Exit(2)
-    log_path = _edge_access_log_path(repo_root, config, access_log)
+    if access_log is not None:
+        # An explicit log needs no config: checking a copy taken off the host is the point.
+        log_path = access_log
+    else:
+        config, repo_root = _load_config()
+        log_path = _edge_access_log_path(repo_root, config, None)
     if not log_path.is_file():
         # A missing or mistyped log must not look like a healthy cluster.
         typer.echo(f"Error: access log not found: {log_path}", err=True)
@@ -3835,8 +3840,12 @@ def usage_check(
     checked_at = datetime.now().astimezone()
     try:
         cutoff = checked_at - timedelta(seconds=window_seconds)
+        stale_cutoff = (
+            checked_at - timedelta(seconds=max_staleness_seconds) if max_staleness_seconds is not None else None
+        )
     except OverflowError:
-        typer.echo(f"Error: window {window!r} is too large", err=True)
+        # Exit 1 is "breach": an unrepresentable window must not page anyone.
+        typer.echo(f"Error: window {window!r} or --max-staleness is too large", err=True)
         raise typer.Exit(2)
     failure_floor = 400 if include_client_errors else 500
     requests = 0
@@ -3856,21 +3865,14 @@ def usage_check(
             continue
         requests += 1
         statuses[str(status_code)] += 1
-        # Same rule `usage report` counts with: a stream that died after its headers keeps
-        # status_code 200, and a client hanging up is not a cluster failure.
-        error_kind = record.get("error_kind")
-        cluster_failure = isinstance(error_kind, str) and error_kind not in ("", "client_aborted")
-        if cluster_failure or status_code >= failure_floor:
+        if is_cluster_failure(record) or status_code >= failure_floor:
             failures += 1
 
     failure_rate = failures / requests if requests else 0.0
     # Too few requests to judge a rate, unless everything that did arrive failed: an all-failure
     # window is the shape a real outage has on a quiet cluster.
     insufficient_data = requests < min_requests and (requests == 0 or failures < requests)
-    stale = max_staleness_seconds is not None and (
-        newest_record_at is None
-        or newest_record_at < checked_at - timedelta(seconds=max_staleness_seconds)
-    )
+    stale = stale_cutoff is not None and (newest_record_at is None or newest_record_at < stale_cutoff)
     breached = stale or (not insufficient_data and failure_rate > max_failure_rate)
 
     if json_output:

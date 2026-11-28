@@ -463,7 +463,8 @@ make usage-check 15m
 ```
 
 `usage check` reads the log resolved from `services.edge.access_log` (default `logs/tf-edge-access.jsonl`),
-or `--access-log <path>`, keeps the records whose `timestamp` falls inside `--window` (default `15m`;
+or `--access-log <path>` (which needs no `tfconfig.yaml` beside the copy), keeps the records whose
+`timestamp` falls inside `--window` (default `15m`;
 suffix `s`, `m`, or `h`), and compares the failure ratio against `--max-failure-rate` (default `0.05`).
 A record counts as a failure when `status_code >= 500`, when `--include-client-errors` widens the floor
 to `>= 400`, or when it carries a cluster `error_kind` — the same `error_kind` rule `usage report` counts
@@ -474,7 +475,7 @@ five percent) and is rejected outside `0…1`. Below `--min-requests` (default `
 outage, not a small sample.
 
 `--json` prints one object: `window_seconds`, `requests`, `failures`, `failure_rate`, `threshold`,
-`min_requests`, `breached`, `insufficient_data`, `statuses`, `log_path`, `checked_at`,
+`min_requests`, `breached`, `insufficient_data`, `stale`, `statuses`, `log_path`, `checked_at`,
 `newest_record_at`. The last one is the newest record in the whole log, outside the window too.
 
 `--max-staleness 30m` turns silence into a breach: when the newest record is older than that (seconds,
@@ -488,6 +489,8 @@ Exit codes:
 
 - `0`: healthy, or too few requests in the window to judge
 - `1`: breach — the failure rate is over the threshold, or the log is staler than `--max-staleness`
+  (`make usage-check` reports a breach as make's own exit `2`, so a wrapper that needs the three
+  codes calls `uv run thunder-forge usage check` directly, as the cron line below does)
 - `2`: operator error: a missing or unreadable access log, an invalid `--window` or `--max-staleness`, a `--max-failure-rate` outside `0…1`, or a negative `--min-requests`
 
 Run it from a host that can read the log, for example every five minutes from cron:

@@ -164,6 +164,16 @@ def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
     return peak
 
 
+def is_cluster_failure(record: dict[str, object]) -> bool:
+    """True when the edge, not the client, failed the exchange.
+
+    A stream that died after its headers keeps `status_code: 200`, so the error kind is what says
+    the request did not complete. `client_aborted` is the client's own decision, not a failure.
+    """
+    error_kind = record.get("error_kind")
+    return isinstance(error_kind, str) and error_kind not in ("", "client_aborted")
+
+
 def _as_non_negative_int(raw: object) -> int | None:
     """Accept ints and finite floats; oMLX reports sizes as either."""
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
@@ -375,9 +385,7 @@ def summarize_daily_usage(
         # A stream that died after its headers keeps status_code 200, so the error kind is what
         # says the request did not complete. `client_aborted` is the client's decision, not a
         # cluster failure, so it stays out of this count.
-        error_kind = payload.get("error_kind")
-        cluster_failure = isinstance(error_kind, str) and error_kind not in ("", "client_aborted")
-        if cluster_failure or (status_code is not None and status_code >= 400):
+        if is_cluster_failure(payload) or (status_code is not None and status_code >= 400):
             failures_total += 1
         # Records without an endpoint attribution still count; the residual bucket makes
         # the breakdown add up to requests.total instead of hiding them.

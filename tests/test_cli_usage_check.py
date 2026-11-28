@@ -274,3 +274,29 @@ def test_usage_check_rejects_a_nan_failure_rate(tmp_path: Path, monkeypatch) -> 
 
     assert result.exit_code == 2
     assert "ratio between 0 and 1" in result.stderr
+
+
+def test_usage_check_rejects_a_staleness_window_too_large_for_a_timestamp(tmp_path: Path, monkeypatch) -> None:
+    """An unrepresentable window must exit 2, never 1 — exit 1 reads as a real breach in cron."""
+    _repo_with_access_log(tmp_path, monkeypatch, [_record(200, 1)])
+
+    result = runner.invoke(app, ["usage", "check", "--max-staleness", "99999999999999999999h"])
+
+    assert result.exit_code == 2
+    assert "too large" in result.stderr
+
+
+def test_usage_check_reads_a_log_without_any_config_beside_it(tmp_path: Path, monkeypatch) -> None:
+    """Checking a copy taken off the host must not need a tfconfig.yaml."""
+    import thunder_forge.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "_load_config", lambda: (_ for _ in ()).throw(AssertionError("config loaded")))
+    log = tmp_path / "copied.jsonl"
+    log.write_text(json.dumps(_record(502, 1)) + "\n")
+
+    result = runner.invoke(
+        app, ["usage", "check", "--access-log", str(log), "--min-requests", "1", "--json"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["log_path"] == str(log)
