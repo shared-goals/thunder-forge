@@ -45,8 +45,10 @@ from thunder_forge.cluster.bootstrap import (
     ensure_olla_binary,
     write_generated_olla_config,
 )
-from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig
+from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig, resolve_build_info
 from thunder_forge.cluster.edge import (
+    EDGE_DEFAULT_TIMEOUT_SECONDS,
+    EDGE_MIN_TIMEOUT_SECONDS,
     EDGE_USER_PREFIX,
     USAGE_TOKEN_ENV,
     EdgeInspectorConfig,
@@ -313,28 +315,6 @@ def _usage_metrics_log_path(repo_root: Path, metrics_log: Path | None) -> Path:
     return _repo_relative_path(repo_root, metrics_log)
 
 
-def _trim_logs_with_policy(
-    *,
-    repo_root: Path,
-    config: ClusterConfig,
-    node_metrics_path: Path,
-    retention_days: int | None,
-) -> tuple[int, int, int]:
-    days = retention_days if retention_days is not None else config.services.log_retention_days
-    if days <= 0:
-        typer.echo("Error: retention days must be positive", err=True)
-        raise typer.Exit(1)
-    summary = trim_local_logs(
-        repo_root=repo_root,
-        config=config,
-        node_metrics_log_path=node_metrics_path,
-        retention_days=days,
-    )
-    jsonl_removed = sum(result.removed_lines for result in summary.jsonl_results)
-    file_removed = sum(1 for result in summary.file_results if result.removed)
-    return days, jsonl_removed, file_removed
-
-
 def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> list[dict[str, object]]:
     snapshots: list[dict[str, object]] = []
     for node_id, node in sorted(config.compute_nodes.items()):
@@ -343,15 +323,28 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         base_url = f"http://{node.host}:{_runtime(node).port}"
         health = check_omlx_health(base_url, timeout=timeout, include_models=True)
         hot_loaded_runtime_ids = extract_hot_loaded_models(health.model_statuses)
-        hot_loaded_models = map_runtime_models_to_aliases(config, node, hot_loaded_runtime_ids)
+        hot_loaded_models = map_runtime_models_to_aliases(
+            config, node, hot_loaded_runtime_ids, include_unmanaged=False
+        )
+        # Same membership rule as `include_unmanaged=False` above: `runtime_model_aliases` is
+        # keyed only by models configured for this node, so an unmanaged entry has no key here.
         aliases_by_runtime = runtime_model_aliases(config, node)
         loaded_models: list[dict[str, object]] = []
+        errors = list(health.errors)
         sampled_at = time.time()
         for runtime_id, status in sorted(health.model_statuses.items()):
             if not isinstance(status, dict) or status.get("loaded") is not True:
                 continue
-            entry: dict[str, object] = {"id": (aliases_by_runtime.get(runtime_id) or [runtime_id])[0]}
             actual_size = _as_non_negative_int(status.get("actual_size"))
+            # A runtime entry with no configured alias is a tool adapter (MarkItDown reports no
+            # memory) or a drifted model. Memory is the tell: an entry holding RAM stays in the
+            # snapshot under its raw runtime id, so a hand-loaded model cannot hide the footprint.
+            aliases = aliases_by_runtime.get(runtime_id)
+            if not aliases and not actual_size:
+                continue
+            if not aliases:
+                errors.append(f"no configured alias for runtime model: {runtime_id}")
+            entry: dict[str, object] = {"id": aliases[0] if aliases else runtime_id}
             if actual_size is not None:
                 entry["actual_size"] = actual_size
             # oMLX reports last_access; idle time is derived, never sent by the node.
@@ -371,7 +364,7 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
                 "active_requests": health.active_requests,
                 "waiting_requests": health.waiting_requests,
                 "loaded_models": loaded_models,
-                "errors": health.errors,
+                "errors": errors,
             }
         )
     return snapshots
@@ -2310,10 +2303,22 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
         console.print(model_table)
         console.print()
 
+
+def _build_line(build: object) -> str:
+    """The one spelling of the build line, shared by serve and by `cluster status`."""
+    values = build if isinstance(build, dict) else {}
+    return (
+        f"build: version={values.get('version', 'unknown')}"
+        f" commit={values.get('commit', 'unknown')}"
+        f" dirty={values.get('dirty', 'unknown')}"
+    )
+
+
 def _print_cluster_status_payload(
     payload: dict[str, object], *, config: ClusterConfig, plain: bool = False
 ) -> None:
     if not plain and sys.stdout.isatty():
+        typer.echo(_build_line(payload.get("build")))
         _print_cluster_status_rich(payload, console=Console())
         return
     view = _status_view(payload)
@@ -2321,6 +2326,7 @@ def _print_cluster_status_payload(
     gateway = payload.get("gateway")
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {payload.get('target', 'all')}")
+    typer.echo(_build_line(payload.get("build")))
     typer.echo("")
     typer.echo("summary:")
     typer.echo(f"  nodes: {view['healthy_count']}/{len(view['inference_nodes'])} healthy")
@@ -3667,6 +3673,10 @@ def usage_report(
     except ValueError:
         typer.echo(f"Error: invalid period {period!r}, expected YYYY-MM-DD, today, or all", err=True)
         raise typer.Exit(1)
+    if not access_log_path.exists():
+        # A missing or mistyped log must not look like a quiet day with zero traffic.
+        typer.echo(f"Error: access log not found: {access_log_path}", err=True)
+        raise typer.Exit(2)
     summary = summarize_daily_usage(
         access_log_path,
         period=period,
@@ -3689,8 +3699,13 @@ def usage_report(
         return f"{value:,}"
 
     typer.echo(f"requests_total: {_fmt_number(summary.requests_total)}")
+    typer.echo(f"failures_total: {_fmt_number(summary.failures_total)}")
+    typer.echo(f"unauthenticated: {_fmt_number(summary.requests_unauthenticated)}")
     typer.echo(f"consumed_ms_total: {_fmt_number(summary.consumed_ms_total)}")
     typer.echo(f"invalid_lines: {_fmt_number(summary.invalid_lines)}")
+    typer.echo(f"first_record_at: {summary.coverage_first_record_at or '-'}")
+    typer.echo(f"last_record_at: {summary.coverage_last_record_at or '-'}")
+    typer.echo(f"partial: {str(summary.partial).lower()}")
 
     def _print_mapping(title: str, mapping: dict[str, int]) -> None:
         typer.echo(f"{title}:")
@@ -3710,6 +3725,7 @@ def usage_report(
                 typer.echo(f"      {model}: {_fmt_number(count)}")
     _print_mapping("requests_by_node", summary.requests_by_node)
     _print_mapping("requests_by_model", summary.requests_by_model)
+    _print_mapping("requests_by_status", summary.requests_by_status)
     typer.echo("requests_by_hour:")
     if not summary.requests_by_hour:
         typer.echo("  []")
@@ -3745,11 +3761,6 @@ def usage_collect_node_metrics(
         "--continuous/--once",
         help="Run continuously. Default is one collection run.",
     ),
-    retention_days: int | None = typer.Option(
-        None,
-        "--retention-days",
-        help="Override log retention days. Defaults to tfconfig services.log_retention_days (3).",
-    ),
 ) -> None:
     """Collect usage snapshots per inference node for hot-loaded model reporting."""
     config, repo_root = _load_config()
@@ -3762,22 +3773,14 @@ def usage_collect_node_metrics(
 
     while True:
         run_count += 1
-        days, jsonl_removed, file_removed = _trim_logs_with_policy(
-            repo_root=repo_root,
-            config=config,
-            node_metrics_path=metrics_path,
-            retention_days=retention_days,
-        )
-
+        # No retention here: `usage trim-logs` is the only trimmer, so this collector never
+        # rewrites a log the edge is appending to.
         snapshots = _collect_node_metric_snapshots(config, timeout=timeout)
         _append_snapshots(metrics_path, snapshots)
 
         typer.echo(f"output: {metrics_path}")
         typer.echo(f"run: {run_count}")
         typer.echo(f"samples_written: {len(snapshots)}")
-        typer.echo(f"retention_days: {days}")
-        typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-        typer.echo(f"pruned_log_files: {file_removed}")
         _print_snapshot_summary(snapshots)
 
         if not continuous:
@@ -3801,16 +3804,30 @@ def usage_trim_logs(
 ) -> None:
     """Trim local TF logs with one shared retention policy."""
     config, repo_root = _load_config()
-    metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
-    days, jsonl_removed, file_removed = _trim_logs_with_policy(
+    days = retention_days if retention_days is not None else config.services.log_retention_days
+    if days <= 0:
+        typer.echo("Error: retention days must be positive", err=True)
+        raise typer.Exit(1)
+    summary = trim_local_logs(
         repo_root=repo_root,
         config=config,
-        node_metrics_path=metrics_path,
-        retention_days=retention_days,
+        node_metrics_log_path=_usage_metrics_log_path(repo_root, node_metrics_log),
+        retention_days=days,
     )
+    skipped = [result.path for result in summary.jsonl_results if result.skipped]
     typer.echo(f"retention_days: {days}")
-    typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-    typer.echo(f"pruned_log_files: {file_removed}")
+    typer.echo(f"trimmed_jsonl_records: {sum(result.removed_lines for result in summary.jsonl_results)}")
+    typer.echo(f"pruned_log_files: {sum(1 for result in summary.file_results if result.removed)}")
+    typer.echo(f"skipped_jsonl_files: {len(skipped)}")
+    if skipped:
+        # A busy log makes the swap impossible; say so instead of reporting a quiet success.
+        typer.echo(
+            "Warning: left these logs intact because they were rotated or could not be rewritten: "
+            + ", ".join(skipped),
+            err=True,
+        )
+        # Retention that did not happen is not a success: let the cron wrapper see it.
+        raise typer.Exit(1)
 
 
 @olla_app.command("smoke")
@@ -3956,11 +3973,23 @@ def edge_serve(
         "--metrics-timeout",
         help="Per-node oMLX health/status timeout in seconds for edge metrics collector.",
     ),
+    upstream_timeout: float = typer.Option(
+        EDGE_DEFAULT_TIMEOUT_SECONDS,
+        "--timeout",
+        help=f"Upstream Olla I/O timeout in seconds for edge serve (default {EDGE_DEFAULT_TIMEOUT_SECONDS:g}).",
+    ),
 ) -> None:
     """Run the minimal TF edge proxy."""
     cluster_config, repo_root = _load_config()
     if metrics_interval_seconds <= 0:
         typer.echo("Error: metrics interval seconds must be positive", err=True)
+        raise typer.Exit(1)
+    if upstream_timeout < EDGE_MIN_TIMEOUT_SECONDS:
+        typer.echo(
+            f"Error: upstream timeout must be at least {EDGE_MIN_TIMEOUT_SECONDS:g} seconds: "
+            "Olla's backend timeout plus its connect attempt",
+            err=True,
+        )
         raise typer.Exit(1)
     resolved_port = resolve_port(port, default=cluster_config.services.edge_port)
     resolved_olla_base_url = olla_base_url or local_base_url(cluster_config.services.olla_port)
@@ -3977,12 +4006,6 @@ def edge_serve(
 
     access_log_path = _edge_access_log_path(repo_root, cluster_config, access_log)
     metrics_path = _usage_metrics_log_path(repo_root, None)
-    days, jsonl_removed, file_removed = _trim_logs_with_policy(
-        repo_root=repo_root,
-        config=cluster_config,
-        node_metrics_path=metrics_path,
-        retention_days=None,
-    )
 
     def log_sink(line: str) -> None:
         access_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3991,6 +4014,7 @@ def edge_serve(
 
     client_ids = sorted({client.client_id for client in clients_by_key.values()})
     usage_admin_token = os.environ.get(USAGE_TOKEN_ENV, "").strip() or None
+    build_info = resolve_build_info(repo_root)
 
     edge_proxy_config = EdgeProxyConfig(
         olla_base_url=resolved_olla_base_url,
@@ -3999,9 +4023,11 @@ def edge_serve(
         repo_root=repo_root,
         access_log_sink=log_sink,
         model_catalog=_edge_model_catalog_from_config(cluster_config),
+        timeout=upstream_timeout,
         usage_admin_token=usage_admin_token,
         usage_access_log_path=access_log_path,
         usage_node_metrics_path=metrics_path,
+        build=build_info,
         inspector=EdgeInspectorConfig(
             enabled=cluster_config.services.edge_inspector_enabled,
             output_dir=(
@@ -4012,6 +4038,7 @@ def edge_serve(
         ),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
+    typer.echo(_build_line(build_info))
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")
     typer.echo(f"api_key_count: {len(clients_by_key)}")
@@ -4024,21 +4051,13 @@ def edge_serve(
         typer.echo(f"edge_inspector: enabled output_dir={edge_proxy_config.inspector.output_dir}")
     else:
         typer.echo("edge_inspector: disabled")
-    typer.echo(f"retention_days: {days}")
-    typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-    typer.echo(f"pruned_log_files: {file_removed}")
+    typer.echo("log_retention: on_demand (thunder-forge usage trim-logs)")
 
     stop_metrics_collector = threading.Event()
 
     def _run_edge_metrics_collector() -> None:
         while not stop_metrics_collector.is_set():
             try:
-                _, _, _ = _trim_logs_with_policy(
-                    repo_root=repo_root,
-                    config=cluster_config,
-                    node_metrics_path=metrics_path,
-                    retention_days=None,
-                )
                 snapshots = _collect_node_metric_snapshots(cluster_config, timeout=metrics_timeout)
                 if snapshots:
                     _append_snapshots(metrics_path, snapshots)
