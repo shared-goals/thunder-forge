@@ -1742,7 +1742,9 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
         # here either, or "prints the reduced payload" would be false.
         _enrich_cluster_status_payload_with_olla_version(payload)
         _enrich_cluster_status_payload_with_omlx_version(payload)
-    _normalize_cluster_status_payload(payload)
+        # Only the full payload carries model statuses. Normalising the reduced one would
+        # rewrite "warm, 1 loaded" as "cold, 0 loaded" — a plausible-looking lie.
+        _normalize_cluster_status_payload(payload)
     return payload
 
 
@@ -2048,6 +2050,11 @@ def _status_view(payload: dict[str, object]) -> dict[str, object]:
     )
     healthy_count = sum(1 for node in inference_nodes if node.get("health") == "ok" and node.get("models") == "ok")
     summary = payload.get("summary")
+    if not model_statuses and isinstance(summary, dict):
+        # Anonymous payload: the edge publishes counts, not the statuses they were counted from.
+        reported_loaded = summary.get("loaded_models")
+        if isinstance(reported_loaded, int) and not isinstance(reported_loaded, bool):
+            loaded_count = reported_loaded
     active_requests = summary.get("active_requests") if isinstance(summary, dict) else None
     if not isinstance(active_requests, int):
         active_requests = summary.get("active_connections") if isinstance(summary, dict) else None
@@ -2059,7 +2066,7 @@ def _status_view(payload: dict[str, object]) -> dict[str, object]:
         "recent_count": recent_count,
         "stale_count": stale_count,
         "idle_data_count": idle_data_count,
-        "distinct_count": len({status.get("id") for _, status in model_statuses}),
+        "distinct_count": len({status.get("id") for _, status in model_statuses}) if model_statuses else "-",
         "active_requests": active_requests,
     }
 

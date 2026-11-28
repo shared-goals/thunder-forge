@@ -193,7 +193,6 @@ def test_anonymous_status_hides_clients_memory_layout_and_node_addressing(
         "inference_total",
         "inference_healthy",
         "loaded_models",
-        "loading_models",
         "readiness",
         "latest_omlx_version",
         "omlx_upgrade_hint",

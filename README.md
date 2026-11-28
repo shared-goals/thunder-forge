@@ -346,8 +346,10 @@ leak into proxy logs) and answer `401` without it.
 `GET /health` and `GET /status` stay anonymous. An anonymous `GET /status` is a liveness/version check:
 
 - `ok`, `target`, `build` (version, commit, dirty — see below)
-- `summary` with `inference_total`, `inference_healthy`, `loaded_models`, `loading_models`,
-  `readiness`, `latest_omlx_version` and `omlx_upgrade_hint`
+- `summary` with `inference_total`, `inference_healthy`, `loaded_models`, `readiness`,
+  `latest_omlx_version` and `omlx_upgrade_hint`. A count, not a list: `loaded_models` is how many
+  models are loaded across the cluster, and `loading_models` is not published — naming a model that
+  is loading would say which workload a client just started
 - per node `name`, `health`, `models`, `omlx_version`, `macos_version` and `served_models`; the
   gateway keeps `name`, `olla_version`, `latest_olla_version` and `upgrade`; cache nodes keep `name`
   and `macos_version`. No per-node model list: `hot_loaded_models` is ordered by `last_access`, so

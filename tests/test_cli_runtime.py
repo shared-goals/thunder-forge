@@ -2775,3 +2775,18 @@ def test_runtime_install_dry_run_prints_plist_and_commands(tmp_path: Path, monke
     assert "/Users/shag/.local/bin/omlx" in result.stdout
     assert "bootout" in result.stdout
     assert "bootstrap" in result.stdout
+
+
+def test_status_view_reads_counts_the_anonymous_edge_publishes() -> None:
+    """The reduced payload carries no per-model statuses; inventing zeros would read as a cold cluster."""
+    from thunder_forge.cli import _status_view
+
+    reduced = {
+        "summary": {"inference_total": 1, "inference_healthy": 1, "loaded_models": 1, "readiness": "warm"},
+        "inference": [{"name": "msm1", "health": "ok", "models": "ok"}],
+    }
+
+    view = _status_view(reduced)
+
+    assert view["loaded_count"] == 1
+    assert view["distinct_count"] == "-"
