@@ -2303,6 +2303,7 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
         console.print(model_table)
         console.print()
 
+
 def _build_line(build: object) -> str:
     """The one spelling of the build line, shared by serve and by `cluster status`."""
     values = build if isinstance(build, dict) else {}

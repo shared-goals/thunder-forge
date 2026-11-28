@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 - `usage collect-node-metrics` keeps a loaded model that holds memory in `loaded_models` under its raw
   runtime id when no alias is configured, and names it in `errors`; a zero-memory adapter is dropped
   silently. A node snapshot is no longer able to hide a hand-loaded model's footprint.
+- Edge access records carry `error_kind`, `stream` and `headers_sent`, so a failure Olla never answered is
+  distinguishable from one it did. `--timeout` cannot be set below the Olla connect plus backend budget
+  (`OLLA_CONNECT_TIMEOUT_SECONDS` + `OLLA_BACKEND_TIMEOUT_SECONDS`, 125 s by default).
 
 ### Added
 

@@ -475,6 +475,7 @@ def test_classify_edge_failure_maps_the_closed_vocabulary() -> None:
     cases = [
         (httpx.ReadTimeout("fixture", request=request), False, 504, "edge_timeout"),
         (httpx.ConnectError("fixture", request=request), False, 502, "edge_connect"),
+        (httpx.ConnectTimeout("fixture", request=request), False, 502, "edge_connect"),
         (httpx.RemoteProtocolError("fixture", request=request), False, 502, "upstream_error"),
         (httpx.ReadTimeout("fixture", request=request), True, 504, "stream_aborted"),
         (httpx.ConnectError("fixture", request=request), True, 502, "stream_aborted"),
