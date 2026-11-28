@@ -432,8 +432,8 @@ Summary dimensions include:
 Failure and coverage signals in the same summary:
 
 - `requests.by_status`: histogram of `status_code` responses, and `failures_total` for `status_code >= 400`
-  plus any row whose `error_kind` is a cluster failure — a stream that died after its headers still
-  reads `200`. `client_aborted` is not counted: that failure is the client's own choice
+  plus any row whose `error_kind` is a cluster failure, which is why the count is not the same as the
+  number of non-2xx rows. `client_aborted` is not counted: that failure is the client's own choice
 - residual buckets keep the breakdowns honest: `requests.by_node["unknown"]` (no endpoint attribution),
   `requests.by_model["unknown"]` (empty model, for example `/v1/models`), and
   `requests.unauthenticated` (records carrying the unauthenticated marker, counted even when
@@ -454,9 +454,8 @@ Failure and coverage signals in the same summary:
 Two things the summary deliberately cannot answer. The access log carries no token counts and no
 first-token timestamp, so there is no cost per client and no "how long until the answer started"
 figure; [Minimal Metric Strategy](#minimal-metric-strategy) lists the first-token timestamp still to
-collect, and nothing collects tokens at all. `consumed_ms` is wall time at the edge, so a streaming
-request's time ends when the last byte reaches the client and includes client backpressure; it is not
-model service time.
+collect, and nothing collects tokens at all. `consumed_ms` is edge-observed `latency_ms`, not model
+service time; `docs/operations/daily-summary-contract.md` carries the exact definition.
 
 ### Minimal Metric Strategy
 

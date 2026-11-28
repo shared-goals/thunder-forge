@@ -114,9 +114,10 @@ alias appears in `loaded_models` only and leaves that count at `0` beside its me
   record with no parsable timestamp lands in an extra `"unknown"` bucket in both hour breakdowns, so
   `by_node_hour` still sums to `requests.total`. A dated period keeps only records whose timestamp it
   can parse, so the sum still matches: an undated record is outside every day)
-- `failures_total` (top level: records with `status_code >= 400`, plus any record whose
-  `error_kind` is a cluster failure — a stream that died after its headers keeps
-  `status_code: 200`; `client_aborted` is the client's own choice and is not counted)
+- `failures_total` (top level: records with `status_code >= 400`, plus any record whose `error_kind`
+  is a cluster failure, so it is not the count of non-2xx rows — a stream that died after its headers
+  is recorded with the status it was given and a `stream_aborted` kind; `client_aborted` is the
+  client's own choice and is not counted)
 - `consumed_ms.total`
 - `consumed_ms.by_user`
 - `consumed_ms.by_node`
@@ -140,9 +141,9 @@ alias appears in `loaded_models` only and leaves that count at `0` beside its me
   morning looks the same as a truncated one
 - `invalid_lines`
 
-`consumed_ms` is defined as sum of edge-observed `latency_ms`: time the edge spent on the request,
-not wall time a client waited. They differ by queueing in front of the edge and by backpressure when a
-streaming response is throttled, and only the edge-observed part is in the log.
+`consumed_ms` is the sum of edge-observed `latency_ms`: wall time at the edge, so a streaming request's
+time ends when the last byte reaches the client and includes client backpressure. It is not model
+service time, and it is not time a client waited in a queue in front of the edge.
 
 ## CLI Exit Codes
 
