@@ -78,12 +78,14 @@ holds no memory — tool adapters such as `MarkItDown` report none — and kept 
 in `loaded_models` when it does, so a hand-loaded model cannot hide its footprint. A kept entry is
 named in `errors` as `no configured alias for runtime model: <id>`. That entry cannot tell a
 hand-loaded model from a `runtime_model_id` that drifted away from the configuration — both look the
-same — so expect one per node and per day for a node that runs a hand-loaded model; a dropped tool
-adapter adds nothing to `errors`.
+same — so expect one per node per collection run for a node that runs a hand-loaded model; a dropped tool
+adapter adds nothing to `errors`. Nothing in `usage report` reads this list: it is visible in the raw
+`logs/tf-node-metrics.jsonl` or through `usage events --source node-metrics`.
 
 `hot_loaded_models` lists every configured alias of a loaded runtime model, while `loaded_models`
 carries one row per loaded runtime model, using its first alias, so the two counts agree only when
-a runtime model has a single alias. A node that lists no models and has nothing loaded writes `hot_loaded_count: 0` and
+a runtime model has a single alias. `hot_loaded_count` counts aliases, so a kept model that has no
+alias appears in `loaded_models` only and leaves that count at `0` beside its memory row. A node that lists no models and has nothing loaded writes `hot_loaded_count: 0` and
 `loaded_models: []`, which is indistinguishable from a probe that found nothing loaded.
 
 ## Summary Contract
