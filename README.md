@@ -559,8 +559,8 @@ Data-source decision:
 For ad hoc SQL analysis, use DuckDB directly over JSONL:
 
 ```bash
-duckdb -readonly -cmd ".mode table" -cmd ".headers on" \
-	-cmd ".param set period 2026-06-02" \
+duckdb -cmd ".mode table" -cmd ".headers on" \
+	-cmd "set variable period='2026-06-02'" \
 	-f docs/operations/daily-usage-duckdb.sql
 
 # or
