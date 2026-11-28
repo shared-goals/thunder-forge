@@ -49,9 +49,11 @@ Expected keys:
 - `latency_ms`
 - `olla_endpoint`
 - `stream` (bool, `true` when the request reached the streaming response path)
-- `headers_sent` (bool, `true` only when a failure came after the status and headers reached the client; a
-  successful record stays `false`)
-- `error_kind` (empty when nothing upstream failed, including a rejected request; otherwise `edge_timeout`, `edge_connect`, `upstream_error`, `stream_aborted` or `client_aborted`)
+- `headers_sent` (bool, `true` only when a *streaming* failure came after the status and headers reached the
+  client; a successful record stays `false`. A non-streaming request is recorded before its body is written, so
+  a client that hangs up mid-body leaves a `200` with no failure field set — the record cannot tell a delivered
+  answer from a truncated one)
+- `error_kind` (empty when the edge itself raised nothing for the request — including a rejected request and an error status Olla answered on its own, such as `503` with no healthy node; otherwise `edge_timeout`, `edge_connect`, `upstream_error`, `stream_aborted` or `client_aborted`)
 - optional token fields: `prompt_tokens`, `completion_tokens`, `total_tokens`
 
 ### Node Snapshot JSONL
