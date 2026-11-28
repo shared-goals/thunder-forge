@@ -151,14 +151,16 @@ def nearest_rank_percentile(values: list[int], percentile: float) -> int:
 
 def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
     """Return the maximum number of overlapping request intervals."""
-    events: list[tuple[datetime, int]] = []
+    events: list[tuple[datetime, int, int]] = []
     for started, finished in intervals:
-        events.append((started, 1))
-        events.append((finished, -1))
+        # A zero-latency request starts and finishes at the same instant. The start must sort
+        # first, or the count dips below zero and the peak of that hour reads as none.
+        events.append((started, 0, 1))
+        events.append((finished, 1, -1))
     events.sort()
     current = 0
     peak = 0
-    for _, delta in events:
+    for _, _, delta in events:
         current += delta
         peak = max(peak, current)
     return peak

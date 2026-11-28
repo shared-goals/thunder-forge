@@ -94,7 +94,7 @@ Expected keys:
 - `requests.by_hour` (all 24 hour buckets 00-23, each bucket carries `requests`, `consumed_ms`,
   `by_model`, and `by_user` so one view answers when/what/who; hours without traffic are present
   with zeros, so a silent hour is visible)
-- `requests.by_node_hour` (same 24 hour buckets per node, zero-filled the same way; for `period=all` a
+- `requests.by_node_hour` (same 24 hour buckets per node, keyed by hour of day so `period=all` sums the same hour across days, zero-filled the same way; for `period=all` a
   record with no parsable timestamp lands in an extra `"unknown"` bucket in both hour breakdowns, so
   `by_node_hour` still sums to `requests.total`. A dated period keeps only records whose timestamp it
   can parse, so the sum still matches: an undated record is outside every day)

@@ -642,3 +642,11 @@ def test_summary_marks_an_undated_log_as_partial_for_a_dated_period(tmp_path: Pa
 
     assert summary.requests_total == 0
     assert summary.partial is True
+
+
+def test_peak_concurrency_counts_a_zero_latency_request() -> None:
+    """A request that starts and ends at the same instant still overlaps itself."""
+    moment = datetime(2026, 6, 2, 10, tzinfo=UTC)
+
+    assert peak_concurrency([(moment, moment)]) == 1
+    assert peak_concurrency([(moment, moment), (moment, moment)]) == 2

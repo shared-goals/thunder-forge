@@ -440,8 +440,10 @@ Failure and coverage signals in the same summary:
   `operations.usage.exclude_unauthenticated` keeps them out of the other breakdowns)
 - every breakdown sums to `requests.total` except the model ones, which still omit models listed in
   `operations.usage.exclude_models` by design
-- `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, so an idle hour reads
-  as a zero instead of vanishing from the day; with `--period all` a record with no parsable timestamp
+- `requests.by_hour` and `requests.by_node_hour` always carry all 24 hours, keyed by hour of day: with
+  `--period all` the same hour of different days is summed into one bucket, so 16:00 is the total of every
+  16:00 in the log, not one day's. An idle hour reads
+  as a zero instead of vanishing; with `--period all` a record with no parsable timestamp
   lands in an extra `"unknown"` bucket instead of being dropped, while a dated period can only judge a
   record by the timestamp it lacks, so that record is left out
 - `coverage.first_record_at` / `coverage.last_record_at` and `partial: true` when the period is older
