@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - Log retention is operator-run only: `edge serve` and `usage collect-node-metrics` no longer trim, and the
   collector lost `--retention-days`. `usage trim-logs` splices live appends instead of skipping a growing log,
   keeps owner and mode, follows symlinks, and exits `1` when a file had to be skipped.
+- `usage collect-node-metrics` keeps a loaded model that holds memory in `loaded_models` under its raw
+  runtime id when no alias is configured, and names it in `errors`; a zero-memory adapter is dropped
+  silently. A node snapshot is no longer able to hide a hand-loaded model's footprint.
 
 ### Added
 

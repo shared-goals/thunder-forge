@@ -1311,7 +1311,6 @@ STATUS_PUBLIC_SUMMARY_KEYS = (
     "inference_total",
     "inference_healthy",
     "loaded_models",
-    "loading_models",
     "readiness",
     "latest_omlx_version",
     "omlx_upgrade_hint",

@@ -1745,7 +1745,9 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
         # here either, or "prints the reduced payload" would be false.
         _enrich_cluster_status_payload_with_olla_version(payload)
         _enrich_cluster_status_payload_with_omlx_version(payload)
-    _normalize_cluster_status_payload(payload)
+        # Only the full payload carries model statuses. Normalising the reduced one would
+        # rewrite "warm, 1 loaded" as "cold, 0 loaded" — a plausible-looking lie.
+        _normalize_cluster_status_payload(payload)
     return payload
 
 
@@ -2051,6 +2053,11 @@ def _status_view(payload: dict[str, object]) -> dict[str, object]:
     )
     healthy_count = sum(1 for node in inference_nodes if node.get("health") == "ok" and node.get("models") == "ok")
     summary = payload.get("summary")
+    if not model_statuses and isinstance(summary, dict):
+        # Anonymous payload: the edge publishes counts, not the statuses they were counted from.
+        reported_loaded = summary.get("loaded_models")
+        if isinstance(reported_loaded, int) and not isinstance(reported_loaded, bool):
+            loaded_count = reported_loaded
     active_requests = summary.get("active_requests") if isinstance(summary, dict) else None
     if not isinstance(active_requests, int):
         active_requests = summary.get("active_connections") if isinstance(summary, dict) else None
@@ -2062,7 +2069,7 @@ def _status_view(payload: dict[str, object]) -> dict[str, object]:
         "recent_count": recent_count,
         "stale_count": stale_count,
         "idle_data_count": idle_data_count,
-        "distinct_count": len({status.get("id") for _, status in model_statuses}),
+        "distinct_count": len({status.get("id") for _, status in model_statuses}) if model_statuses else "-",
         "active_requests": active_requests,
     }
 
@@ -2220,7 +2227,7 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
     summary.add_column()
     summary.add_row("Nodes", f"{healthy_count}/{len(inference_nodes)} healthy")
     summary.add_row("Loaded models", str(loaded_count))
-    summary.add_row("Distinct models", str(len({status.get('id') for _, status in model_statuses})))
+    summary.add_row("Distinct models", str(view["distinct_count"]))
     summary_payload = payload.get("summary")
     if isinstance(view["active_requests"], int):
         summary.add_row(
@@ -2251,7 +2258,8 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
     node_table.add_column("Idle", justify="right")
     for node in inference_nodes:
         node_view = _status_node_view(node)
-        node_loaded = int(node_view["loaded_count"])
+        # An anonymous payload carries no per-model statuses: show that, not a zero.
+        node_loaded = str(node_view["loaded_count"]) if node.get("model_statuses") else "-"
         node_idle = _format_model_idle(_node_idle_seconds(node))
         health = "[green]OK[/green]" if node.get("health") == "ok" and node.get("models") == "ok" else "[red]FAIL[/red]"
         node_table.add_row(
