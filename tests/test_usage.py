@@ -76,10 +76,22 @@ def test_summarize_daily_usage_groups_by_user_node_model_and_hour(tmp_path: Path
     assert summary.requests_by_user_model == {"alice": {"coder": 2}, "bob": {"agent": 1}}
     assert summary.requests_by_node == {"msm1": 2, "msm2": 1}
     assert summary.requests_by_model == {"agent": 1, "coder": 2}
-    assert summary.requests_by_hour == {
-        "08": {"requests": 2, "consumed_ms": 300, "by_model": {"coder": 2}, "by_user": {"alice": 2}},
-        "09": {"requests": 1, "consumed_ms": 150, "by_model": {"agent": 1}, "by_user": {"bob": 1}},
+    assert summary.requests_by_hour["08"] == {
+        "requests": 2,
+        "consumed_ms": 300,
+        "by_model": {"coder": 2},
+        "by_user": {"alice": 2},
     }
+    assert summary.requests_by_hour["09"] == {
+        "requests": 1,
+        "consumed_ms": 150,
+        "by_model": {"agent": 1},
+        "by_user": {"bob": 1},
+    }
+    assert len(summary.requests_by_hour) == 24
+    assert summary.requests_by_hour["04"] == {"requests": 0, "consumed_ms": 0, "by_model": {}, "by_user": {}}
+    assert len(summary.requests_by_node_hour["msm1"]) == 24
+    assert summary.requests_by_node_hour["msm1"]["04"] == 0
 
 
 def test_extract_hot_loaded_models_orders_by_last_access() -> None:
@@ -403,3 +415,238 @@ def test_summarize_daily_usage_filters_by_client_id(tmp_path: Path) -> None:
     assert only_hermes.consumed_ms_total == 9000
     assert only_hermes.latency_ms_by_hour["08"] == {"count": 1, "p50": 9000, "p95": 9000, "max": 9000}
     assert only_hermes.requests_by_user == {"hermes": 1}
+
+
+def test_summarize_daily_usage_counts_status_codes_and_failures(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {"timestamp": "2026-11-27T16:56:06+04:00", "client_id": "shag", "model": "agent",
+                 "latency_ms": 60, "olla_endpoint": "", "status_code": 502},
+                {"timestamp": "2026-11-27T16:57:10+04:00", "client_id": "gnezim", "model": "coder",
+                 "latency_ms": 30, "olla_endpoint": "msm2-omlx-live", "status_code": 502},
+                {"timestamp": "2026-11-27T17:00:00+04:00", "client_id": "alice", "model": "coder",
+                 "latency_ms": 100, "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+                {"timestamp": "2026-11-27T17:01:00+04:00", "client_id": "unauthenticated", "model": "",
+                 "latency_ms": 5, "olla_endpoint": "", "status_code": 401},
+            )
+        )
+        + "\n"
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-11-27")
+
+    assert summary.requests_total == 4
+    assert summary.requests_by_status == {"200": 1, "401": 1, "502": 2}
+    assert summary.failures_total == 3
+    # Every response lands in the histogram, including rows without a status code.
+    assert sum(summary.requests_by_status.values()) == summary.requests_total
+
+
+def test_summarize_daily_usage_reconciles_breakdowns_with_residual_buckets(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                # No endpoint attribution: counted, but nothing to attribute it to.
+                {"timestamp": "2026-06-02T08:00:00+00:00", "client_id": "alice", "model": "coder",
+                 "latency_ms": 100, "olla_endpoint": "", "status_code": 200},
+                # Model listing: a real request with no model name.
+                {"timestamp": "2026-06-02T08:10:00+00:00", "client_id": "alice", "model": "",
+                 "latency_ms": 100, "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+                # Rejected key: a pseudo-identity, not a client.
+                {"timestamp": "2026-06-02T08:20:00+00:00", "client_id": "unauthenticated", "model": "",
+                 "latency_ms": 100, "olla_endpoint": "", "status_code": 401},
+            )
+        )
+        + "\n"
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02")
+
+    assert summary.requests_total == 3
+    assert summary.requests_by_node == {"msm1": 1, "unknown": 2}
+    assert summary.requests_by_model == {"coder": 1, "unknown": 2}
+    assert summary.requests_unauthenticated == 1
+    assert sum(summary.requests_by_node.values()) == summary.requests_total
+    assert sum(summary.requests_by_model.values()) == summary.requests_total
+    assert sum(summary.requests_by_user.values()) == summary.requests_total
+    assert sum(int(bucket["requests"]) for bucket in summary.requests_by_hour.values()) == 3
+    assert sum(sum(row.values()) for row in summary.requests_by_node_hour.values()) == summary.requests_total
+
+
+def test_summarize_daily_usage_zero_fills_an_idle_day(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text(
+        json.dumps(
+            {"timestamp": "2026-06-03T08:00:00+00:00", "client_id": "alice", "model": "coder",
+             "latency_ms": 100, "olla_endpoint": "msm1-omlx-live", "status_code": 200}
+        )
+        + "\n"
+    )
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02")
+
+    assert summary.requests_total == 0
+    assert set(summary.requests_by_hour) == {f"{hour:02d}" for hour in range(24)}
+    assert all(
+        bucket == {"requests": 0, "consumed_ms": 0, "by_model": {}, "by_user": {}}
+        for bucket in summary.requests_by_hour.values()
+    )
+    assert summary.latency_ms_by_hour == {}
+    assert summary.requests_by_node_hour == {}
+    assert summary.coverage_first_record_at is None
+
+
+def test_summarize_daily_usage_flags_a_truncated_oldest_day(tmp_path: Path) -> None:
+    access_log = tmp_path / "tf-edge-access.jsonl"
+    access_log.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                # Retention cut the file at 04:00 local on the oldest day it kept.
+                {"timestamp": "2026-11-26T04:00:12+04:00", "client_id": "alice", "model": "coder",
+                 "latency_ms": 100, "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+                {"timestamp": "2026-11-26T23:59:00+04:00", "client_id": "alice", "model": "coder",
+                 "latency_ms": 100, "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+                {"timestamp": "2026-11-27T00:00:00+04:00", "client_id": "alice", "model": "coder",
+                 "latency_ms": 100, "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+            )
+        )
+        + "\n"
+    )
+
+    truncated = summarize_daily_usage(access_log, period="2026-11-26")
+    complete = summarize_daily_usage(access_log, period="2026-11-27")
+    everything = summarize_daily_usage(access_log, period="all")
+
+    assert truncated.partial is True
+    assert truncated.coverage_first_record_at == "2026-11-26T04:00:12+04:00"
+    assert truncated.coverage_last_record_at == "2026-11-26T23:59:00+04:00"
+    # A later day is not the oldest in the file, so retention cannot have cut its start.
+    assert complete.partial is False
+    assert complete.coverage_first_record_at == "2026-11-27T00:00:00+04:00"
+    # "all" merges days, so there is no oldest-day boundary to warn about.
+    assert everything.partial is False
+    assert everything.coverage_first_record_at == "2026-11-26T04:00:12+04:00"
+
+
+def test_summary_excludes_configured_models_from_the_model_breakdown_only(tmp_path: Path) -> None:
+    """A configured exclusion disappears from by_model but never from requests.total."""
+    access_log = tmp_path / "access.jsonl"
+    records = [
+        {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "markitdown", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+        {"timestamp": "2026-06-02T10:01:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+    ]
+    access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=["MarkItDown"])
+
+    assert summary.requests_total == 2
+    assert summary.requests_by_model == {"memory": 1}
+    assert summary.consumed_ms_by_model == {"memory": 5}
+    assert summary.requests_by_node == {"msm1": 2}
+
+
+def test_summary_counts_a_record_without_a_timestamp_in_the_unknown_hour(tmp_path: Path) -> None:
+    """The hour breakdowns reconcile even for a row whose timestamp cannot be parsed."""
+    access_log = tmp_path / "access.jsonl"
+    records = [
+        {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+        {"timestamp": "not-a-timestamp", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+    ]
+    access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    summary = summarize_daily_usage(access_log, period="all", excluded_models=[])
+
+    assert summary.requests_total == 2
+    assert sum(bucket["requests"] for bucket in summary.requests_by_hour.values()) == 2
+    assert "unknown" in summary.requests_by_hour
+    assert sum(sum(node.values()) for node in summary.requests_by_node_hour.values()) == 2
+    assert summary.requests_by_node_hour["msm1"]["unknown"] == 1
+
+
+
+
+def test_summary_flags_a_period_older_than_the_retained_log(tmp_path: Path) -> None:
+    """A day entirely outside retention is missing, not a quiet day with zero traffic."""
+    access_log = tmp_path / "access.jsonl"
+    access_log.write_text(
+        json.dumps({"timestamp": "2026-06-02T00:00:10+00:00", "client_id": "alice", "model": "memory",
+                    "latency_ms": 5, "olla_endpoint": "msm1-omlx-live", "status_code": 200}) + "\n"
+    )
+
+    stale = summarize_daily_usage(access_log, period="2026-05-01", excluded_models=[])
+    present = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=[])
+
+    assert stale.requests_total == 0
+    assert stale.partial is True
+    assert stale.coverage_first_record_at is None
+    assert present.partial is False
+
+
+def test_summary_counts_a_stream_abort_but_not_a_client_abort(tmp_path: Path) -> None:
+    """A stream that died is a cluster failure; a client that hung up is not."""
+    access_log = tmp_path / "access.jsonl"
+    records = [
+        {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200, "error_kind": ""},
+        {"timestamp": "2026-06-02T10:01:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200, "error_kind": "stream_aborted"},
+        {"timestamp": "2026-06-02T10:02:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 502},
+        {"timestamp": "2026-06-02T10:03:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200, "error_kind": "client_aborted"},
+    ]
+    access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    summary = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=[])
+
+    assert summary.requests_total == 4
+    assert summary.requests_by_status == {"200": 3, "502": 1}
+    assert summary.failures_total == 2
+
+
+def test_summary_counts_unauthenticated_rows_the_filter_excludes(tmp_path: Path) -> None:
+    """A scanner run must stay visible even when the config drops those rows from the breakdowns."""
+    access_log = tmp_path / "access.jsonl"
+    records = [
+        {"timestamp": "2026-06-02T10:00:00+00:00", "client_id": "unauthenticated", "model": "", "latency_ms": 1,
+         "olla_endpoint": "", "status_code": 401},
+        {"timestamp": "2026-06-02T10:01:00+00:00", "client_id": "alice", "model": "memory", "latency_ms": 5,
+         "olla_endpoint": "msm1-omlx-live", "status_code": 200},
+    ]
+    access_log.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    kept = summarize_daily_usage(access_log, period="2026-06-02", excluded_models=[],
+                                 exclude_unauthenticated=True)
+
+    assert kept.requests_total == 1
+    assert kept.requests_unauthenticated == 1
+
+
+def test_summary_marks_an_undated_log_as_partial_for_a_dated_period(tmp_path: Path) -> None:
+    """An empty log covers no period; reporting `partial: false` would read as a quiet day."""
+    access_log = tmp_path / "access.jsonl"
+    access_log.write_text("")
+    period = (datetime.now(UTC) - timedelta(days=2)).date().isoformat()
+
+    summary = summarize_daily_usage(access_log, period=period, excluded_models=[])
+
+    assert summary.requests_total == 0
+    assert summary.partial is True
+
+
+def test_peak_concurrency_counts_a_zero_latency_request() -> None:
+    """A request that starts and ends at the same instant still overlaps itself."""
+    moment = datetime(2026, 6, 2, 10, tzinfo=UTC)
+
+    assert peak_concurrency([(moment, moment)]) == 1
+    assert peak_concurrency([(moment, moment), (moment, moment)]) == 2

@@ -11,10 +11,11 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -45,8 +46,10 @@ from thunder_forge.cluster.bootstrap import (
     ensure_olla_binary,
     write_generated_olla_config,
 )
-from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig
+from thunder_forge.cluster.config import ClusterConfig, Node, NodeRole, NodeRuntime, ServiceConfig, resolve_build_info
 from thunder_forge.cluster.edge import (
+    EDGE_DEFAULT_TIMEOUT_SECONDS,
+    EDGE_MIN_TIMEOUT_SECONDS,
     EDGE_USER_PREFIX,
     USAGE_TOKEN_ENV,
     EdgeInspectorConfig,
@@ -112,7 +115,9 @@ from thunder_forge.cluster.usage import (
     _as_non_negative_int,
     _parse_timestamp,
     extract_hot_loaded_models,
+    is_cluster_failure,
     resolve_usage_period,
+    select_usage_events,
     summarize_daily_usage,
 )
 
@@ -313,28 +318,6 @@ def _usage_metrics_log_path(repo_root: Path, metrics_log: Path | None) -> Path:
     return _repo_relative_path(repo_root, metrics_log)
 
 
-def _trim_logs_with_policy(
-    *,
-    repo_root: Path,
-    config: ClusterConfig,
-    node_metrics_path: Path,
-    retention_days: int | None,
-) -> tuple[int, int, int]:
-    days = retention_days if retention_days is not None else config.services.log_retention_days
-    if days <= 0:
-        typer.echo("Error: retention days must be positive", err=True)
-        raise typer.Exit(1)
-    summary = trim_local_logs(
-        repo_root=repo_root,
-        config=config,
-        node_metrics_log_path=node_metrics_path,
-        retention_days=days,
-    )
-    jsonl_removed = sum(result.removed_lines for result in summary.jsonl_results)
-    file_removed = sum(1 for result in summary.file_results if result.removed)
-    return days, jsonl_removed, file_removed
-
-
 def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> list[dict[str, object]]:
     snapshots: list[dict[str, object]] = []
     for node_id, node in sorted(config.compute_nodes.items()):
@@ -343,15 +326,28 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
         base_url = f"http://{node.host}:{_runtime(node).port}"
         health = check_omlx_health(base_url, timeout=timeout, include_models=True)
         hot_loaded_runtime_ids = extract_hot_loaded_models(health.model_statuses)
-        hot_loaded_models = map_runtime_models_to_aliases(config, node, hot_loaded_runtime_ids)
+        hot_loaded_models = map_runtime_models_to_aliases(
+            config, node, hot_loaded_runtime_ids, include_unmanaged=False
+        )
+        # Same membership rule as `include_unmanaged=False` above: `runtime_model_aliases` is
+        # keyed only by models configured for this node, so an unmanaged entry has no key here.
         aliases_by_runtime = runtime_model_aliases(config, node)
         loaded_models: list[dict[str, object]] = []
+        errors = list(health.errors)
         sampled_at = time.time()
         for runtime_id, status in sorted(health.model_statuses.items()):
             if not isinstance(status, dict) or status.get("loaded") is not True:
                 continue
-            entry: dict[str, object] = {"id": (aliases_by_runtime.get(runtime_id) or [runtime_id])[0]}
             actual_size = _as_non_negative_int(status.get("actual_size"))
+            # A runtime entry with no configured alias is a tool adapter (MarkItDown reports no
+            # memory) or a drifted model. Memory is the tell: an entry holding RAM stays in the
+            # snapshot under its raw runtime id, so a hand-loaded model cannot hide the footprint.
+            aliases = aliases_by_runtime.get(runtime_id)
+            if not aliases and not actual_size:
+                continue
+            if not aliases:
+                errors.append(f"no configured alias for runtime model: {runtime_id}")
+            entry: dict[str, object] = {"id": aliases[0] if aliases else runtime_id}
             if actual_size is not None:
                 entry["actual_size"] = actual_size
             # oMLX reports last_access; idle time is derived, never sent by the node.
@@ -371,7 +367,7 @@ def _collect_node_metric_snapshots(config: ClusterConfig, *, timeout: float) -> 
                 "active_requests": health.active_requests,
                 "waiting_requests": health.waiting_requests,
                 "loaded_models": loaded_models,
-                "errors": health.errors,
+                "errors": errors,
             }
         )
     return snapshots
@@ -1723,9 +1719,13 @@ def _edge_status_base_url(config: ClusterConfig) -> str:
 def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) -> dict[str, object]:
     base_url = _edge_status_base_url(config)
     params = {"target": target} if target else None
+    # Anonymous /status answers with the reduced liveness payload; the admin token
+    # (repo .env, loaded by _load_config) unlocks the full per-node detail.
+    token = os.environ.get(USAGE_TOKEN_ENV, "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else None
     with httpx.Client(base_url=base_url, timeout=30.0, trust_env=False) as client:
         try:
-            response = client.get("/status", params=params)
+            response = client.get("/status", params=params, headers=headers)
         except httpx.HTTPError as exc:
             typer.echo(f"Error: failed to fetch cluster status from {base_url}: {exc}", err=True)
             raise typer.Exit(1)
@@ -1740,9 +1740,14 @@ def _fetch_cluster_status_payload(config: ClusterConfig, *, target: str | None) 
     if payload.get("error"):
         typer.echo(f"Error: edge status endpoint error: {payload['error']}", err=True)
         raise typer.Exit(1)
-    _enrich_cluster_status_payload_with_olla_version(payload)
-    _enrich_cluster_status_payload_with_omlx_version(payload)
-    _normalize_cluster_status_payload(payload)
+    if token:
+        # The edge skipped these lookups because the request was anonymous; do not pay for them
+        # here either, or "prints the reduced payload" would be false.
+        _enrich_cluster_status_payload_with_olla_version(payload)
+        _enrich_cluster_status_payload_with_omlx_version(payload)
+        # Only the full payload carries model statuses. Normalising the reduced one would
+        # rewrite "warm, 1 loaded" as "cold, 0 loaded" — a plausible-looking lie.
+        _normalize_cluster_status_payload(payload)
     return payload
 
 
@@ -2048,6 +2053,11 @@ def _status_view(payload: dict[str, object]) -> dict[str, object]:
     )
     healthy_count = sum(1 for node in inference_nodes if node.get("health") == "ok" and node.get("models") == "ok")
     summary = payload.get("summary")
+    if not model_statuses and isinstance(summary, dict):
+        # Anonymous payload: the edge publishes counts, not the statuses they were counted from.
+        reported_loaded = summary.get("loaded_models")
+        if isinstance(reported_loaded, int) and not isinstance(reported_loaded, bool):
+            loaded_count = reported_loaded
     active_requests = summary.get("active_requests") if isinstance(summary, dict) else None
     if not isinstance(active_requests, int):
         active_requests = summary.get("active_connections") if isinstance(summary, dict) else None
@@ -2059,7 +2069,7 @@ def _status_view(payload: dict[str, object]) -> dict[str, object]:
         "recent_count": recent_count,
         "stale_count": stale_count,
         "idle_data_count": idle_data_count,
-        "distinct_count": len({status.get("id") for _, status in model_statuses}),
+        "distinct_count": len({status.get("id") for _, status in model_statuses}) if model_statuses else "-",
         "active_requests": active_requests,
     }
 
@@ -2217,7 +2227,7 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
     summary.add_column()
     summary.add_row("Nodes", f"{healthy_count}/{len(inference_nodes)} healthy")
     summary.add_row("Loaded models", str(loaded_count))
-    summary.add_row("Distinct models", str(len({status.get('id') for _, status in model_statuses})))
+    summary.add_row("Distinct models", str(view["distinct_count"]))
     summary_payload = payload.get("summary")
     if isinstance(view["active_requests"], int):
         summary.add_row(
@@ -2248,7 +2258,8 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
     node_table.add_column("Idle", justify="right")
     for node in inference_nodes:
         node_view = _status_node_view(node)
-        node_loaded = int(node_view["loaded_count"])
+        # An anonymous payload carries no per-model statuses: show that, not a zero.
+        node_loaded = str(node_view["loaded_count"]) if node.get("model_statuses") else "-"
         node_idle = _format_model_idle(_node_idle_seconds(node))
         health = "[green]OK[/green]" if node.get("health") == "ok" and node.get("models") == "ok" else "[red]FAIL[/red]"
         node_table.add_row(
@@ -2310,10 +2321,22 @@ def _print_cluster_status_rich(payload: dict[str, object], *, console: Console) 
         console.print(model_table)
         console.print()
 
+
+def _build_line(build: object) -> str:
+    """The one spelling of the build line, shared by serve and by `cluster status`."""
+    values = build if isinstance(build, dict) else {}
+    return (
+        f"build: version={values.get('version', 'unknown')}"
+        f" commit={values.get('commit', 'unknown')}"
+        f" dirty={values.get('dirty', 'unknown')}"
+    )
+
+
 def _print_cluster_status_payload(
     payload: dict[str, object], *, config: ClusterConfig, plain: bool = False
 ) -> None:
     if not plain and sys.stdout.isatty():
+        typer.echo(_build_line(payload.get("build")))
         _print_cluster_status_rich(payload, console=Console())
         return
     view = _status_view(payload)
@@ -2321,6 +2344,7 @@ def _print_cluster_status_payload(
     gateway = payload.get("gateway")
     typer.echo("Thunder Forge cluster status")
     typer.echo(f"target: {payload.get('target', 'all')}")
+    typer.echo(_build_line(payload.get("build")))
     typer.echo("")
     typer.echo("summary:")
     typer.echo(f"  nodes: {view['healthy_count']}/{len(view['inference_nodes'])} healthy")
@@ -3667,6 +3691,10 @@ def usage_report(
     except ValueError:
         typer.echo(f"Error: invalid period {period!r}, expected YYYY-MM-DD, today, or all", err=True)
         raise typer.Exit(1)
+    if not access_log_path.exists():
+        # A missing or mistyped log must not look like a quiet day with zero traffic.
+        typer.echo(f"Error: access log not found: {access_log_path}", err=True)
+        raise typer.Exit(2)
     summary = summarize_daily_usage(
         access_log_path,
         period=period,
@@ -3689,8 +3717,13 @@ def usage_report(
         return f"{value:,}"
 
     typer.echo(f"requests_total: {_fmt_number(summary.requests_total)}")
+    typer.echo(f"failures_total: {_fmt_number(summary.failures_total)}")
+    typer.echo(f"unauthenticated: {_fmt_number(summary.requests_unauthenticated)}")
     typer.echo(f"consumed_ms_total: {_fmt_number(summary.consumed_ms_total)}")
     typer.echo(f"invalid_lines: {_fmt_number(summary.invalid_lines)}")
+    typer.echo(f"first_record_at: {summary.coverage_first_record_at or '-'}")
+    typer.echo(f"last_record_at: {summary.coverage_last_record_at or '-'}")
+    typer.echo(f"partial: {str(summary.partial).lower()}")
 
     def _print_mapping(title: str, mapping: dict[str, int]) -> None:
         typer.echo(f"{title}:")
@@ -3710,6 +3743,7 @@ def usage_report(
                 typer.echo(f"      {model}: {_fmt_number(count)}")
     _print_mapping("requests_by_node", summary.requests_by_node)
     _print_mapping("requests_by_model", summary.requests_by_model)
+    _print_mapping("requests_by_status", summary.requests_by_status)
     typer.echo("requests_by_hour:")
     if not summary.requests_by_hour:
         typer.echo("  []")
@@ -3721,6 +3755,164 @@ def usage_report(
                 parts = cast("dict[str, int]", bucket[key])
                 rendered = ", ".join(f"{name}: {_fmt_number(count)}" for name, count in parts.items())
                 typer.echo(f"      {key}: {rendered or '[]'}")
+
+
+_USAGE_CHECK_WINDOW = re.compile(r"^(\d+)([smh])$")
+_USAGE_CHECK_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600}
+
+
+def _parse_usage_check_window(raw: str) -> int:
+    """Return the look-back window in seconds for a value like 30s, 15m, or 2h."""
+    match = _USAGE_CHECK_WINDOW.fullmatch((raw or "").strip())
+    if match is None:
+        raise ValueError(raw)
+    amount, unit = match.groups()
+    seconds = int(amount) * _USAGE_CHECK_UNIT_SECONDS[unit]
+    if seconds <= 0:
+        raise ValueError(raw)
+    return seconds
+
+
+@usage_app.command("check")
+def usage_check(
+    access_log: Path | None = typer.Option(
+        None,
+        "--access-log",
+        help="Access log path. Defaults to tfconfig services.edge.access_log.",
+    ),
+    max_staleness: str | None = typer.Option(
+        None,
+        "--max-staleness",
+        help="Breach when the newest record in the log is older than this (same suffixes as --window).",
+    ),
+    window: str = typer.Option(
+        "15m",
+        "--window",
+        help="Look-back window relative to now: a number plus s, m, or h (for example 30s, 15m, 2h).",
+    ),
+    max_failure_rate: float = typer.Option(
+        0.05,
+        "--max-failure-rate",
+        help="Breach when the failure ratio over the window exceeds this value.",
+    ),
+    min_requests: int = typer.Option(
+        5,
+        "--min-requests",
+        help="Report insufficient data and never breach below this many requests in the window.",
+    ),
+    include_client_errors: bool = typer.Option(
+        False,
+        "--include-client-errors",
+        help="Count 4xx responses as failures too. Default counts only 5xx.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit a single machine-readable JSON object instead of one text line.",
+    ),
+) -> None:
+    """Check recent edge failures against a threshold. Exit 1 on breach, 2 on error."""
+    try:
+        window_seconds = _parse_usage_check_window(window)
+    except ValueError:
+        typer.echo(f"Error: invalid window {window!r}, expected a duration like 30s, 15m, or 2h", err=True)
+        raise typer.Exit(2)
+    if not 0 <= max_failure_rate <= 1:
+        typer.echo("Error: --max-failure-rate is a ratio between 0 and 1 (0.05 is five percent)", err=True)
+        raise typer.Exit(2)
+    if min_requests < 0:
+        typer.echo("Error: --min-requests must not be negative", err=True)
+        raise typer.Exit(2)
+    max_staleness_seconds: int | None = None
+    if max_staleness is not None:
+        try:
+            max_staleness_seconds = _parse_usage_check_window(max_staleness)
+        except ValueError:
+            typer.echo(f"Error: invalid --max-staleness {max_staleness!r}, expected like 15m or 2h", err=True)
+            raise typer.Exit(2)
+    if access_log is not None:
+        # An explicit log needs no config: checking a copy taken off the host is the point.
+        log_path = access_log
+    else:
+        config, repo_root = _load_config()
+        log_path = _edge_access_log_path(repo_root, config, None)
+    if not log_path.is_file():
+        # A missing or mistyped log must not look like a healthy cluster.
+        typer.echo(f"Error: access log not found: {log_path}", err=True)
+        raise typer.Exit(2)
+    try:
+        records = select_usage_events(log_path)
+    except OSError as exc:
+        typer.echo(f"Error: cannot read access log {log_path}: {exc}", err=True)
+        raise typer.Exit(2)
+
+    checked_at = datetime.now().astimezone()
+    try:
+        cutoff = checked_at - timedelta(seconds=window_seconds)
+        stale_cutoff = (
+            checked_at - timedelta(seconds=max_staleness_seconds) if max_staleness_seconds is not None else None
+        )
+    except OverflowError:
+        # Exit 1 is "breach": an unrepresentable window must not page anyone.
+        typer.echo("Error: --window or --max-staleness is too large", err=True)
+        raise typer.Exit(2)
+    failure_floor = 400 if include_client_errors else 500
+    requests = 0
+    failures = 0
+    statuses: Counter[str] = Counter()
+    newest_record_at: datetime | None = None
+    for record in records:
+        timestamp = _parse_timestamp(record.get("timestamp"))
+        if timestamp is None:
+            continue
+        if newest_record_at is None or timestamp > newest_record_at:
+            newest_record_at = timestamp
+        if timestamp < cutoff:
+            continue
+        status_code = record.get("status_code")
+        if not isinstance(status_code, int):
+            continue
+        requests += 1
+        statuses[str(status_code)] += 1
+        if is_cluster_failure(record) or status_code >= failure_floor:
+            failures += 1
+
+    failure_rate = failures / requests if requests else 0.0
+    # Too few requests to judge a rate, unless everything that did arrive failed: an all-failure
+    # window is the shape a real outage has on a quiet cluster.
+    insufficient_data = requests < min_requests and (requests == 0 or failures < requests)
+    stale = stale_cutoff is not None and (newest_record_at is None or newest_record_at < stale_cutoff)
+    breached = stale or (not insufficient_data and failure_rate > max_failure_rate)
+
+    if json_output:
+        payload = {
+            "window_seconds": window_seconds,
+            "requests": requests,
+            "failures": failures,
+            "failure_rate": failure_rate,
+            "threshold": max_failure_rate,
+            "min_requests": min_requests,
+            "breached": breached,
+            "insufficient_data": insufficient_data,
+            "stale": stale,
+            "statuses": dict(sorted(statuses.items())),
+            "log_path": str(log_path),
+            "checked_at": checked_at.isoformat(),
+            # Deliberately not a breach: an idle cluster is silent too. A wrapper decides.
+            "newest_record_at": newest_record_at.isoformat() if newest_record_at is not None else None,
+        }
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        result = (
+            "stale_log" if stale else "breach" if breached else "insufficient_data" if insufficient_data else "ok"
+        )
+        typer.echo(
+            f"usage check: window={window} requests={requests} failures={failures} "
+            f"rate={failure_rate * 100:.1f}% threshold={max_failure_rate * 100:.1f}% "
+            f"newest={newest_record_at.isoformat() if newest_record_at is not None else 'none'} result={result}"
+        )
+    if breached:
+        raise typer.Exit(1)
 
 
 @usage_app.command("collect-node-metrics")
@@ -3745,11 +3937,6 @@ def usage_collect_node_metrics(
         "--continuous/--once",
         help="Run continuously. Default is one collection run.",
     ),
-    retention_days: int | None = typer.Option(
-        None,
-        "--retention-days",
-        help="Override log retention days. Defaults to tfconfig services.log_retention_days (3).",
-    ),
 ) -> None:
     """Collect usage snapshots per inference node for hot-loaded model reporting."""
     config, repo_root = _load_config()
@@ -3762,22 +3949,14 @@ def usage_collect_node_metrics(
 
     while True:
         run_count += 1
-        days, jsonl_removed, file_removed = _trim_logs_with_policy(
-            repo_root=repo_root,
-            config=config,
-            node_metrics_path=metrics_path,
-            retention_days=retention_days,
-        )
-
+        # No retention here: `usage trim-logs` is the only trimmer, so this collector never
+        # rewrites a log the edge is appending to.
         snapshots = _collect_node_metric_snapshots(config, timeout=timeout)
         _append_snapshots(metrics_path, snapshots)
 
         typer.echo(f"output: {metrics_path}")
         typer.echo(f"run: {run_count}")
         typer.echo(f"samples_written: {len(snapshots)}")
-        typer.echo(f"retention_days: {days}")
-        typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-        typer.echo(f"pruned_log_files: {file_removed}")
         _print_snapshot_summary(snapshots)
 
         if not continuous:
@@ -3801,16 +3980,30 @@ def usage_trim_logs(
 ) -> None:
     """Trim local TF logs with one shared retention policy."""
     config, repo_root = _load_config()
-    metrics_path = _usage_metrics_log_path(repo_root, node_metrics_log)
-    days, jsonl_removed, file_removed = _trim_logs_with_policy(
+    days = retention_days if retention_days is not None else config.services.log_retention_days
+    if days <= 0:
+        typer.echo("Error: retention days must be positive", err=True)
+        raise typer.Exit(1)
+    summary = trim_local_logs(
         repo_root=repo_root,
         config=config,
-        node_metrics_path=metrics_path,
-        retention_days=retention_days,
+        node_metrics_log_path=_usage_metrics_log_path(repo_root, node_metrics_log),
+        retention_days=days,
     )
+    skipped = [result.path for result in summary.jsonl_results if result.skipped]
     typer.echo(f"retention_days: {days}")
-    typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-    typer.echo(f"pruned_log_files: {file_removed}")
+    typer.echo(f"trimmed_jsonl_records: {sum(result.removed_lines for result in summary.jsonl_results)}")
+    typer.echo(f"pruned_log_files: {sum(1 for result in summary.file_results if result.removed)}")
+    typer.echo(f"skipped_jsonl_files: {len(skipped)}")
+    if skipped:
+        # A busy log makes the swap impossible; say so instead of reporting a quiet success.
+        typer.echo(
+            "Warning: left these logs intact because they were rotated or could not be rewritten: "
+            + ", ".join(skipped),
+            err=True,
+        )
+        # Retention that did not happen is not a success: let the cron wrapper see it.
+        raise typer.Exit(1)
 
 
 @olla_app.command("smoke")
@@ -3956,11 +4149,23 @@ def edge_serve(
         "--metrics-timeout",
         help="Per-node oMLX health/status timeout in seconds for edge metrics collector.",
     ),
+    upstream_timeout: float = typer.Option(
+        EDGE_DEFAULT_TIMEOUT_SECONDS,
+        "--timeout",
+        help=f"Upstream Olla I/O timeout in seconds for edge serve (default {EDGE_DEFAULT_TIMEOUT_SECONDS:g}).",
+    ),
 ) -> None:
     """Run the minimal TF edge proxy."""
     cluster_config, repo_root = _load_config()
     if metrics_interval_seconds <= 0:
         typer.echo("Error: metrics interval seconds must be positive", err=True)
+        raise typer.Exit(1)
+    if upstream_timeout < EDGE_MIN_TIMEOUT_SECONDS:
+        typer.echo(
+            f"Error: upstream timeout must be at least {EDGE_MIN_TIMEOUT_SECONDS:g} seconds: "
+            "Olla's backend timeout plus its connect attempt",
+            err=True,
+        )
         raise typer.Exit(1)
     resolved_port = resolve_port(port, default=cluster_config.services.edge_port)
     resolved_olla_base_url = olla_base_url or local_base_url(cluster_config.services.olla_port)
@@ -3977,12 +4182,6 @@ def edge_serve(
 
     access_log_path = _edge_access_log_path(repo_root, cluster_config, access_log)
     metrics_path = _usage_metrics_log_path(repo_root, None)
-    days, jsonl_removed, file_removed = _trim_logs_with_policy(
-        repo_root=repo_root,
-        config=cluster_config,
-        node_metrics_path=metrics_path,
-        retention_days=None,
-    )
 
     def log_sink(line: str) -> None:
         access_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3991,6 +4190,7 @@ def edge_serve(
 
     client_ids = sorted({client.client_id for client in clients_by_key.values()})
     usage_admin_token = os.environ.get(USAGE_TOKEN_ENV, "").strip() or None
+    build_info = resolve_build_info(repo_root)
 
     edge_proxy_config = EdgeProxyConfig(
         olla_base_url=resolved_olla_base_url,
@@ -3999,9 +4199,11 @@ def edge_serve(
         repo_root=repo_root,
         access_log_sink=log_sink,
         model_catalog=_edge_model_catalog_from_config(cluster_config),
+        timeout=upstream_timeout,
         usage_admin_token=usage_admin_token,
         usage_access_log_path=access_log_path,
         usage_node_metrics_path=metrics_path,
+        build=build_info,
         inspector=EdgeInspectorConfig(
             enabled=cluster_config.services.edge_inspector_enabled,
             output_dir=(
@@ -4012,6 +4214,7 @@ def edge_serve(
         ),
     )
     typer.echo(f"serving_edge: http://{host}:{resolved_port}")
+    typer.echo(_build_line(build_info))
     typer.echo(f"olla_base_url: {resolved_olla_base_url}")
     typer.echo(f"clients: {', '.join(client_ids)}")
     typer.echo(f"api_key_count: {len(clients_by_key)}")
@@ -4024,21 +4227,13 @@ def edge_serve(
         typer.echo(f"edge_inspector: enabled output_dir={edge_proxy_config.inspector.output_dir}")
     else:
         typer.echo("edge_inspector: disabled")
-    typer.echo(f"retention_days: {days}")
-    typer.echo(f"trimmed_jsonl_records: {jsonl_removed}")
-    typer.echo(f"pruned_log_files: {file_removed}")
+    typer.echo("log_retention: on_demand (thunder-forge usage trim-logs)")
 
     stop_metrics_collector = threading.Event()
 
     def _run_edge_metrics_collector() -> None:
         while not stop_metrics_collector.is_set():
             try:
-                _, _, _ = _trim_logs_with_policy(
-                    repo_root=repo_root,
-                    config=cluster_config,
-                    node_metrics_path=metrics_path,
-                    retention_days=None,
-                )
                 snapshots = _collect_node_metric_snapshots(cluster_config, timeout=metrics_timeout)
                 if snapshots:
                     _append_snapshots(metrics_path, snapshots)

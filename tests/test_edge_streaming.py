@@ -141,8 +141,32 @@ def test_stream_failure_sends_only_one_http_response(exchange, failure):
     assert len(records) == 1
     record = json.loads(records[0])
     assert record["status_code"] == (502 if failure else 200)
+    assert record["stream"] is True
+    assert record["headers_sent"] is (failure not in ("connect", None))
+    assert record["error_kind"] == (
+        "edge_connect" if failure == "connect" else "stream_aborted" if failure else ""
+    )
     if failure != "connect":
         assert record["olla_endpoint"] == "infer-01"
+
+
+def test_stream_timeout_before_headers_sends_504(exchange):
+    def upstream(request):
+        raise httpx.ReadTimeout("fixture read timeout", request=request)
+
+    records = []
+    config = edge.EdgeProxyConfig(
+        olla_base_url="http://olla.test", clients_by_key={"fixture-key": edge.EdgeClient("fixture")},
+        access_log_sink=records.append,
+    )
+    wire = exchange(config, upstream)
+    assert wire.count(b"HTTP/1.0 ") == 1
+    assert wire.startswith(b"HTTP/1.0 504")
+    record = json.loads(records[0])
+    assert record["status_code"] == 504
+    assert record["stream"] is True
+    assert record["headers_sent"] is False
+    assert record["error_kind"] == "edge_timeout"
 
 
 @pytest.mark.parametrize("inspect", [False, True])
@@ -180,3 +204,91 @@ def test_stream_capture_is_optional_and_bounded(exchange, monkeypatch, tmp_path,
         assert response["body_truncated"] is True
     else:
         assert not list(tmp_path.glob("*/requests.jsonl"))
+
+
+class _DisconnectingClient:
+    """A client connection whose writes fail after the headers, like a client that hangs up."""
+
+    def __init__(self, request: bytes, *, fail_writes_after: int) -> None:
+        self._request = request
+        self._allowed = fail_writes_after
+        self.writes = 0
+
+    def makefile(self, mode: str, *args: object, **kwargs: object):
+        if "r" in mode:
+            import io
+
+            return io.BytesIO(self._request)
+        return self
+
+    def sendall(self, data: bytes) -> None:
+        self.writes += 1
+        if self.writes > self._allowed:
+            raise BrokenPipeError("client hung up")
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def shutdown(self, how: int) -> None:
+        return None
+
+
+def test_stream_client_disconnect_is_recorded_as_client_aborted(monkeypatch) -> None:
+    """A client that hangs up mid-stream must leave a record, not an unlogged request."""
+    handlers: list[object] = []
+
+    def server(_address, handler):
+        handlers.append(handler)
+        return SimpleNamespace(serve_forever=lambda: None)
+
+    monkeypatch.setattr(edge, "ThreadingHTTPServer", server)
+
+    def upstream(request):
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream", "X-Olla-Endpoint": "infer-01"},
+            stream=httpx.ByteStream(b"data: one\n\ndata: two\n\n"),
+        )
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        edge.httpx,
+        "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(upstream), **kwargs),
+    )
+    records: list[str] = []
+    config = edge.EdgeProxyConfig(
+        olla_base_url="http://olla.test",
+        clients_by_key={"fixture-key": edge.EdgeClient("fixture")},
+        access_log_sink=records.append,
+    )
+    edge.serve_edge_proxy(host="127.0.0.1", port=0, config=config)
+
+    body = json.dumps({"model": "agent", "messages": [], "stream": True}).encode()
+    request = (
+        b"POST /v1/chat/completions HTTP/1.0\r\n"
+        b"Authorization: Bearer fixture-key\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    # The status line plus headers go out in the first write; the body write then fails.
+    handlers[0](_DisconnectingClient(request, fail_writes_after=1), ("127.0.0.1", 1234), None)
+
+    assert len(records) == 1
+    record = json.loads(records[0])
+    assert record["stream"] is True
+    assert record["headers_sent"] is True
+    assert record["error_kind"] == "client_aborted"
+    assert config.active_requests == {}
+
+    # A client that hangs up while the headers are written received nothing at all.
+    records.clear()
+    handlers[0](_DisconnectingClient(request, fail_writes_after=0), ("127.0.0.1", 1234), None)
+
+    assert len(records) == 1
+    headless = json.loads(records[0])
+    assert headless["headers_sent"] is False
+    assert headless["error_kind"] == "client_aborted"
