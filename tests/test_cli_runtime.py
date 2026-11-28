@@ -2790,3 +2790,20 @@ def test_status_view_reads_counts_the_anonymous_edge_publishes() -> None:
 
     assert view["loaded_count"] == 1
     assert view["distinct_count"] == "-"
+
+
+def test_rich_status_shows_the_counts_the_anonymous_edge_publishes(capsys) -> None:
+    """The default `cluster status` must not print 0 loaded over a payload that said 1."""
+    from rich.console import Console
+
+    from thunder_forge.cli import _print_cluster_status_rich
+
+    reduced = {
+        "summary": {"inference_total": 1, "inference_healthy": 1, "loaded_models": 1, "readiness": "warm"},
+        "inference": [{"name": "msm1", "health": "ok", "models": "ok"}],
+    }
+
+    _print_cluster_status_rich(reduced, console=Console(width=200))
+
+    written = capsys.readouterr().out
+    assert "Distinct models 0" not in written
