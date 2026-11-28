@@ -39,6 +39,8 @@
   <div class="card"><h2>Requests per hour by node</h2><canvas id="nodeChart"></canvas></div>
   <div class="card"><h2>Latency p50 / p95 / max per hour</h2><canvas id="latencyChart"></canvas></div>
   <div class="card"><h2>Peak parallel requests per hour</h2><canvas id="concurrencyChart"></canvas></div>
+  <div class="card"><h2>Cold cache per hour</h2><canvas id="coldChart"></canvas>
+    <div class="muted" id="coldNote"></div></div>
   <div class="card"><h2>Node load: max active requests per hour</h2><canvas id="loadChart"></canvas></div>
   <div class="card"><h2>Requests per hour by user</h2><canvas id="userChart"></canvas></div>
   <div class="card"><h2>Consumed time by user</h2><canvas id="consumedChart"></canvas></div>
@@ -93,6 +95,7 @@ const series = (entries) => entries.map(([name, values], i) => ({
   borderColor: colors[i % colors.length],
   tension: 0.2,
 }));
+const percent = (value) => Math.round(value * 100) + "%";
 
 let pendingUser = params.get("user") || "";
 
@@ -124,10 +127,14 @@ async function load() {
   const loadNodes = [...new Set(Object.values(loadByHour).flatMap((v) => Object.keys(v)))].sort();
 
   const selected = data.users.selected || [];
+  const cache = data.cache || {};
+  const coldTotal = cache.total || {};
   el("meta").textContent = [
     data.period,
     "requests " + data.requests.total,
     "consumed " + (data.consumed_ms.total / 3600000).toFixed(1) + " h",
+    // A period without cache samples has no share: report the absence, not 0%.
+    coldTotal.cold || coldTotal.warm ? "cold " + percent(coldTotal.cold_share || 0) : "cold \u2013",
     "nodes " + Object.keys(data.requests.by_node).length,
     selected.length ? "user " + selected.join(", ") : "",
     data.period === "all" ? "all days merged into hour-of-day buckets" : "",
@@ -154,6 +161,41 @@ async function load() {
 
   draw("concurrencyChart", bar(hours, hours.map((hour) => conc[hour] ?? 0),
     "peak parallel", colors[3] + "99"));
+
+  const coldByHour = cache.by_hour || {};
+  const coldLatency = (cache.latency || {}).hour || {};
+  // A bucket with no warm samples reports p50 0; plotting that would fake a zero millisecond turn.
+  const warmP50 = (hour) => {
+    const warm = (coldLatency[hour] || {}).warm;
+    return warm && warm.count ? warm.p50 : null;
+  };
+  // Without a single warm turn the ms axis and its ticks would suggest measurements that do not exist.
+  const hasWarm = hours.some((hour) => warmP50(hour) !== null);
+  // The share answers "when", the warm p50 line answers "how much slower", so both share one card.
+  draw("coldChart", {
+    type: "bar",
+    data: {
+      labels: hours,
+      datasets: [
+        { label: "cold share", data: hours.map((hour) => (coldByHour[hour] || {}).cold_share ?? null),
+          backgroundColor: colors[4] + "99", yAxisID: "y" },
+        { type: "line", label: "warm p50 ms", data: hours.map(warmP50),
+          borderColor: colors[1], tension: 0.2, yAxisID: "y1" },
+      ],
+    },
+    options: {
+      ...options,
+      scales: {
+        x: options.scales.x,
+        y: { ...options.scales.y, ticks: { callback: percent, maxTicksLimit: 6 } },
+        y1: { position: "right", beginAtZero: true, grid: { drawOnChartArea: false }, display: hasWarm },
+      },
+    },
+  });
+  // A page newer than the running edge sees no cache section; name the TTL only when it is known.
+  el("coldNote").textContent = "cold share of edge-log requests, not a count \u00b7 cold: no session id, "
+    + "first turn, or idle gap" + (cache.ttl_seconds ? " > " + cache.ttl_seconds + " s" : "")
+    + " \u00b7 node load and memory stay cluster-wide";
 
   draw("loadChart", line(series(loadNodes.map((node) => [
     node, hours.map((hour) => ((loadByHour[hour] || {})[node] || {}).active_max || 0),

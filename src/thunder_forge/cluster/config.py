@@ -19,6 +19,7 @@ from thunder_forge.cluster.ports import (
     parse_port,
     resolve_port,
 )
+from thunder_forge.cluster.usage import DEFAULT_STICKY_IDLE_TTL_SECONDS
 
 TF_CONFIG_FILENAME = "tfconfig.yaml"
 TF_CONFIG_EXAMPLE_FILENAME = "tfconfig.example.yaml"
@@ -849,7 +850,7 @@ def generate_olla_config(config: ClusterConfig, *, port: int | None = None, repo
             "read_timeout": "120s",
             "sticky_sessions": {
                 "enabled": True,
-                "idle_ttl_seconds": 600,
+                "idle_ttl_seconds": DEFAULT_STICKY_IDLE_TTL_SECONDS,
                 "max_sessions": 10000,
                 "key_sources": ["session_header"],
             },

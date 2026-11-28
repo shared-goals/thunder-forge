@@ -1,8 +1,6 @@
 # Daily Summary Contract
 
-**Status:** Implemented (MVP)  
-**Last Updated:** 2026-06-02  
-**Owner:** Thunder Forge
+**Status:** Implemented (MVP) · **Last Updated:** 2026-11-27 · **Owner:** Thunder Forge
 
 ## Overview
 
@@ -47,6 +45,7 @@ Expected keys:
 - `model`
 - `status_code`
 - `latency_ms`
+- `sticky_id` (empty when the client sent no `X-Olla-Session-ID`)
 - `olla_endpoint`
 - optional token fields: `prompt_tokens`, `completion_tokens`, `total_tokens`
 
@@ -92,6 +91,11 @@ Expected keys:
 - `tokens.by_model` (when available)
 - `latency_ms.by_hour` (nearest-rank `p50`, `p95`, `max`, and `count` per 0-23 bucket; with
   `period=all` the buckets are hour-of-day across every retained day, not distinct days)
+- `cache.ttl_seconds` (the Olla sticky-session idle TTL the cold/warm split used: `600` s, the
+  `DEFAULT_STICKY_IDLE_TTL_SECONDS` that the generated Olla config also writes)
+- `cache.total`, `cache.by_hour`, `cache.by_client` (`cold`, `warm`, `cold_share` — see below)
+- `cache.latency.total` and `cache.latency.hour` (`cold` and `warm` each carry `count`, `p50`, `p95`, so
+  the cold tail is read against the warm tail instead of against one merged distribution)
 - `concurrency.peak_by_hour` (maximum overlapping request intervals per 0-23 bucket; an
   interval belongs to the hour the request finished in)
 - `node_metrics.load_by_hour` (per hour and node: `samples`, `active_max`, `active_avg`,
@@ -101,6 +105,44 @@ Expected keys:
 - `invalid_lines`
 
 `consumed_ms` is defined as sum of edge-observed `latency_ms`.
+
+## Cold and Warm Cache
+
+A request is **cold** when its prefix cache on the node it landed on cannot be reused, and **warm**
+otherwise. `latency_ms` is the full request duration, and its tail is mostly cold prefills, so the split
+is what makes a slow hour readable.
+
+A request counts as cold when any of these holds:
+
+1. `sticky_id` is empty - without a session id Olla picks a node by least-connections on every turn, so
+   the previous prefix sits on an unknown node;
+2. it is the first request of that `sticky_id` inside the reported period;
+3. the gap from the previous request of the same `sticky_id` exceeds `cache.ttl_seconds` - the sticky
+   affinity expired, so the next turn may have gone to another node. The gap runs between request
+   starts (`timestamp - latency_ms`), the same sliding window Olla keeps.
+
+The cache is per node and never shared between nodes, so a session that keeps its affinity keeps its
+prefix warm; the metric measures affinity, not model behaviour.
+
+Boundaries of the definition:
+
+- the period and the `?user=` filter are applied **before** counting, so a session that started before
+  the period produces one cold request at its first turn inside the period;
+- a record with no readable `timestamp` stays outside the cold/warm split (rules 2 and 3 need a start
+  time); it still counts in `requests` and `latency_ms`, under the `unknown` hour (only reachable with
+  `period=all`), so `cache.total` can be smaller than `requests.total`;
+- a client that never sends `X-Olla-Session-ID` reads as 100% cold, because every one of its requests
+  falls under rule 1 - check `cache.by_client` before reading the aggregate share;
+- the window belongs to the `sticky_id`, not to the client: two clients behind one shared session id
+  share one window, so `cache.by_client` follows the session, not the caller;
+- the split measures affinity, not observed cache state: a session that fails over inside the TTL (node
+  restart, dropped endpoint) keeps its id and therefore stays warm, even though the new node has no
+  prefix for it - read the cold share as a lower bound on cache misses;
+- records are classified in request-start order, not file order: the edge writes a record when the
+  request finishes, so a long cold turn is often logged after the short follow-up that followed it;
+- `cold_share` is a share of requests, not of time or tokens; `0.0` for a bucket with no requests;
+- a latency bucket with no requests of that kind reports `{count: 0, p50: 0, p95: 0}`, which means "no
+  samples", not zero milliseconds.
 
 ## HTTP Contract
 
@@ -126,8 +168,9 @@ are anonymous and GET-only.
 | `GET /usage/assets/<file>` | vendored dashboard assets (`usage.html`, `chart.umd.min.js`); `404` for anything else |
 
 `?user=` accepts a client identity, repeated or comma-separated; it narrows requests, consumed time,
-latency and concurrency. Node load and model memory come from node snapshots, which have no client
-dimension, so they stay cluster-wide - the dashboard says so when a filter is active.
+latency, concurrency and the cold/warm split. Node load and model memory come from node snapshots,
+which have no client dimension, so they stay cluster-wide - the cold cache card always says so, and
+the header repeats it when a filter is active.
 
 `period` defaults to the edge host's local date. Authentication accepts only
 `Authorization: Bearer <token>`: a `?token=` query would be recorded by the Caddy/gost

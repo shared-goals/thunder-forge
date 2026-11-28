@@ -14,6 +14,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _DEFAULT_MODELS_EXCLUDED_FROM_USAGE = {"markitdown"}
+# Sliding window of Olla sticky sessions. The generated Olla config writes this number and cold/warm
+# accounting reads it, so the constant lives here: the aggregator stays importable without config.
+DEFAULT_STICKY_IDLE_TTL_SECONDS = 600
 
 
 def resolve_usage_period(raw: str) -> str:
@@ -130,6 +133,71 @@ def peak_concurrency(intervals: list[tuple[datetime, datetime]]) -> int:
     return peak
 
 
+def _empty_cache_latency() -> dict[str, list[int]]:
+    return {"cold": [], "warm": []}
+
+
+@dataclass(frozen=True)
+class CacheBucket:
+    """Cold/warm split of one scope; the share is derived, never stored."""
+
+    cold: int = 0
+    warm: int = 0
+
+    @classmethod
+    def from_counts(cls, counts: Counter[str]) -> CacheBucket:
+        return cls(cold=counts.get("cold", 0), warm=counts.get("warm", 0))
+
+    def to_json_dict(self) -> dict[str, object]:
+        total = self.cold + self.warm
+        return {
+            "cold": self.cold,
+            "warm": self.warm,
+            "cold_share": round(self.cold / total, 4) if total else 0.0,
+        }
+
+
+@dataclass(frozen=True)
+class CacheLatency:
+    """Latency percentiles of the cold and the warm turns; both kinds are always present."""
+
+    cold: dict[str, int] = field(default_factory=dict)
+    warm: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_samples(cls, samples: dict[str, list[int]]) -> CacheLatency:
+        return cls(cold=_latency_core(samples["cold"]), warm=_latency_core(samples["warm"]))
+
+    def to_json_dict(self) -> dict[str, dict[str, int]]:
+        return {"cold": self.cold, "warm": self.warm}
+
+
+def _latency_core(values: list[int]) -> dict[str, int]:
+    return {
+        "count": len(values),
+        "p50": nearest_rank_percentile(values, 50),
+        "p95": nearest_rank_percentile(values, 95),
+    }
+
+
+def _request_start_key(payload: dict[str, object]) -> tuple[bool, datetime]:
+    """Sort key placing a request at its start time; an unreadable record sorts last."""
+    timestamp = _parse_timestamp(payload.get("timestamp"))
+    latency_ms = payload.get("latency_ms")
+    if timestamp is None or not isinstance(latency_ms, int):
+        return True, datetime.min.replace(tzinfo=UTC)
+    return False, timestamp - timedelta(milliseconds=latency_ms)
+
+
+def _is_cold(started: datetime, previous: datetime | None) -> bool:
+    """True when a session turn cannot reuse the node's prefix cache.
+
+    No previous turn in the period means no gap to rely on; a gap longer than the sticky TTL means
+    affinity already expired.
+    """
+    return previous is None or (started - previous).total_seconds() > DEFAULT_STICKY_IDLE_TTL_SECONDS
+
+
 def _as_non_negative_int(raw: object) -> int | None:
     """Accept ints and finite floats; oMLX reports sizes as either."""
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
@@ -195,6 +263,11 @@ class DailyUsageSummary:
     requests_by_hour: dict[str, dict[str, object]] = field(default_factory=dict)
     requests_by_node_hour: dict[str, dict[str, int]] = field(default_factory=dict)
     latency_ms_by_hour: dict[str, dict[str, int]] = field(default_factory=dict)
+    cache_total: CacheBucket = field(default_factory=CacheBucket)
+    cache_by_hour: dict[str, CacheBucket] = field(default_factory=dict)
+    cache_by_client: dict[str, CacheBucket] = field(default_factory=dict)
+    cache_latency_total: CacheLatency = field(default_factory=CacheLatency)
+    cache_latency_by_hour: dict[str, CacheLatency] = field(default_factory=dict)
     peak_concurrency_by_hour: dict[str, int] = field(default_factory=dict)
     node_metrics_present: bool = False
     node_hot_loaded_models: dict[str, list[str]] = field(default_factory=dict)
@@ -234,6 +307,16 @@ class DailyUsageSummary:
             },
             "latency_ms": {
                 "by_hour": self.latency_ms_by_hour,
+            },
+            "cache": {
+                "ttl_seconds": DEFAULT_STICKY_IDLE_TTL_SECONDS,
+                "total": self.cache_total.to_json_dict(),
+                "by_hour": {hour: bucket.to_json_dict() for hour, bucket in self.cache_by_hour.items()},
+                "by_client": {client: bucket.to_json_dict() for client, bucket in self.cache_by_client.items()},
+                "latency": {
+                    "total": self.cache_latency_total.to_json_dict(),
+                    "hour": {hour: latency.to_json_dict() for hour, latency in self.cache_latency_by_hour.items()},
+                },
             },
             "concurrency": {"peak_by_hour": self.peak_concurrency_by_hour},
             "invalid_lines": self.invalid_lines,
@@ -280,12 +363,21 @@ def summarize_daily_usage(
     consumed_ms_total = 0
     latency_values_by_hour: dict[str, list[int]] = defaultdict(list)
     intervals_by_hour: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+    cache_by_hour: dict[str, Counter[str]] = defaultdict(Counter)
+    cache_by_client: dict[str, Counter[str]] = defaultdict(Counter)
+    cache_latency_values: dict[str, list[int]] = _empty_cache_latency()
+    cache_latency_values_by_hour: dict[str, dict[str, list[int]]] = defaultdict(_empty_cache_latency)
+    # Tracked after the period and client filters, so the first kept request of a session is cold.
+    last_seen_by_session: dict[str, datetime] = {}
     excluded_model_names = _normalize_excluded_models(excluded_models)
     selected_clients = {item.strip() for item in client_ids or [] if item and item.strip()} or None
     seen_clients: set[str] = set()
 
     records, invalid = _load_jsonl_lines(access_log_path)
     invalid_lines += invalid
+    # The edge writes a record when the request finishes, so log order is completion order: a long
+    # cold turn can be logged after the short follow-up that follows it. Classify in start order.
+    records.sort(key=_request_start_key)
     for payload in records:
         timestamp = _parse_timestamp(payload.get("timestamp"))
         if not _in_period(timestamp, period):
@@ -315,9 +407,11 @@ def summarize_daily_usage(
         model_name = model.strip() if isinstance(model, str) else ""
         hour_bucket = _hour_bucket(timestamp)
         latency_values_by_hour[hour_bucket].append(latency_ms)
+        # The TTL window Olla keeps starts at request arrival, not at completion.
+        started_at = timestamp - timedelta(milliseconds=latency_ms) if timestamp is not None else None
         if timestamp is not None:
             # An interval belongs to the hour the request finished in.
-            intervals_by_hour[hour_bucket].append((timestamp - timedelta(milliseconds=latency_ms), timestamp))
+            intervals_by_hour[hour_bucket].append((started_at, timestamp))
 
         requests_by_user[client_id] += 1
         consumed_ms_by_user[client_id] += latency_ms
@@ -338,6 +432,25 @@ def summarize_daily_usage(
             requests_by_model[model_name] += 1
             consumed_ms_by_model[model_name] += latency_ms
 
+        session_id = payload.get("sticky_id")
+        session_key = session_id.strip() if isinstance(session_id, str) else ""
+        if started_at is None:
+            # No start time: the turn cannot be placed in time, so it stays outside the split.
+            continue
+        if not session_key:
+            # Rule 1: least-connections may pick another node on every turn.
+            cold = True
+        else:
+            previous_started_at = last_seen_by_session.get(session_key)
+            cold = _is_cold(started_at, previous_started_at)
+            # Records arrive sorted by start, so the window only moves forward.
+            last_seen_by_session[session_key] = started_at
+        cache_kind = "cold" if cold else "warm"
+        cache_by_hour[hour_bucket][cache_kind] += 1
+        cache_by_client[client_id][cache_kind] += 1
+        cache_latency_values[cache_kind].append(latency_ms)
+        cache_latency_values_by_hour[hour_bucket][cache_kind].append(latency_ms)
+
     requests_by_hour_payload: dict[str, dict[str, object]] = {
         hour: {
             "requests": count,
@@ -349,16 +462,18 @@ def summarize_daily_usage(
     }
 
     latency_ms_by_hour: dict[str, dict[str, int]] = {
-        hour: {
-            "count": len(values),
-            "p50": nearest_rank_percentile(values, 50),
-            "p95": nearest_rank_percentile(values, 95),
-            "max": max(values),
-        }
+        hour: {**_latency_core(values), "max": max(values)}
         for hour, values in sorted(latency_values_by_hour.items())
     }
     peak_concurrency_by_hour: dict[str, int] = {
         hour: peak_concurrency(intervals) for hour, intervals in sorted(intervals_by_hour.items())
+    }
+    cache_total_counts: Counter[str] = Counter()
+    for hour_counts in cache_by_hour.values():
+        cache_total_counts.update(hour_counts)
+    cache_by_client_payload = {
+        client: CacheBucket.from_counts(counts)
+        for client, counts in sorted(cache_by_client.items(), key=lambda item: (-sum(item[1].values()), item[0]))
     }
 
     node_metrics_path_str = ""
@@ -479,6 +594,13 @@ def summarize_daily_usage(
         requests_by_hour=requests_by_hour_payload,
         requests_by_node_hour=_ordered_nested_counter(requests_by_node_hour),
         latency_ms_by_hour=latency_ms_by_hour,
+        cache_total=CacheBucket.from_counts(cache_total_counts),
+        cache_by_hour={hour: CacheBucket.from_counts(counts) for hour, counts in sorted(cache_by_hour.items())},
+        cache_by_client=cache_by_client_payload,
+        cache_latency_total=CacheLatency.from_samples(cache_latency_values),
+        cache_latency_by_hour={
+            hour: CacheLatency.from_samples(samples) for hour, samples in sorted(cache_latency_values_by_hour.items())
+        },
         peak_concurrency_by_hour=peak_concurrency_by_hour,
         node_metrics_present=node_metrics_present,
         node_hot_loaded_models=_ordered_list_map(node_hot_loaded_models),
